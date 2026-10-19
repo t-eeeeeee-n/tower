@@ -301,6 +301,25 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .field { display: grid; gap: 5px; margin-bottom: 14px; }
 .field > span { color: var(--muted); }
 .field[hidden] { display: none; }
+.agent-picker { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-opt {
+  display: inline-flex; flex-direction: column; align-items: flex-start; justify-content: center;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+.agent-opt:hover:not([aria-disabled="true"]) { background: var(--raise); }
+.agent-opt[aria-checked="true"] {
+  border-color: var(--st-running);
+  background: color-mix(in srgb, var(--st-running) 16%, transparent);
+  font-weight: 600;
+}
+.agent-opt[aria-disabled="true"] { color: var(--faint); border-style: dashed; cursor: not-allowed; }
+.agent-opt small { font-size: 10.5px; font-weight: 400; color: var(--faint); }
+.primary-btn:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
 .hint { color: var(--faint); font-size: 12px; }
 .row { display: flex; gap: 8px; }
 .row input { flex: 1; }

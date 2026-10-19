@@ -56,6 +56,11 @@ fn create_session(
 }
 
 #[tauri::command]
+fn installed_agents() -> Vec<Agent> {
+    agent::installed()
+}
+
+#[tauri::command]
 fn create_worktree(state: State<'_, App>, cwd: String, branch: String) -> Result<String, String> {
     git::create_worktree(&git::git_program(&state.manager.shell.program), &cwd, &branch)
 }
@@ -129,6 +134,7 @@ pub fn run() {
             list_sessions,
             create_session,
             create_worktree,
+            installed_agents,
             notify,
             attach_session,
             peek_sessions,

@@ -37,6 +37,32 @@ impl Agent {
     pub fn infers_status(self) -> bool {
         self == Agent::Antigravity
     }
+
+    /// 起動に使うコマンド名
+    fn command(self) -> Option<&'static str> {
+        match self {
+            Agent::Shell => None,
+            Agent::Claude => Some("claude"),
+            Agent::Codex => Some("codex"),
+            Agent::Copilot => Some("copilot"),
+            Agent::Antigravity => Some("agy"),
+        }
+    }
+}
+
+/// PATH から起動できるエージェント（bash は常に含む）。
+/// セッションの bash は Tower の環境変数を引き継ぐので、Tower の PATH で調べれば、セッションで起動できるかと一致する。
+pub fn installed() -> Vec<Agent> {
+    let dirs: Vec<_> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    [Agent::Claude, Agent::Codex, Agent::Copilot, Agent::Antigravity, Agent::Shell]
+        .into_iter()
+        .filter(|a| a.command().is_none_or(|c| find_in(&dirs, c)))
+        .collect()
+}
+
+/// npm で入れたコマンドは拡張子なし（Git Bash 用）と .cmd の形で置かれるので、どちらも探す
+fn find_in(dirs: &[std::path::PathBuf], name: &str) -> bool {
+    dirs.iter().any(|d| ["", ".exe", ".cmd", ".bat"].iter().any(|ext| d.join(format!("{name}{ext}")).is_file()))
 }
 
 /// 画面の変化が止まってから「完了」とみなすまでの時間
@@ -85,6 +111,17 @@ mod tests {
         assert_eq!(Agent::Copilot.launch_line("", true).unwrap(), "copilot --continue || copilot\r");
         assert_eq!(Agent::Codex.launch_line("", false).unwrap(), "codex -p tower\r");
         assert!(Agent::Shell.launch_line("", true).is_none());
+    }
+
+    #[test]
+    fn finds_commands_on_path() {
+        let dir = std::env::temp_dir().join(format!("tower-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("codex.cmd"), "").unwrap();
+        let dirs = vec![dir.clone()];
+        assert!(find_in(&dirs, "codex"));
+        assert!(!find_in(&dirs, "agy"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

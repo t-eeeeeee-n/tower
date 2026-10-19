@@ -48,7 +48,7 @@ const AGENT_LABEL: Record<Agent, string> = {
 
 // 新規作成ダイアログでエージェントを選んだときの注意書き
 const AGENT_HINT: Partial<Record<Agent, string>> = {
-  codex: "初回だけ、Codex の /hooks で Tower の hook を信頼してください。承認するまで状態は「起動中」のままです。",
+  codex: "初回だけ、Codex の画面に出る「Hooks need review」で「Trust all and continue」を選んでください。",
   copilot: "状態の表示には Copilot CLI 1.0 以降が必要です（npm i -g @github/copilot で更新）。",
   antigravity: "hooks を使えないため、状態は画面の様子から推測します（入力待ちの判定は目安です）。",
 };
@@ -491,22 +491,76 @@ function renderOverview(waitingCount: number, total: number) {
 const dialog = $<HTMLDialogElement>("new-dialog");
 const fCwd = $<HTMLInputElement>("f-cwd");
 const fName = $<HTMLInputElement>("f-name");
-const fAgent = $<HTMLSelectElement>("f-agent");
+// ---------- エージェントの選択 ----------
+// 初回は何も選ばずに自分で選んでもらい、2回目以降は前回のものを選んだ状態で開く。
+// PATH に無いエージェントは選べないようにする。
 
-function lastAgent(): Agent {
+const AGENT_ORDER: Agent[] = ["claude", "codex", "copilot", "antigravity", "shell"];
+const PICKER_LABEL: Record<Agent, string> = { ...AGENT_LABEL, shell: "bash だけ" };
+let pickedAgent: Agent | null = null;
+let installedAgents = new Set<Agent>(AGENT_ORDER);
+
+function savedAgent(): Agent | null {
   try {
     const a = localStorage.getItem("lastAgent");
     if (a && a in AGENT_LABEL) return a as Agent;
   } catch {
-    /* 読めなければ既定値 */
+    /* 読めなければ未選択にする */
   }
-  return "claude";
+  return null;
 }
 
-function showAgentHint() {
-  const hint = AGENT_HINT[fAgent.value as Agent];
+function renderPicker() {
+  const focusable = pickedAgent ?? AGENT_ORDER.find((a) => installedAgents.has(a));
+  $("f-agents").replaceChildren(
+    ...AGENT_ORDER.map((a) => {
+      const ok = installedAgents.has(a);
+      const b = el("button", "agent-opt");
+      b.type = "button";
+      b.dataset.agent = a;
+      b.setAttribute("role", "radio");
+      b.setAttribute("aria-checked", String(a === pickedAgent));
+      // disabled にするとマウスを乗せても説明が出ないので、見た目と操作だけ無効にする
+      b.setAttribute("aria-disabled", String(!ok));
+      b.tabIndex = a === focusable ? 0 : -1;
+      b.append(el("span", "", PICKER_LABEL[a]));
+      if (!ok) {
+        b.append(el("small", "", "未インストール"));
+        b.title = `${PICKER_LABEL[a]} が見つかりません（PATH にありません）`;
+      }
+      b.onclick = () => ok && pickAgent(a);
+      return b;
+    }),
+  );
+  const hint = pickedAgent ? AGENT_HINT[pickedAgent] : "エージェントを選んでください";
   $("f-agent-hint").textContent = hint ?? "";
   $("f-agent-hint").hidden = !hint;
+  $<HTMLButtonElement>("f-submit").disabled = !pickedAgent;
+}
+
+function pickAgent(a: Agent) {
+  pickedAgent = a;
+  renderPicker();
+  $("f-agents").querySelector<HTMLElement>(`[data-agent="${a}"]`)?.focus();
+}
+
+$("f-agents").onkeydown = (ev) => {
+  if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+  ev.preventDefault();
+  const enabled = AGENT_ORDER.filter((a) => installedAgents.has(a));
+  const cur = pickedAgent ? enabled.indexOf(pickedAgent) : -1;
+  const step = ev.key === "ArrowRight" ? 1 : -1;
+  pickAgent(enabled[(cur + step + enabled.length) % enabled.length]);
+};
+
+async function refreshInstalled() {
+  try {
+    installedAgents = new Set(await invoke<Agent[]>("installed_agents"));
+  } catch {
+    /* 調べられなければ全部選べるままにする */
+  }
+  if (pickedAgent && !installedAgents.has(pickedAgent)) pickedAgent = null;
+  renderPicker();
 }
 const fWorktree = $<HTMLInputElement>("f-worktree");
 const fBranch = $<HTMLInputElement>("f-branch");
@@ -541,8 +595,9 @@ function openNewDialog() {
   fName.value = "";
   fWorktree.checked = false;
   fBranch.value = "";
-  fAgent.value = lastAgent();
-  showAgentHint();
+  pickedAgent = savedAgent();
+  renderPicker();
+  refreshInstalled();
   $("f-branch-field").hidden = true;
   fError.hidden = true;
   dialog.showModal();
@@ -562,6 +617,12 @@ $<HTMLFormElement>("new-form").onsubmit = async (ev) => {
     fError.hidden = false;
     return;
   }
+  const agent = pickedAgent;
+  if (!agent) {
+    fError.textContent = "起動するエージェントを選んでください";
+    fError.hidden = false;
+    return;
+  }
   const branch = fBranch.value.trim();
   if (fWorktree.checked && !branch) {
     fError.textContent = "ブランチ名を入力してください";
@@ -574,7 +635,6 @@ $<HTMLFormElement>("new-form").onsubmit = async (ev) => {
     const dir = fWorktree.checked ? await invoke<string>("create_worktree", { cwd, branch }) : cwd;
     rememberDir(cwd);
     const name = fName.value.trim() || dir.split(/[\\/]/).pop() || dir;
-    const agent = fAgent.value as Agent;
     try {
       localStorage.setItem("lastAgent", agent);
     } catch {
@@ -586,10 +646,9 @@ $<HTMLFormElement>("new-form").onsubmit = async (ev) => {
     fError.textContent = String(e);
     fError.hidden = false;
   } finally {
-    if (submit) submit.disabled = false;
+    if (submit) submit.disabled = !pickedAgent;
   }
 };
-fAgent.onchange = showAgentHint;
 fWorktree.onchange = () => {
   $("f-branch-field").hidden = !fWorktree.checked;
   if (fWorktree.checked) fBranch.focus();

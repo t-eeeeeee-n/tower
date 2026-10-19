@@ -85,21 +85,15 @@
           <span>表示名</span>
           <input id="f-name" autocomplete="off" placeholder="フォルダ名を使う" />
         </label>
-        <label class="field">
-          <span>起動するエージェント</span>
-          <select id="f-agent">
-            <option value="claude">Claude Code</option>
-            <option value="codex">Codex</option>
-            <option value="copilot">GitHub Copilot CLI</option>
-            <option value="antigravity">Antigravity CLI</option>
-            <option value="shell">なし（bash だけ）</option>
-          </select>
+        <div class="field">
+          <span id="f-agents-label">起動するエージェント</span>
+          <div id="f-agents" class="agent-picker" role="radiogroup" aria-labelledby="f-agents-label"></div>
           <small id="f-agent-hint" class="hint" hidden></small>
-        </label>
+        </div>
         <p id="f-error" class="error" hidden></p>
         <div class="dialog-actions">
           <button type="button" id="f-cancel" class="text-btn">キャンセル</button>
-          <button type="submit" class="primary-btn">作成</button>
+          <button type="submit" id="f-submit" class="primary-btn">作成</button>
         </div>
       </form>
     </dialog>
