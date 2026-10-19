@@ -1,0 +1,134 @@
+mod git;
+pub mod hooks;
+mod job;
+pub mod memory;
+mod notify;
+pub mod session;
+
+use std::sync::{Arc, Mutex};
+
+use serde::Serialize;
+use tauri::ipc::Channel;
+use tauri::{AppHandle, Manager as _, State};
+
+use session::{Manager, SessionInfo};
+
+struct App {
+    manager: Arc<Manager>,
+    hooks_error: Mutex<Option<String>>,
+}
+
+#[derive(Serialize)]
+struct Config {
+    shell: String,
+    hook_port: u16,
+    hooks_error: Option<String>,
+    hooks_settings: String,
+}
+
+#[tauri::command]
+fn get_config(state: State<'_, App>) -> Config {
+    Config {
+        shell: state.manager.shell.program.clone(),
+        hook_port: hooks::port(),
+        hooks_error: state.hooks_error.lock().unwrap().clone(),
+        hooks_settings: state.manager.hooks_settings.to_string_lossy().into_owned(),
+    }
+}
+
+#[tauri::command]
+fn list_sessions(state: State<'_, App>) -> Vec<SessionInfo> {
+    state.manager.all().iter().map(|s| s.info()).collect()
+}
+
+#[tauri::command]
+fn create_session(
+    app: AppHandle,
+    state: State<'_, App>,
+    name: String,
+    cwd: String,
+    run_claude: bool,
+    resume: bool,
+) -> Result<SessionInfo, String> {
+    state.manager.create(&app, name, cwd, run_claude, resume)
+}
+
+#[tauri::command]
+fn create_worktree(state: State<'_, App>, cwd: String, branch: String) -> Result<String, String> {
+    git::create_worktree(&git::git_program(&state.manager.shell.program), &cwd, &branch)
+}
+
+#[tauri::command]
+fn notify(app: AppHandle, notifier: State<'_, notify::Notifier>, id: String, title: String, body: String) -> Result<(), String> {
+    notifier.show(&app, &id, &title, &body)
+}
+
+#[tauri::command]
+fn attach_session(
+    state: State<'_, App>,
+    id: String,
+    cols: u16,
+    rows: u16,
+    on_output: Channel<String>,
+) -> Result<String, String> {
+    state.manager.attach(&id, cols, rows, on_output)
+}
+
+#[tauri::command]
+fn peek_sessions(state: State<'_, App>, lines: usize) -> Vec<session::Peek> {
+    state.manager.peek(lines)
+}
+
+#[tauri::command]
+fn write_session(state: State<'_, App>, id: String, data: String) -> Result<(), String> {
+    state.manager.write(&id, &data)
+}
+
+#[tauri::command]
+fn resize_session(state: State<'_, App>, id: String, cols: u16, rows: u16) -> Result<(), String> {
+    state.manager.resize(&id, cols, rows)
+}
+
+#[tauri::command]
+fn kill_session(state: State<'_, App>, id: String) -> Result<(), String> {
+    state.manager.kill(&id)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            let dir = app.path().app_data_dir()?;
+            let settings_path = dir.join("hooks-settings.json");
+            let mut hooks_error = None;
+            if let Err(e) = hooks::write_settings(&settings_path) {
+                hooks_error = Some(format!("hooks設定を書き込めませんでした: {e}"));
+            }
+            let manager = Arc::new(Manager::new(settings_path));
+            if let Err(e) = hooks::serve(app.handle().clone(), manager.clone()) {
+                hooks_error = Some(e);
+            }
+            memory::start(app.handle().clone(), manager.clone());
+            app.manage(App { manager, hooks_error: Mutex::new(hooks_error) });
+            app.manage(notify::Notifier::default());
+            notify::init(app.handle());
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_config,
+            list_sessions,
+            create_session,
+            create_worktree,
+            notify,
+            attach_session,
+            peek_sessions,
+            write_session,
+            resize_session,
+            kill_session
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running CC Deck");
+}

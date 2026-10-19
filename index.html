@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CC Deck</title>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <header class="sidebar-head">
+          <span class="brand"><svg class="brand-mark" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#2b364a"/><rect x="5" y="6" width="14" height="3" rx="1.5" fill="#3a475e"/><rect x="5" y="10.5" width="14" height="3" rx="1.5" fill="#3a475e"/><rect x="5" y="15" width="14" height="3" rx="1.5" fill="#3a475e"/><rect x="5" y="6" width="4" height="3" rx="1.5" fill="#5fb3c8"/><rect x="5" y="10.5" width="4" height="3" rx="1.5" fill="#e9b04b"/><rect x="5" y="15" width="4" height="3" rx="1.5" fill="#8cc48a"/></svg>CC Deck</span>
+          <button id="new-btn" class="icon-btn" title="新しいセッション（Ctrl+Shift+N）" aria-label="新しいセッション"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.5v11M1.5 7h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+        </header>
+        <button id="overview-btn" class="nav-btn" title="一覧（Ctrl+0）"><span>一覧</span><span class="shortcut">Ctrl+0</span></button>
+        <button id="waiting-jump" class="waiting-jump" hidden></button>
+        <ol id="session-list" class="session-list"></ol>
+        <footer class="sidebar-foot">
+          <div id="total-mem"></div>
+          <div id="hooks-state"></div>
+        </footer>
+      </aside>
+
+      <main class="main">
+        <header id="main-head" class="main-head" hidden>
+          <div class="main-title">
+            <span id="head-name"></span>
+            <span id="head-cwd" class="muted"></span>
+          </div>
+          <div class="main-actions">
+            <span id="head-status" class="status-text"></span>
+            <button id="close-btn" class="text-btn">閉じる</button>
+          </div>
+        </header>
+        <div id="term-wrap" class="term-wrap" hidden><div id="term"></div></div>
+        <section id="overview" class="overview" hidden>
+          <header class="main-head">
+            <div class="main-title"><span>一覧</span></div>
+            <div id="ov-sum" class="ov-sum"></div>
+          </header>
+          <div id="ov-grid" class="ov-grid"></div>
+        </section>
+        <section id="empty" class="empty">
+          <p class="empty-title">セッションがありません</p>
+          <p class="muted">プロジェクトのフォルダを選ぶと、そこで Claude Code を起動します。</p>
+          <div id="restore" class="restore" hidden>
+            <button id="restore-btn" class="primary-btn"></button>
+            <ul id="restore-list" class="restore-list"></ul>
+          </div>
+          <button id="empty-new" class="primary-btn">セッションを作成</button>
+          <dl class="keys">
+            <dt>Ctrl+Shift+N</dt><dd>新しいセッション</dd>
+            <dt>Ctrl+0</dt><dd>一覧を表示</dd>
+            <dt>Ctrl+1〜9</dt><dd>セッションを切り替え</dd>
+            <dt>Ctrl+Shift+A</dt><dd>次の入力待ちへ移動</dd>
+            <dt>Ctrl+Shift+C / V</dt><dd>コピー / 貼り付け</dd>
+            <dt>Ctrl+Shift+W</dt><dd>セッションを閉じる</dd>
+          </dl>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="new-dialog" class="dialog">
+      <form id="new-form" method="dialog">
+        <h2>新しいセッション</h2>
+        <label class="field">
+          <span>フォルダ</span>
+          <div class="row">
+            <input id="f-cwd" list="recent-dirs" required autocomplete="off" placeholder="C:\Users\you\projects\app" />
+            <button type="button" id="f-browse" class="text-btn">参照…</button>
+          </div>
+          <datalist id="recent-dirs"></datalist>
+        </label>
+        <label class="check">
+          <input id="f-worktree" type="checkbox" />
+          <span>新しい worktree で作る</span>
+        </label>
+        <label id="f-branch-field" class="field" hidden>
+          <span>ブランチ名</span>
+          <input id="f-branch" autocomplete="off" placeholder="feature/login" />
+          <small class="hint">リポジトリの隣に「リポジトリ名-ブランチ名」のフォルダを作ります。ブランチが無ければ今の HEAD から作ります。</small>
+        </label>
+        <label class="field">
+          <span>表示名</span>
+          <input id="f-name" autocomplete="off" placeholder="フォルダ名を使う" />
+        </label>
+        <label class="check">
+          <input id="f-claude" type="checkbox" checked />
+          <span>Claude Code を起動する</span>
+        </label>
+        <p id="f-error" class="error" hidden></p>
+        <div class="dialog-actions">
+          <button type="button" id="f-cancel" class="text-btn">キャンセル</button>
+          <button type="submit" class="primary-btn">作成</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
