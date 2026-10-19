@@ -37,8 +37,8 @@ fn hook_command(event: &str) -> String {
     // 入力待ちのメッセージ表示に使う Notification 以外は、hook の入力（コマンドやファイル内容を含む）を送らない
     let body = if event == "notification" { "--data-binary @-" } else { "-d '' " };
     let drain = if event == "notification" { "" } else { "cat >/dev/null; " };
-    // CC Deck の外で起動された claude（環境変数が無い）では何もしない。
-    // CC Deck が落ちていても Claude Code の動作は止めない（--max-time と || true）。
+    // Tower の外で起動された claude（環境変数が無い）では何もしない。
+    // Tower が落ちていても Claude Code の動作は止めない（--max-time と || true）。
     format!(
         "{drain}[ -n \"$DASH_HOOK_TOKEN\" ] && curl -s --max-time 1 -X POST \
          -H \"Authorization: Bearer $DASH_HOOK_TOKEN\" \
@@ -47,7 +47,7 @@ fn hook_command(event: &str) -> String {
     )
 }
 
-/// ポートもトークンも含まないので、複数の CC Deck（インストール版と開発版など）で共有しても干渉しない
+/// ポートもトークンも含まないので、複数の Tower（インストール版と開発版など）で共有しても干渉しない
 pub fn write_settings(path: &Path) -> std::io::Result<()> {
     let mut hooks = serde_json::Map::new();
     for (name, slug) in EVENTS {

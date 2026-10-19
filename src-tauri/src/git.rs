@@ -61,7 +61,7 @@ mod tests {
 
     #[test]
     fn creates_worktree_next_to_repo() {
-        let base = std::env::temp_dir().join(format!("cc-deck-git-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("tower-git-{}", std::process::id()));
         let repo = base.join("app");
         std::fs::create_dir_all(&repo).unwrap();
         let program = PathBuf::from("git");

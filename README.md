@@ -1,4 +1,4 @@
-# CC Deck
+# Tower
 
 複数の Claude Code セッションを 1 つのウィンドウで並列に管理する Windows 用デスクトップアプリです。
 左のサイドバーで各セッションの状態（作業中・入力待ち・完了）とメモリ使用量を確認し、右のターミナルで操作します。
@@ -29,7 +29,7 @@ npm run tauri build
 ```
 
 `src-tauri/target/release/bundle/nsis/` にインストーラ（.exe）、`bundle/msi/` に MSI ができます。
-インストールせずに使うなら `src-tauri/target/release/cc-deck.exe` を直接起動しても動きます。
+インストールせずに使うなら `src-tauri/target/release/tower.exe` を直接起動しても動きます。
 
 ## 使い方
 
@@ -54,9 +54,9 @@ npm run tauri build
 
 ## 仕組み
 
-- **ターミナル**: Rust の `portable-pty` で ConPTY 経由で `bash.exe --login -i` を起動します。`git-bash.exe` は mintty を開いてしまうため使いません。Git Bash の場所は自動で探しますが、環境変数 `CC_DECK_BASH` で明示できます。
+- **ターミナル**: Rust の `portable-pty` で ConPTY 経由で `bash.exe --login -i` を起動します。`git-bash.exe` は mintty を開いてしまうため使いません。Git Bash の場所は自動で探しますが、環境変数 `TOWER_BASH` で明示できます。
 - **表示**: xterm.js のインスタンスは 1 つだけです。各セッションの出力は Rust 側の仮想端末（`vt100` クレート）に常に流しておき、切り替え時はその画面状態を xterm.js に描き直します。裏のセッションの出力はフロントエンドに送らないので、セッション数が増えても UI の負荷は増えません。一覧画面は、開いている間だけ 1 秒ごとに各仮想端末の末尾 12 行を取得します（`peek_sessions`）。
-- **状態表示**: Claude Code を `claude --settings <hooks設定>` で起動します。hooks 設定はアプリが `%APPDATA%\dev.ccdeck.app\hooks-settings.json` に書き出すもので、`~/.claude/settings.json` は変更しません。各 hook は `curl` でアプリにイベントを送り、アプリがサイドバーの状態に反映します。受信口は起動のたびに空いているポートで開き、ポート番号とランダムなトークンをセッションの環境変数（`DASH_HOOK_PORT` / `DASH_HOOK_TOKEN`）で渡します。トークンの無いリクエストやブラウザからのリクエストは受け付けません。hook の入力のうち送るのは Notification の内容だけで、実行するコマンドやファイルの内容は送りません。
+- **状態表示**: Claude Code を `claude --settings <hooks設定>` で起動します。hooks 設定はアプリが `%APPDATA%\dev.tower.app\hooks-settings.json` に書き出すもので、`~/.claude/settings.json` は変更しません。各 hook は `curl` でアプリにイベントを送り、アプリがサイドバーの状態に反映します。受信口は起動のたびに空いているポートで開き、ポート番号とランダムなトークンをセッションの環境変数（`DASH_HOOK_PORT` / `DASH_HOOK_TOKEN`）で渡します。トークンの無いリクエストやブラウザからのリクエストは受け付けません。hook の入力のうち送るのは Notification の内容だけで、実行するコマンドやファイルの内容は送りません。
 - **プロセス管理**: 各セッションの bash.exe を Windows の Job Object に入れています。セッションを閉じたとき（またはアプリを終了したとき）、Claude Code や MCP サーバーを含む子孫プロセスがまとめて終了します。
 - **メモリ表示**: 2.5 秒ごとに bash.exe 以下のプロセスツリーのメモリを合計して表示します。
 
@@ -69,7 +69,7 @@ npm run tauri build
 ## うまく動かないとき
 
 - **状態が「起動中」のまま変わらない**: サイドバー下部にエラーが出ていないか確認してください。Git Bash で `claude --settings` が使えるか（`claude --help`）、`curl` が使えるかも確認してください。
-- **bash が起動しない**: 環境変数 `CC_DECK_BASH` に `C:\Program Files\Git\bin\bash.exe` のようなフルパスを設定してください。
+- **bash が起動しない**: 環境変数 `TOWER_BASH` に `C:\Program Files\Git\bin\bash.exe` のようなフルパスを設定してください。
 - **日本語が豆腐になる**: ターミナルのフォントは Cascadia Mono → BIZ UDGothic → Consolas の順で使います。`src/main.ts` の `fontFamily` で変更できます。
 
 ## テスト

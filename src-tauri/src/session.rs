@@ -144,7 +144,7 @@ pub struct ShellSpec {
 pub fn find_shell() -> ShellSpec {
     if cfg!(windows) {
         let mut candidates: Vec<PathBuf> = Vec::new();
-        for var in ["CC_DECK_BASH", "CLAUDE_CODE_GIT_BASH_PATH"] {
+        for var in ["TOWER_BASH", "CLAUDE_CODE_GIT_BASH_PATH"] {
             if let Ok(p) = std::env::var(var) {
                 candidates.push(PathBuf::from(p));
             }
@@ -238,7 +238,7 @@ impl Manager {
         cmd.env("COLORTERM", "truecolor");
         // Git Bash の --login がホームに cd しないようにする
         cmd.env("CHERE_INVOKING", "1");
-        // CC Deck 自体が Claude Code の中から起動されると、親セッションの目印が引き継がれ、
+        // Tower 自体が Claude Code の中から起動されると、親セッションの目印が引き継がれ、
         // 中の Claude Code が子セッション扱いになって会話を保存しない（--continue で再開できない）
         for var in [
             "CLAUDECODE",
@@ -263,7 +263,7 @@ impl Manager {
         let job = match root_pid.map(Job::for_process) {
             Some(Ok(j)) => Some(j),
             Some(Err(e)) => {
-                eprintln!("[cc-deck] Job Object を作れませんでした: {e}");
+                eprintln!("[tower] Job Object を作れませんでした: {e}");
                 None
             }
             None => None,

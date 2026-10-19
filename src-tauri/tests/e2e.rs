@@ -2,7 +2,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use cc_deck_lib::{hooks, session::Manager};
+use tower_lib::{hooks, session::Manager};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::Listener;
 
@@ -22,7 +22,7 @@ fn session_end_to_end() {
     let app = tauri::test::mock_app();
     let handle = app.handle().clone();
 
-    let dir = std::env::temp_dir().join("cc-deck-test");
+    let dir = std::env::temp_dir().join("tower-test");
     let settings = dir.join("hooks-settings.json");
     hooks::write_settings(&settings).unwrap();
     let (server, endpoint) = hooks::bind().unwrap();

@@ -1,11 +1,11 @@
 [package]
-name = "cc-deck"
+name = "tower-app"
 version = "0.1.0"
-description = "Claude Code sessions dashboard"
+description = "Coding agent sessions dashboard"
 edition = "2021"
 
 [lib]
-name = "cc_deck_lib"
+name = "tower_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

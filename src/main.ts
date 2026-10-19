@@ -292,7 +292,7 @@ function render() {
   const jump = $<HTMLButtonElement>("waiting-jump");
   jump.hidden = waitingCount === 0;
   jump.replaceChildren(el("span", "", `入力待ち ${waitingCount} 件`), el("span", "shortcut", "Ctrl+Shift+A"));
-  appWindow.setTitle(waitingCount ? `(${waitingCount}) CC Deck` : "CC Deck").catch(() => {});
+  appWindow.setTitle(waitingCount ? `(${waitingCount}) Tower` : "Tower").catch(() => {});
 
   const total = order.reduce((sum, id) => sum + (sessions.get(id)?.bytes ?? 0), 0);
   $("total-mem").textContent = order.length ? `${order.length} セッション　合計 ${fmtBytes(total)}` : "";

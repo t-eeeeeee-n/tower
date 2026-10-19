@@ -131,5 +131,5 @@ pub fn run() {
             kill_session
         ])
         .run(tauri::generate_context!())
-        .expect("error while running CC Deck");
+        .expect("error while running Tower");
 }
