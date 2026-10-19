@@ -71,7 +71,7 @@ fn read_file(state: State<'_, App>, id: String, path: String) -> Result<files::F
 }
 
 #[tauri::command]
-fn git_changes(state: State<'_, App>, id: String) -> Result<Vec<files::Change>, String> {
+fn git_changes(state: State<'_, App>, id: String) -> Result<files::Changes, String> {
     Ok(files::changes(&git::git_program(&state.manager.shell.program), &session_root(&state, &id)?))
 }
 

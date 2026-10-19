@@ -101,6 +101,8 @@ export function createFilesPanel(showError: (e: unknown) => void) {
   // 表示中のセッションのぶんだけ持つ（セッションを切り替えたら捨てる）
   const listings = new Map<string, Entry[]>();
   let changes = new Map<string, string>();
+  // 安全のため Git を呼ばなかったときの理由（一覧の上に出す）
+  let blocked: string | null = null;
   let sessionId: string | null = null;
   let open = load("filesOpen") === "1";
   let shownKey = "";
@@ -148,13 +150,14 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     refreshing = true;
     const id = sessionId;
     try {
-      const list = await invoke<Change[]>("git_changes", { id });
+      const res = await invoke<{ changes: Change[]; blocked: string | null }>("git_changes", { id });
       const v = view();
       for (const dir of v.expanded) {
         await listing(dir).catch(() => v.expanded.delete(dir));
       }
       if (id !== sessionId) return;
-      changes = new Map(list.map((c) => [c.path, c.status]));
+      changes = new Map(res.changes.map((c) => [c.path, c.status]));
+      blocked = res.blocked;
       renderTree();
       await renderViewer();
     } catch (e) {
@@ -191,9 +194,11 @@ export function createFilesPanel(showError: (e: unknown) => void) {
 
   function renderTree() {
     const v = view();
+    const notice = blocked ? [el("p", "f-note f-warn", blocked)] : [];
     if (changedOnly.checked) {
       const paths = [...changes.keys()].sort();
       tree.replaceChildren(
+        ...notice,
         ...(paths.length
           ? paths.map((p) => {
               const r = row(p, 0, { rel: p, status: changes.get(p) });
@@ -223,7 +228,7 @@ export function createFilesPanel(showError: (e: unknown) => void) {
       }
     };
     walk("", 0);
-    tree.replaceChildren(...(rows.length ? rows : [el("p", "f-note", "ファイルがありません")]));
+    tree.replaceChildren(...notice, ...(rows.length ? rows : [el("p", "f-note", "ファイルがありません")]));
   }
 
   async function toggleDir(rel: string) {
@@ -441,6 +446,7 @@ export function createFilesPanel(showError: (e: unknown) => void) {
       sessionId = id;
       listings.clear();
       changes = new Map();
+      blocked = null;
       shownKey = "";
       tree.replaceChildren();
       if (id) refresh();

@@ -26,6 +26,13 @@ pub struct FileContent {
     pub too_large: bool,
 }
 
+#[derive(Serialize)]
+pub struct Changes {
+    pub changes: Vec<Change>,
+    /// 安全のため Git を呼ばなかったときの理由
+    pub blocked: Option<String>,
+}
+
 #[derive(Serialize, Debug, PartialEq)]
 pub struct Change {
     /// セッションのフォルダからの相対パス（区切りは /）
@@ -84,14 +91,42 @@ pub fn read_file(root: &Path, rel: &str) -> Result<FileContent, String> {
     Ok(FileContent { text: Some(String::from_utf8_lossy(&bytes).into_owned()), size, binary: false, too_large: false })
 }
 
-/// フォルダの中の Git の変更。Git リポジトリでなければ空。
-pub fn changes(program: &Path, root: &Path) -> Vec<Change> {
-    // status のパスはリポジトリのルートからの相対なので、セッションのフォルダがサブフォルダならその分を取り除く
-    let Ok(prefix) = git(program, root, &["rev-parse", "--show-prefix"]) else { return Vec::new() };
-    let Ok(out) = git_raw(program, root, &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]) else {
-        return Vec::new();
+/// リポジトリ自身の設定（.git/config と、そこから読み込むファイル）に filter のコマンドがあれば、その理由を返す。
+///
+/// filter（clean / smudge / process）は git status や git diff の途中で実行される。Tower はパネルを開いている間
+/// git を自動で呼ぶので、他人が用意した .git を含むフォルダ（zip で受け取ったものなど）を開いただけで
+/// コマンドが実行されないよう、そういうリポジトリでは git を呼ばない。
+/// 利用者の全体設定（~/.gitconfig の Git LFS など）は利用者自身が入れたものなので対象にしない。
+/// 設定を読むだけの git config は filter を実行しない。
+fn repo_filter(program: &Path, root: &Path) -> Option<String> {
+    let out = match git(program, root, &["config", "--show-scope", "--includes", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"]) {
+        Ok(out) => out,
+        // 該当する設定が無いときは、何も出力せずに終了コード 1 で終わる
+        Err(e) if e.is_empty() => return None,
+        // 古い Git（--show-scope が無い）などで確かめられないときは、安全側に倒して呼ばない
+        Err(e) => return Some(format!("Git の設定を確認できないため、変更の表示を止めています: {e}")),
     };
-    parse_status(&out, &prefix)
+    let key = out
+        .lines()
+        .filter_map(|l| l.split_once(char::is_whitespace))
+        .find(|(scope, _)| !matches!(*scope, "global" | "system"))
+        .and_then(|(_, rest)| rest.split_whitespace().next())?
+        .to_string();
+    Some(format!("このリポジトリの設定に Git の filter（{key}）があるため、安全のため変更の表示を止めています"))
+}
+
+/// フォルダの中の Git の変更。Git リポジトリでなければ空。
+pub fn changes(program: &Path, root: &Path) -> Changes {
+    let none = |blocked| Changes { changes: Vec::new(), blocked };
+    // status のパスはリポジトリのルートからの相対なので、セッションのフォルダがサブフォルダならその分を取り除く
+    let Ok(prefix) = git(program, root, &["rev-parse", "--show-prefix"]) else { return none(None) };
+    if let Some(reason) = repo_filter(program, root) {
+        return none(Some(reason));
+    }
+    // サブモジュールの中は設定が別なので、上の確認が効かない。中までは調べない
+    let args = ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all", "--", "."];
+    let Ok(out) = git_raw(program, root, &args) else { return none(None) };
+    Changes { changes: parse_status(&out, &prefix), blocked: None }
 }
 
 fn parse_status(out: &str, prefix: &str) -> Vec<Change> {
@@ -122,6 +157,9 @@ fn parse_status(out: &str, prefix: &str) -> Vec<Change> {
 pub fn diff(program: &Path, root: &Path, rel: &str) -> Result<String, String> {
     // 削除されたファイルの差分も見たいので、実在の確認（canonicalize）はしない
     checked(root, rel)?;
+    if let Some(reason) = repo_filter(program, root) {
+        return Err(reason);
+    }
     // 外部の差分ツールや textconv（.gitattributes で指定されたコマンド）を動かさない
     let opts = ["diff", "--no-color", "--no-ext-diff", "--no-textconv"];
     let with_head: Vec<&str> = opts.iter().copied().chain(["HEAD", "--", rel]).collect();
@@ -175,7 +213,7 @@ mod tests {
         assert_eq!(read_file(&base, "src/a.txt").unwrap().text.as_deref(), Some("one\ntwo\n"));
         assert!(read_file(&base, "bin.dat").unwrap().binary);
 
-        let mut ch = changes(&program, &base);
+        let mut ch = changes(&program, &base).changes;
         ch.sort_by(|a, b| a.path.cmp(&b.path));
         assert_eq!(ch, vec![
             Change { path: "bin.dat".into(), status: "?".into() },
@@ -183,7 +221,7 @@ mod tests {
             Change { path: "新規.txt".into(), status: "?".into() },
         ]);
         // サブフォルダをセッションのフォルダにしたときは、そこからの相対パスになる
-        assert_eq!(changes(&program, &base.join("src")), vec![Change { path: "a.txt".into(), status: "M".into() }]);
+        assert_eq!(changes(&program, &base.join("src")).changes, vec![Change { path: "a.txt".into(), status: "M".into() }]);
 
         let d = diff(&program, &base, "src/a.txt").unwrap();
         assert!(d.lines().any(|l| l == "+two"), "{d}");
@@ -194,6 +232,18 @@ mod tests {
         git(&program, &base, &["config", "core.fsmonitor", &hook]).unwrap();
         let _ = changes(&program, &base);
         assert!(!marker.exists(), "fsmonitor が実行された");
+        git(&program, &base, &["config", "--unset", "core.fsmonitor"]).unwrap();
+
+        // リポジトリの設定に filter のコマンドがあれば、status も diff も呼ばない
+        let marker = base.join("filter-ran");
+        let filter = format!("sh -c 'touch \"{}\"; cat'", marker.to_string_lossy().replace('\\', "/"));
+        git(&program, &base, &["config", "filter.evil.clean", &filter]).unwrap();
+        std::fs::write(base.join(".gitattributes"), "*.txt filter=evil
+").unwrap();
+        let blocked = changes(&program, &base);
+        assert!(blocked.changes.is_empty() && blocked.blocked.as_deref().is_some_and(|r| r.contains("filter.evil.clean")));
+        assert!(diff(&program, &base, "src/a.txt").is_err());
+        assert!(!marker.exists(), "filter が実行された");
         assert!(diff(&program, &base, "../x").is_err());
 
         let _ = std::fs::remove_dir_all(&base);

@@ -250,6 +250,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .f-R { color: var(--st-running); }
 .f-dot { margin-left: auto; padding-left: 8px; color: var(--st-waiting); font-size: 8px; }
 .f-note { margin: 10px 14px; color: var(--faint); }
+.f-warn { color: var(--st-waiting); }
 .fv-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
 .fv-modes { display: flex; margin-left: auto; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; flex: none; }
 .fv-modes[hidden] { display: none; }
