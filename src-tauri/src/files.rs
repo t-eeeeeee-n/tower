@@ -122,8 +122,11 @@ fn parse_status(out: &str, prefix: &str) -> Vec<Change> {
 pub fn diff(program: &Path, root: &Path, rel: &str) -> Result<String, String> {
     // 削除されたファイルの差分も見たいので、実在の確認（canonicalize）はしない
     checked(root, rel)?;
-    let args = ["diff", "--no-color", "--no-ext-diff", "HEAD", "--", rel];
-    git_raw(program, root, &args).or_else(|_| git_raw(program, root, &["diff", "--no-color", "--no-ext-diff", "--", rel]))
+    // 外部の差分ツールや textconv（.gitattributes で指定されたコマンド）を動かさない
+    let opts = ["diff", "--no-color", "--no-ext-diff", "--no-textconv"];
+    let with_head: Vec<&str> = opts.iter().copied().chain(["HEAD", "--", rel]).collect();
+    let without: Vec<&str> = opts.iter().copied().chain(["--", rel]).collect();
+    git_raw(program, root, &with_head).or_else(|_| git_raw(program, root, &without))
 }
 
 #[cfg(test)]
@@ -184,6 +187,13 @@ mod tests {
 
         let d = diff(&program, &base, "src/a.txt").unwrap();
         assert!(d.lines().any(|l| l == "+two"), "{d}");
+
+        // リポジトリの設定に仕込まれた fsmonitor のコマンドは、自動で呼ぶ git status では動かない
+        let marker = base.join("fsmonitor-ran");
+        let hook = format!("sh -c 'touch \"{}\"'", marker.to_string_lossy().replace('\\', "/"));
+        git(&program, &base, &["config", "core.fsmonitor", &hook]).unwrap();
+        let _ = changes(&program, &base);
+        assert!(!marker.exists(), "fsmonitor が実行された");
         assert!(diff(&program, &base, "../x").is_err());
 
         let _ = std::fs::remove_dir_all(&base);

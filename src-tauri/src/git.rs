@@ -20,8 +20,9 @@ pub(crate) fn git(program: &Path, dir: &Path, args: &[&str]) -> Result<String, S
 /// 出力の前後の空白を削らない版（`git status --porcelain` は行頭の空白に意味がある）
 pub(crate) fn git_raw(program: &Path, dir: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new(program);
-    // 日本語のファイル名を \343\201... のようにエスケープさせない
-    cmd.arg("-c").arg("core.quotepath=false").arg("-C").arg(dir).args(args);
+    // 日本語のファイル名を \343\201... のようにエスケープさせない。
+    // core.fsmonitor はリポジトリの設定から任意のコマンドを実行させられるので、Tower が自動で呼ぶ git では無効にする
+    cmd.args(["-c", "core.quotepath=false", "-c", "core.fsmonitor=false"]).arg("-C").arg(dir).args(args);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
