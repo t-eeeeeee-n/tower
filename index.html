@@ -25,6 +25,7 @@
         <header id="main-head" class="main-head" hidden>
           <div class="main-title">
             <span id="head-name"></span>
+            <span id="head-agent" class="agent-tag"></span>
             <span id="head-cwd" class="muted"></span>
           </div>
           <div class="main-actions">
@@ -42,7 +43,7 @@
         </section>
         <section id="empty" class="empty">
           <p class="empty-title">セッションがありません</p>
-          <p class="muted">プロジェクトのフォルダを選ぶと、そこで Claude Code を起動します。</p>
+          <p class="muted">プロジェクトのフォルダを選ぶと、そこでコーディングエージェントを起動します。</p>
           <div id="restore" class="restore" hidden>
             <button id="restore-btn" class="primary-btn"></button>
             <ul id="restore-list" class="restore-list"></ul>
@@ -84,9 +85,16 @@
           <span>表示名</span>
           <input id="f-name" autocomplete="off" placeholder="フォルダ名を使う" />
         </label>
-        <label class="check">
-          <input id="f-claude" type="checkbox" checked />
-          <span>Claude Code を起動する</span>
+        <label class="field">
+          <span>起動するエージェント</span>
+          <select id="f-agent">
+            <option value="claude">Claude Code</option>
+            <option value="codex">Codex</option>
+            <option value="copilot">GitHub Copilot CLI</option>
+            <option value="antigravity">Antigravity CLI</option>
+            <option value="shell">なし（bash だけ）</option>
+          </select>
+          <small id="f-agent-hint" class="hint" hidden></small>
         </label>
         <p id="f-error" class="error" hidden></p>
         <div class="dialog-actions">

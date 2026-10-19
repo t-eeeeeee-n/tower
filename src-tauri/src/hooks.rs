@@ -1,14 +1,16 @@
-//! Claude Code の hooks を受け取るローカルHTTPサーバー。
-//! セッション起動時に `claude --settings <このファイル>` を渡すので、
-//! ユーザーの ~/.claude/settings.json は書き換えない。
+//! コーディングエージェント（Claude Code / Codex / Copilot CLI）の hooks を受け取るローカルHTTPサーバーと、
+//! 各エージェント用の hooks 設定ファイルの生成。
 //!
 //! 受信口は起動のたびに OS が空けたポートで開き、ランダムなトークンと一緒に
 //! セッションの環境変数（DASH_HOOK_PORT / DASH_HOOK_TOKEN）で渡す。
 //! 固定ポートだと別のプログラムに先取りされて hooks の中身が流れる恐れがあり、
 //! トークンが無いと Web ページなど他のプログラムから偽の状態を送り込まれるため。
+//!
+//! 設定ファイルにはポートもトークンも書かないので、複数の Tower で共有しても干渉せず、
+//! Tower の外で起動したエージェント（環境変数が無い）では hooks は何もしない。
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -16,15 +18,9 @@ use tauri::{AppHandle, Runtime};
 
 use crate::session::Manager;
 
-/// (Claude Code のイベント名, URLに使う名前)
-const EVENTS: &[(&str, &str)] = &[
-    ("SessionStart", "session_start"),
-    ("UserPromptSubmit", "user_prompt_submit"),
-    ("PreToolUse", "pre_tool_use"),
-    ("Notification", "notification"),
-    ("Stop", "stop"),
-    ("SessionEnd", "session_end"),
-];
+/// 入力待ちとして扱う通知の種類。Claude Code と Copilot CLI の notification_type に共通する名前と、
+/// Claude Code の一定時間入力が無いときの通知（idle_prompt）。種類の無い通知は入力待ちとみなす。
+const WAITING_TYPES: &[&str] = &["permission_prompt", "elicitation_dialog", "idle_prompt"];
 
 /// セッションに渡す受信口の情報
 #[derive(Clone)]
@@ -33,12 +29,11 @@ pub struct Endpoint {
     pub token: String,
 }
 
-fn hook_command(event: &str) -> String {
-    // 入力待ちのメッセージ表示に使う Notification 以外は、hook の入力（コマンドやファイル内容を含む）を送らない
-    let body = if event == "notification" { "--data-binary @-" } else { "-d '' " };
-    let drain = if event == "notification" { "" } else { "cat >/dev/null; " };
-    // Tower の外で起動された claude（環境変数が無い）では何もしない。
-    // Tower が落ちていても Claude Code の動作は止めない（--max-time と || true）。
+/// bash で受信口に POST するコマンド。
+/// 入力待ちのメッセージ表示に使う notification 以外は、hook の入力（コマンドやファイル内容を含む）を送らない。
+/// Tower が落ちていてもエージェントの動作は止めない（--max-time と || true）。
+fn post_bash(event: &str, with_body: bool) -> String {
+    let (drain, body) = if with_body { ("", "--data-binary @-") } else { ("cat >/dev/null; ", "-d ''") };
     format!(
         "{drain}[ -n \"$DASH_HOOK_TOKEN\" ] && curl -s --max-time 1 -X POST \
          -H \"Authorization: Bearer $DASH_HOOK_TOKEN\" \
@@ -47,20 +42,178 @@ fn hook_command(event: &str) -> String {
     )
 }
 
-/// ポートもトークンも含まないので、複数の Tower（インストール版と開発版など）で共有しても干渉しない
+/// PowerShell 版。Windows の Codex と Copilot CLI は hook を PowerShell で実行する。
+/// 一重引用符を使わない（TOML のリテラル文字列に入れるため）。
+fn post_powershell(event: &str, with_body: bool) -> String {
+    let url = format!("http://127.0.0.1:$env:DASH_HOOK_PORT/hook/$env:DASH_SESSION_ID/{event}");
+    let auth = "-H \"Authorization: Bearer $env:DASH_HOOK_TOKEN\"";
+    if with_body {
+        // PowerShell 5.1 は標準入力をコンソールの文字コード（日本語環境では CP932）で読み、
+        // ネイティブコマンドへのパイプを ASCII で書くので、どちらも UTF-8 にする。
+        // [Text.Encoding]::UTF8 だと先頭に BOM が付いて JSON として読めないので、BOM なしにする
+        format!(
+            "if ($env:DASH_HOOK_TOKEN) {{ $OutputEncoding = New-Object Text.UTF8Encoding $false; \
+             (New-Object IO.StreamReader([Console]::OpenStandardInput(), $OutputEncoding)).ReadToEnd() | \
+             curl.exe -s --max-time 1 -X POST {auth} --data-binary \"@-\" \"{url}\" | Out-Null }}"
+        )
+    } else {
+        format!("if ($env:DASH_HOOK_TOKEN) {{ curl.exe -s --max-time 1 -X POST {auth} \"{url}\" | Out-Null }}")
+    }
+}
+
+/// Claude Code 用。`claude --settings <path>` で渡すので ~/.claude/settings.json は書き換えない。
 pub fn write_settings(path: &Path) -> std::io::Result<()> {
+    const EVENTS: &[(&str, &str)] = &[
+        ("SessionStart", "session_start"),
+        ("UserPromptSubmit", "user_prompt_submit"),
+        ("PreToolUse", "pre_tool_use"),
+        ("Notification", "notification"),
+        ("Stop", "stop"),
+        ("SessionEnd", "session_end"),
+    ];
     let mut hooks = serde_json::Map::new();
     for (name, slug) in EVENTS {
-        let mut entry = json!({ "hooks": [{ "type": "command", "command": hook_command(slug) }] });
+        let mut entry = json!({ "hooks": [{ "type": "command", "command": post_bash(slug, *slug == "notification") }] });
         if *name == "PreToolUse" {
             entry["matcher"] = json!("*");
         }
         hooks.insert((*name).to_string(), json!([entry]));
     }
+    write(path, &serde_json::to_vec_pretty(&json!({ "hooks": hooks }))?)
+}
+
+/// Codex 用のプロファイル。`codex -p tower` で利用者の config.toml の上に重ねる。
+/// PermissionRequest の入力には実行しようとしているコマンドが入るので、中身は送らない。
+pub fn codex_profile() -> String {
+    const EVENTS: &[(&str, &str)] = &[
+        ("SessionStart", "session_start"),
+        ("UserPromptSubmit", "user_prompt_submit"),
+        ("PreToolUse", "pre_tool_use"),
+        ("PermissionRequest", "notification"),
+        ("Stop", "stop"),
+        // 承認を断ったときや Esc で止めたときは Stop ではなく Interrupt になる
+        ("Interrupt", "stop"),
+        ("SessionEnd", "session_end"),
+    ];
+    let mut out = format!(
+        "{CODEX_BEGIN}\n\
+         # Tower の外で起動した codex では何もしない。初回は Codex の画面で信頼を承認すると、Tower に状態が表示される。\n"
+    );
+    for (name, slug) in EVENTS {
+        // Codex は SessionEnd と Interrupt の timeout を 3 秒に切り詰めて毎回警告を出すので、最初から 3 秒にする
+        let timeout = if matches!(*name, "SessionEnd" | "Interrupt") { 3 } else { 10 };
+        out.push_str(&format!("\n[[hooks.{name}]]\n[[hooks.{name}.hooks]]\ntype = \"command\"\ntimeout = {timeout}\n"));
+        // bash 版は '' を含むので、一重引用符を含められる複数行リテラル文字列にする
+        out.push_str(&format!("command = '''{}'''\n", post_bash(slug, false)));
+        out.push_str(&format!("commandWindows = '{}'\n", post_powershell(slug, false)));
+    }
+    out.push_str(CODEX_END);
+    out.push('\n');
+    out
+}
+
+const CODEX_BEGIN: &str = "# >>> Tower hooks（Tower が自動で書き換える区間） >>>";
+const CODEX_END: &str = "# <<< Tower hooks <<<";
+
+/// プロファイルの hooks のテーブルだけを Tower の内容に差し替える。変える必要が無ければ None。
+///
+/// Codex はプロファイル使用中、フォルダの信頼などをこのファイルへ書き足す。書き足す位置は
+/// ファイル末尾のコメントより前になるので、目印のコメントでは区切れない。そのためテーブルの見出しで分け、
+/// `[[hooks.…]]` 以外のテーブルとトップレベルの設定はそのまま残す。
+/// また、ファイルを書き換えると Codex が hook の信頼をやり直させるので、同じ内容なら書かない。
+fn merge_codex_profile(existing: Option<&str>, block: &str) -> Option<String> {
+    let Some(existing) = existing else { return Some(block.to_string()) };
+    let (mut root, mut others) = (String::new(), String::new());
+    // None: 最初の見出しより前、Some(true): hooks のテーブル、Some(false): それ以外のテーブル
+    let mut section: Option<bool> = None;
+    for line in existing.lines() {
+        let t = line.trim_start();
+        if t == CODEX_BEGIN || t == CODEX_END {
+            continue;
+        }
+        if t.starts_with('[') {
+            section = Some(t.starts_with("[[hooks.") || t.starts_with("[hooks"));
+        }
+        match section {
+            None if !t.is_empty() && !t.starts_with('#') => {
+                root.push_str(line);
+                root.push('\n');
+            }
+            Some(false) => {
+                others.push_str(line);
+                others.push('\n');
+            }
+            _ => {}
+        }
+    }
+    let merged = format!("{root}{block}{others}");
+    (merged != existing).then_some(merged)
+}
+
+/// Copilot CLI 用。ユーザー単位の hooks フォルダに単独のファイルとして置く。
+pub fn copilot_hooks() -> Value {
+    const EVENTS: &[(&str, &str)] = &[
+        ("sessionStart", "session_start"),
+        ("userPromptSubmitted", "user_prompt_submit"),
+        ("preToolUse", "pre_tool_use"),
+        ("notification", "notification"),
+        ("agentStop", "stop"),
+        ("sessionEnd", "session_end"),
+    ];
+    let mut hooks = serde_json::Map::new();
+    for (name, slug) in EVENTS {
+        let with_body = *slug == "notification";
+        hooks.insert(
+            (*name).to_string(),
+            json!([{
+                "type": "command",
+                "bash": post_bash(slug, with_body),
+                "powershell": post_powershell(slug, with_body),
+                "timeoutSec": 10
+            }]),
+        );
+    }
+    json!({ "version": 1, "hooks": hooks })
+}
+
+fn home_dir(env: &str, default: &str) -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(env) {
+        return Some(PathBuf::from(dir));
+    }
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|h| PathBuf::from(h).join(default))
+}
+
+fn write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, serde_json::to_vec_pretty(&json!({ "hooks": hooks }))?)
+    // 内容が同じなら書かない（Codex は hook の内容のハッシュで信頼を管理している）
+    if std::fs::read(path).is_ok_and(|old| old == content) {
+        return Ok(());
+    }
+    std::fs::write(path, content)
+}
+
+/// Codex と Copilot CLI の hooks ファイルを書き出す。
+/// エージェントの設定フォルダがあるとき（＝使っているとき）だけ書き、利用者の既存ファイルには触れない。
+pub fn write_agent_hooks() -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Some(codex) = home_dir("CODEX_HOME", ".codex").filter(|d| d.is_dir()) {
+        let path = codex.join("tower.config.toml");
+        let existing = std::fs::read_to_string(&path).ok();
+        if let Some(content) = merge_codex_profile(existing.as_deref(), &codex_profile()) {
+            if let Err(e) = write(&path, content.as_bytes()) {
+                errors.push(format!("Codex の hooks を書き込めませんでした: {e}"));
+            }
+        }
+    }
+    if let Some(copilot) = home_dir("COPILOT_HOME", ".copilot").filter(|d| d.is_dir()) {
+        let content = serde_json::to_vec_pretty(&copilot_hooks()).unwrap_or_default();
+        if let Err(e) = write(&copilot.join("hooks").join("tower.json"), &content) {
+            errors.push(format!("Copilot CLI の hooks を書き込めませんでした: {e}"));
+        }
+    }
+    errors
 }
 
 /// 受信口を開く。サーバーは [`serve`] に渡して動かす。
@@ -91,6 +244,16 @@ fn authorized(req: &tiny_http::Request, endpoint: &Endpoint) -> bool {
     header(req, "Authorization").is_some_and(|v| same(v, &expected))
 }
 
+/// notification の中身から、入力待ちとして扱うかとメッセージを取り出す
+fn read_notification(body: &str) -> (bool, Option<String>) {
+    let Ok(v) = serde_json::from_str::<Value>(body.trim_start_matches('\u{feff}')) else { return (true, None) };
+    let waiting = v
+        .get("notification_type")
+        .and_then(|t| t.as_str())
+        .is_none_or(|t| WAITING_TYPES.contains(&t));
+    (waiting, v.get("message").and_then(|m| m.as_str()).map(String::from))
+}
+
 pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: AppHandle<R>, manager: Arc<Manager>) {
     std::thread::spawn(move || {
         for mut req in server.incoming_requests() {
@@ -103,12 +266,64 @@ pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: App
             let mut body = String::new();
             let _ = req.as_reader().take(1 << 20).read_to_string(&mut body);
             if parts.len() == 3 && parts[0] == "hook" {
-                let message = serde_json::from_str::<Value>(&body)
-                    .ok()
-                    .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from));
-                manager.apply_hook(&app, &parts[1], &parts[2], message);
+                if parts[2] == "notification" {
+                    let (waiting, message) = read_notification(&body);
+                    if waiting {
+                        manager.apply_hook(&app, &parts[1], "notification", message);
+                    }
+                } else {
+                    manager.apply_hook(&app, &parts[1], &parts[2], None);
+                }
             }
             let _ = req.respond(tiny_http::Response::empty(204));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notification_types() {
+        assert_eq!(read_notification(r#"{"message":"m"}"#), (true, Some("m".into())));
+        assert!(read_notification(r#"{"notification_type":"permission_prompt"}"#).0);
+        assert!(!read_notification(r#"{"notification_type":"shell_completed"}"#).0);
+        assert!(!read_notification(r#"{"notification_type":"agent_idle"}"#).0);
+        // Codex の PermissionRequest は中身を送らない
+        assert_eq!(read_notification(""), (true, None));
+        // BOM 付きでも読める
+        assert!(!read_notification("\u{feff}{\"notification_type\":\"agent_idle\"}").0);
+    }
+
+    #[test]
+    fn codex_profile_keeps_codex_additions() {
+        let block = codex_profile();
+        let trust = "[projects.'c:\\repo']\ntrust_level = \"trusted\"\n";
+        // 新規作成
+        assert_eq!(merge_codex_profile(None, &block).unwrap(), block);
+
+        // Codex は末尾のコメント（終わりの目印）より前にテーブルを書き足す
+        let end = format!("{CODEX_END}\n");
+        let by_codex = format!("model = \"x\"\n{}{trust}{end}", block.replace(&end, ""));
+        let merged = merge_codex_profile(Some(&by_codex), &block).unwrap();
+        // フォルダの信頼とトップレベルの設定は残る
+        assert_eq!(merged, format!("model = \"x\"\n{block}{trust}"));
+        // 一度整えた後は、同じ内容なら書き換えない
+        assert_eq!(merge_codex_profile(Some(&merged), &block), None);
+
+        // hooks の中身が変わったときは hooks だけ差し替える
+        let old = merged.replace("timeout = 10", "timeout = 9");
+        assert_eq!(merge_codex_profile(Some(&old), &block).unwrap(), merged);
+    }
+
+    #[test]
+    fn codex_profile_is_valid_toml_shape() {
+        let p = codex_profile();
+        // PowerShell 版は一重引用符のリテラル文字列に入れるので、一重引用符を含んではいけない
+        for line in p.lines().filter(|l| l.starts_with("commandWindows")) {
+            assert_eq!(line.matches('\'').count(), 2, "{line}");
+        }
+        assert!(p.contains("[[hooks.PermissionRequest]]"));
+    }
 }

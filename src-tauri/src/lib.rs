@@ -1,3 +1,4 @@
+pub mod agent;
 mod git;
 pub mod hooks;
 mod job;
@@ -11,6 +12,7 @@ use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager as _, State};
 
+use agent::Agent;
 use session::{Manager, SessionInfo};
 
 struct App {
@@ -47,10 +49,10 @@ fn create_session(
     state: State<'_, App>,
     name: String,
     cwd: String,
-    run_claude: bool,
+    agent: Agent,
     resume: bool,
 ) -> Result<SessionInfo, String> {
-    state.manager.create(&app, name, cwd, run_claude, resume)
+    state.manager.create(&app, name, cwd, agent, resume)
 }
 
 #[tauri::command]
@@ -106,6 +108,10 @@ pub fn run() {
             let mut hooks_error = None;
             if let Err(e) = hooks::write_settings(&settings_path) {
                 hooks_error = Some(format!("hooks設定を書き込めませんでした: {e}"));
+            }
+            let agent_errors = hooks::write_agent_hooks();
+            if !agent_errors.is_empty() {
+                hooks_error = Some(agent_errors.join("\n"));
             }
             let bound = hooks::bind().map_err(|e| hooks_error = Some(e)).ok();
             let manager = Arc::new(Manager::new(settings_path, bound.as_ref().map(|(_, ep)| ep.clone())));

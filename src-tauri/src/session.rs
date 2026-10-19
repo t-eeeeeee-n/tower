@@ -1,24 +1,25 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Runtime};
 
+use crate::agent::{infer_status, Agent};
 use crate::hooks::Endpoint;
 use crate::job::Job;
 
 #[derive(Clone, Copy, Serialize, PartialEq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
-    /// bashだけが動いている（Claude Code未起動、または終了後）
+    /// bashだけが動いている（エージェント未起動、または終了後）
     Shell,
-    /// Claude Code起動中
+    /// エージェント起動中
     Starting,
     /// 応答完了・次の指示待ち
     Idle,
@@ -43,8 +44,8 @@ pub struct SessionInfo {
     pub name: String,
     pub cwd: String,
     pub created: u64,
-    /// Claude Code を起動したセッションか（前回のセッションを再開するときに使う）
-    pub claude: bool,
+    /// 起動したエージェント（前回のセッションを再開するときに使う）
+    pub agent: Agent,
     #[serde(flatten)]
     pub state: StatusInfo,
 }
@@ -112,13 +113,15 @@ pub struct Session {
     pub name: String,
     pub cwd: String,
     pub created: u64,
-    pub claude: bool,
+    pub agent: Agent,
     pub root_pid: Option<u32>,
     state: Arc<Mutex<StatusInfo>>,
     term: Arc<Mutex<Term>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// hooks のイベントが一度でも届いたか。届くまでは画面から状態を推測する
+    hooks_seen: Arc<AtomicBool>,
     _job: Option<Job>,
 }
 
@@ -129,7 +132,7 @@ impl Session {
             name: self.name.clone(),
             cwd: self.cwd.clone(),
             created: self.created,
-            claude: self.claude,
+            agent: self.agent,
             state: self.state.lock().unwrap().clone(),
         }
     }
@@ -213,7 +216,7 @@ impl Manager {
         app: &AppHandle<R>,
         name: String,
         cwd: String,
-        run_claude: bool,
+        agent: Agent,
         resume: bool,
     ) -> Result<SessionInfo, String> {
         if !Path::new(&cwd).is_dir() {
@@ -273,7 +276,7 @@ impl Manager {
         let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| e.to_string())?));
         let killer = child.clone_killer();
 
-        let initial = if run_claude { Status::Starting } else { Status::Shell };
+        let initial = if agent == Agent::Shell { Status::Shell } else { Status::Starting };
         let state = Arc::new(Mutex::new(StatusInfo { status: initial, since: now_ms(), message: None }));
         let term = Arc::new(Mutex::new(Term {
             parser: vt100::Parser::new(rows, cols, 0),
@@ -331,15 +334,42 @@ impl Manager {
             });
         }
 
-        if run_claude {
-            let settings = self.hooks_settings.to_string_lossy().replace('\\', "/");
-            let start = format!("claude --settings '{settings}'");
-            // 再開する会話が無いと --continue は終了コード 1 で終わるので、そのときは新しく始める
-            let line = if resume {
-                format!("claude --continue --settings '{settings}' || {start}\r")
-            } else {
-                format!("{start}\r")
-            };
+        // hooks を使えないエージェントは、画面の変化と内容から状態を推測する。
+        // hooks を使うエージェントも、最初のイベントが届くまでは推測する
+        // （Codex は最初の指示を送るまで SessionStart を送らず、起動直後の確認画面にも hooks が無いため）
+        let hooks_seen = Arc::new(AtomicBool::new(false));
+        if agent != Agent::Shell {
+            let hooks_seen = hooks_seen.clone();
+            let term = term.clone();
+            let state = state.clone();
+            let app = app.clone();
+            let id = id.clone();
+            std::thread::spawn(move || {
+                let mut last = String::new();
+                let mut changed_at = now_ms();
+                loop {
+                    std::thread::sleep(Duration::from_millis(700));
+                    if state.lock().unwrap().status == Status::Exited
+                        || (!agent.infers_status() && hooks_seen.load(Ordering::Relaxed))
+                    {
+                        break;
+                    }
+                    let screen = term.lock().unwrap().parser.screen().contents();
+                    if screen != last {
+                        last = screen;
+                        changed_at = now_ms();
+                    }
+                    let next = infer_status(&last, now_ms().saturating_sub(changed_at));
+                    if !agent.infers_status() && hooks_seen.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    set_status(&app, &id, &state, next, None);
+                }
+            });
+        }
+
+        let settings = self.hooks_settings.to_string_lossy().replace('\\', "/");
+        if let Some(line) = agent.launch_line(&settings, resume) {
             let mut w = writer.lock().unwrap();
             let _ = w.write_all(line.as_bytes());
             let _ = w.flush();
@@ -350,13 +380,14 @@ impl Manager {
             name,
             cwd,
             created: now_ms(),
-            claude: run_claude,
+            agent,
             root_pid,
             state,
             term,
             writer,
             master: Mutex::new(pair.master),
             killer: Mutex::new(killer),
+            hooks_seen,
             _job: job,
         });
         let info = session.info();
@@ -433,6 +464,7 @@ impl Manager {
     /// hooks から届いたイベントで状態を更新する
     pub fn apply_hook<R: Runtime>(&self, app: &AppHandle<R>, id: &str, event: &str, message: Option<String>) {
         let Ok(session) = self.get(id) else { return };
+        session.hooks_seen.store(true, Ordering::Relaxed);
         let next = match event {
             "session_start" | "stop" => Status::Idle,
             "user_prompt_submit" | "pre_tool_use" => Status::Running,
@@ -440,20 +472,25 @@ impl Manager {
             "session_end" => Status::Shell,
             _ => return,
         };
-        let info = {
-            let mut s = session.state.lock().unwrap();
-            if s.status == Status::Exited {
-                return;
-            }
-            let message = if next == Status::Waiting { message } else { None };
-            if s.status == next && s.message == message {
-                return;
-            }
-            *s = StatusInfo { status: next, since: now_ms(), message };
-            s.clone()
-        };
-        let _ = app.emit("session-status", StatusEvent { id: id.to_string(), state: info });
+        set_status(app, id, &session.state, next, message);
     }
+}
+
+/// 状態を更新し、変わったときだけフロントに知らせる。終了したセッションは変えない。
+fn set_status<R: Runtime>(app: &AppHandle<R>, id: &str, state: &Mutex<StatusInfo>, next: Status, message: Option<String>) {
+    let info = {
+        let mut s = state.lock().unwrap();
+        if s.status == Status::Exited {
+            return;
+        }
+        let message = if next == Status::Waiting { message } else { None };
+        if s.status == next && s.message == message {
+            return;
+        }
+        *s = StatusInfo { status: next, since: now_ms(), message };
+        s.clone()
+    };
+    let _ = app.emit("session-status", StatusEvent { id: id.to_string(), state: info });
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {

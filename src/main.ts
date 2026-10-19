@@ -9,6 +9,7 @@ import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 
 type Status = "shell" | "starting" | "idle" | "running" | "waiting" | "exited";
+type Agent = "shell" | "claude" | "codex" | "copilot" | "antigravity";
 
 interface StatusInfo {
   status: Status;
@@ -20,12 +21,12 @@ interface SessionInfo extends StatusInfo {
   name: string;
   cwd: string;
   created: number;
-  claude: boolean;
+  agent: Agent;
 }
 interface SavedSession {
   name: string;
   cwd: string;
-  claude: boolean;
+  agent: Agent;
 }
 interface Session extends SessionInfo {
   bytes?: number;
@@ -36,6 +37,21 @@ interface Config {
   hooks_error: string | null;
   hooks_settings: string;
 }
+
+const AGENT_LABEL: Record<Agent, string> = {
+  shell: "bash",
+  claude: "Claude Code",
+  codex: "Codex",
+  copilot: "Copilot CLI",
+  antigravity: "Antigravity",
+};
+
+// 新規作成ダイアログでエージェントを選んだときの注意書き
+const AGENT_HINT: Partial<Record<Agent, string>> = {
+  codex: "初回だけ、Codex の /hooks で Tower の hook を信頼してください。承認するまで状態は「起動中」のままです。",
+  copilot: "状態の表示には Copilot CLI 1.0 以降が必要です（npm i -g @github/copilot で更新）。",
+  antigravity: "hooks を使えないため、状態は画面の様子から推測します（入力待ちの判定は目安です）。",
+};
 
 const STATUS_LABEL: Record<Status, string> = {
   shell: "シェル",
@@ -147,8 +163,8 @@ async function activate(id: string) {
 
 // ---------- セッション操作 ----------
 
-async function createSession(name: string, cwd: string, runClaude: boolean, resume = false) {
-  const info = await invoke<SessionInfo>("create_session", { name, cwd, runClaude, resume });
+async function createSession(name: string, cwd: string, agent: Agent, resume = false) {
+  const info = await invoke<SessionInfo>("create_session", { name, cwd, agent, resume });
   sessions.set(info.id, info);
   order.push(info.id);
   restorable = [];
@@ -165,7 +181,7 @@ function saveSessions() {
   try {
     const list: SavedSession[] = order.map((id) => {
       const s = sessions.get(id)!;
-      return { name: s.name, cwd: s.cwd, claude: s.claude };
+      return { name: s.name, cwd: s.cwd, agent: s.agent };
     });
     localStorage.setItem("lastSessions", JSON.stringify(list));
   } catch {
@@ -187,7 +203,7 @@ async function restoreSessions() {
   let first: string | null = null;
   for (const s of list) {
     try {
-      const id = await createSession(s.name, s.cwd, s.claude, s.claude);
+      const id = await createSession(s.name, s.cwd, s.agent, s.agent !== "shell");
       first ??= id;
     } catch (e) {
       failed.push(`${s.name}: ${e}`);
@@ -202,7 +218,7 @@ async function closeSession(id: string) {
   const s = sessions.get(id);
   if (!s) return;
   if (s.status !== "exited") {
-    const ok = await ask(`「${s.name}」を閉じますか？\n実行中の Claude Code と子プロセスも終了します。`, {
+    const ok = await ask(`「${s.name}」を閉じますか？\n実行中のエージェントと子プロセスも終了します。`, {
       title: "セッションを閉じる",
       kind: "warning",
       okLabel: "閉じる",
@@ -273,7 +289,11 @@ function render() {
         el("span", "s-mem", fmtBytes(s.bytes)),
       );
       const line2 = el("div", "s-line2");
-      line2.append(el("span", "s-status", STATUS_LABEL[s.status]), el("span", "s-age", fmtAge(s.since)));
+      line2.append(
+        el("span", "s-status", STATUS_LABEL[s.status]),
+        el("span", "s-age", fmtAge(s.since)),
+        el("span", "s-agent", AGENT_LABEL[s.agent]),
+      );
       li.append(line2);
       if (s.status === "waiting" && s.message) li.append(el("div", "s-msg", s.message));
       const close = el("button", "s-close", "×");
@@ -320,6 +340,7 @@ function render() {
   if (overview) renderOverview(waitingCount, total);
   if (active) {
     $("head-name").textContent = active.name;
+    $("head-agent").textContent = AGENT_LABEL[active.agent];
     $("head-cwd").textContent = active.cwd;
     const st = $("head-status");
     st.dataset.status = active.status;
@@ -330,7 +351,7 @@ function render() {
 // ---------- 一覧 ----------
 
 const cards = new Map<string, HTMLElement>();
-const CHOICE = /^[\s│]*(?:❯\s*)?(\d)\.\s+(.+?)[\s│]*$/;
+const CHOICE = /^[\s│]*(?:[❯›>]\s*)?(\d)\.\s+(.+?)[\s│]*$/;
 let peekTimer = 0;
 
 function showOverview() {
@@ -359,8 +380,9 @@ async function pollPeeks() {
 
 async function sendLine(id: string, text: string) {
   await invoke("write_session", { id, data: text });
-  // Enter は別の書き込みにする。続けて届いた入力を貼り付けとみなす TUI では、同じ書き込みの改行が送信にならない
-  await new Promise((r) => setTimeout(r, 50));
+  // Enter は別の書き込みにして間を空ける。続けて届いた入力を貼り付けとみなす TUI では、直後の改行が送信にならない
+  // （Codex は 50ms では貼り付けの一部として扱った）
+  await new Promise((r) => setTimeout(r, 300));
   await invoke("write_session", { id, data: "\r" });
 }
 
@@ -368,7 +390,7 @@ function makeCard(id: string) {
   const card = el("article", "card");
   card.tabIndex = 0;
   const head = el("header", "c-head");
-  head.append(el("span", "c-name"), el("span", "c-status"));
+  head.append(el("span", "c-name"), el("span", "c-agent"), el("span", "c-status"));
   const form = el("form", "c-input");
   const input = el("input");
   input.placeholder = "指示を送る（Enter）";
@@ -399,6 +421,7 @@ function updateCard(card: HTMLElement, s: Session) {
   card.dataset.status = s.status;
   card.title = s.cwd;
   q(".c-name").textContent = s.name;
+  q(".c-agent").textContent = AGENT_LABEL[s.agent];
   q(".c-status").textContent = STATUS_LABEL[s.status];
 
   const lines = peeks.get(s.id) ?? [];
@@ -468,7 +491,23 @@ function renderOverview(waitingCount: number, total: number) {
 const dialog = $<HTMLDialogElement>("new-dialog");
 const fCwd = $<HTMLInputElement>("f-cwd");
 const fName = $<HTMLInputElement>("f-name");
-const fClaude = $<HTMLInputElement>("f-claude");
+const fAgent = $<HTMLSelectElement>("f-agent");
+
+function lastAgent(): Agent {
+  try {
+    const a = localStorage.getItem("lastAgent");
+    if (a && a in AGENT_LABEL) return a as Agent;
+  } catch {
+    /* 読めなければ既定値 */
+  }
+  return "claude";
+}
+
+function showAgentHint() {
+  const hint = AGENT_HINT[fAgent.value as Agent];
+  $("f-agent-hint").textContent = hint ?? "";
+  $("f-agent-hint").hidden = !hint;
+}
 const fWorktree = $<HTMLInputElement>("f-worktree");
 const fBranch = $<HTMLInputElement>("f-branch");
 const fError = $("f-error");
@@ -502,6 +541,8 @@ function openNewDialog() {
   fName.value = "";
   fWorktree.checked = false;
   fBranch.value = "";
+  fAgent.value = lastAgent();
+  showAgentHint();
   $("f-branch-field").hidden = true;
   fError.hidden = true;
   dialog.showModal();
@@ -533,7 +574,13 @@ $<HTMLFormElement>("new-form").onsubmit = async (ev) => {
     const dir = fWorktree.checked ? await invoke<string>("create_worktree", { cwd, branch }) : cwd;
     rememberDir(cwd);
     const name = fName.value.trim() || dir.split(/[\\/]/).pop() || dir;
-    await activate(await createSession(name, dir, fClaude.checked));
+    const agent = fAgent.value as Agent;
+    try {
+      localStorage.setItem("lastAgent", agent);
+    } catch {
+      /* 保存できなくても動作には影響しない */
+    }
+    await activate(await createSession(name, dir, agent));
     dialog.close();
   } catch (e) {
     fError.textContent = String(e);
@@ -542,6 +589,7 @@ $<HTMLFormElement>("new-form").onsubmit = async (ev) => {
     if (submit) submit.disabled = false;
   }
 };
+fAgent.onchange = showAgentHint;
 fWorktree.onchange = () => {
   $("f-branch-field").hidden = !fWorktree.checked;
   if (fWorktree.checked) fBranch.focus();
