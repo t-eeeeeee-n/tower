@@ -112,6 +112,17 @@ term.open($("term"));
 term.onData((data) => {
   if (activeId) invoke("write_session", { id: activeId, data }).catch(showError);
 });
+
+// Shift+Enter は xterm.js では Enter と同じ \r になるので、ESC+CR（Alt+Enter と同じ）を送って改行にする。
+// Claude Code・Codex・Antigravity CLI はこれを入力欄の改行として扱い、bash では何も起きない。
+// ConPTY の win32-input-mode で Shift+Enter のキーイベントを送る方法は、Claude Code が Enter として扱い送信してしまう。
+term.attachCustomKeyEventHandler((e) => {
+  if (e.key !== "Enter" || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return true;
+  if (e.type === "keydown" && activeId) {
+    invoke("write_session", { id: activeId, data: "\x1b\r" }).catch(showError);
+  }
+  return false;
+});
 term.onResize(({ cols, rows }) => {
   if (activeId) invoke("resize_session", { id: activeId, cols, rows }).catch(() => {});
 });

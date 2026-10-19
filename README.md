@@ -50,6 +50,7 @@ npm run tauri build
 | Ctrl+0 | 一覧画面 / 直前のセッションへ切り替え |
 | Ctrl+1〜9 | サイドバーの番号のセッションへ切り替え |
 | Ctrl+Shift+A | 次の入力待ちセッションへ移動 |
+| Shift+Enter | エージェントの入力欄で改行（Alt+Enter と同じ信号を送る。bash では何もしない） |
 | Ctrl+Shift+C / V | コピー / 貼り付け（Ctrl+C はエージェントの中断に使うため） |
 | Ctrl+Shift+W | 表示中のセッションを閉じる |
 
