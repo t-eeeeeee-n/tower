@@ -56,7 +56,7 @@ npm run tauri build
 
 - **ターミナル**: Rust の `portable-pty` で ConPTY 経由で `bash.exe --login -i` を起動します。`git-bash.exe` は mintty を開いてしまうため使いません。Git Bash の場所は自動で探しますが、環境変数 `CC_DECK_BASH` で明示できます。
 - **表示**: xterm.js のインスタンスは 1 つだけです。各セッションの出力は Rust 側の仮想端末（`vt100` クレート）に常に流しておき、切り替え時はその画面状態を xterm.js に描き直します。裏のセッションの出力はフロントエンドに送らないので、セッション数が増えても UI の負荷は増えません。一覧画面は、開いている間だけ 1 秒ごとに各仮想端末の末尾 12 行を取得します（`peek_sessions`）。
-- **状態表示**: Claude Code を `claude --settings <hooks設定>` で起動します。hooks 設定はアプリが `%APPDATA%\dev.ccdeck.app\hooks-settings.json` に書き出すもので、`~/.claude/settings.json` は変更しません。各 hook は `curl` で `127.0.0.1:47800` にイベントを送り、アプリがサイドバーの状態に反映します。
+- **状態表示**: Claude Code を `claude --settings <hooks設定>` で起動します。hooks 設定はアプリが `%APPDATA%\dev.ccdeck.app\hooks-settings.json` に書き出すもので、`~/.claude/settings.json` は変更しません。各 hook は `curl` でアプリにイベントを送り、アプリがサイドバーの状態に反映します。受信口は起動のたびに空いているポートで開き、ポート番号とランダムなトークンをセッションの環境変数（`DASH_HOOK_PORT` / `DASH_HOOK_TOKEN`）で渡します。トークンの無いリクエストやブラウザからのリクエストは受け付けません。hook の入力のうち送るのは Notification の内容だけで、実行するコマンドやファイルの内容は送りません。
 - **プロセス管理**: 各セッションの bash.exe を Windows の Job Object に入れています。セッションを閉じたとき（またはアプリを終了したとき）、Claude Code や MCP サーバーを含む子孫プロセスがまとめて終了します。
 - **メモリ表示**: 2.5 秒ごとに bash.exe 以下のプロセスツリーのメモリを合計して表示します。
 
@@ -64,7 +64,6 @@ npm run tauri build
 
 - セッションを切り替えると、ターミナルには「現在の画面」だけが復元され、それより上のスクロール履歴は戻りません。
 - アプリを終了すると、全セッションが終了します（Job Object の仕様）。次回の起動時に「前回の N 件を再開」で開き直せます。
-- hooks の受信ポート 47800 が他のアプリに使われていると、状態表示が無効になります（サイドバー下部に表示されます）。
 - WSL 上の Claude Code には対応していません。
 
 ## うまく動かないとき

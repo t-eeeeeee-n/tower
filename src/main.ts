@@ -32,7 +32,7 @@ interface Session extends SessionInfo {
 }
 interface Config {
   shell: string;
-  hook_port: number;
+  hook_port: number | null;
   hooks_error: string | null;
   hooks_settings: string;
 }

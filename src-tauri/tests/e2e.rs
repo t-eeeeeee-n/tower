@@ -19,15 +19,15 @@ fn wait_until(timeout_ms: u64, mut f: impl FnMut() -> bool) -> bool {
 
 #[test]
 fn session_end_to_end() {
-    std::env::set_var("CC_DECK_HOOK_PORT", "47911");
     let app = tauri::test::mock_app();
     let handle = app.handle().clone();
 
     let dir = std::env::temp_dir().join("cc-deck-test");
     let settings = dir.join("hooks-settings.json");
     hooks::write_settings(&settings).unwrap();
-    let manager = Arc::new(Manager::new(settings.clone()));
-    hooks::serve(handle.clone(), manager.clone()).unwrap();
+    let (server, endpoint) = hooks::bind().unwrap();
+    let manager = Arc::new(Manager::new(settings.clone(), Some(endpoint.clone())));
+    hooks::serve(server, endpoint.clone(), handle.clone(), manager.clone());
 
     let events: Arc<Mutex<Vec<String>>> = Arc::default();
     {
@@ -93,6 +93,14 @@ fn session_end_to_end() {
         events.lock().unwrap(),
         received.lock().unwrap()
     );
+    // トークンが無い・違う・ブラウザからのリクエストは受け付けず、状態も変わらない
+    let path = format!("/hook/{id}/stop");
+    let bearer = format!("Bearer {}", endpoint.token);
+    assert_eq!(post(endpoint.port, &path, &[]), 403);
+    assert_eq!(post(endpoint.port, &path, &[("Authorization", "Bearer wrong")]), 403);
+    assert_eq!(post(endpoint.port, &path, &[("Authorization", &bearer), ("Origin", "https://example.com")]), 403);
+    assert!(serde_json::to_string(&manager.get(&id).unwrap().info()).unwrap().contains("\"waiting\""));
+
     let stop = cfg["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap();
     let script = dir.join("stop.sh");
     std::fs::write(&script, stop).unwrap();
@@ -115,6 +123,21 @@ fn session_end_to_end() {
     manager.kill(&id).unwrap();
     assert!(manager.get(&id).is_err());
     println!("events: {:#?}", events.lock().unwrap());
+}
+
+/// 受信口に直接 POST して HTTP ステータスを返す
+fn post(port: u16, path: &str, headers: &[(&str, &str)]) -> u16 {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut req = format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nConnection: close\r\n");
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    s.write_all(req.as_bytes()).unwrap();
+    let mut res = String::new();
+    s.read_to_string(&mut res).unwrap();
+    res.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0)
 }
 
 /// bash に渡すパス。バックスラッシュはエスケープとして解釈されるので / にする

@@ -10,6 +10,7 @@ use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Runtime};
 
+use crate::hooks::Endpoint;
 use crate::job::Job;
 
 #[derive(Clone, Copy, Serialize, PartialEq, Debug)]
@@ -175,16 +176,19 @@ pub struct Manager {
     active: Mutex<Option<String>>,
     next_id: AtomicU64,
     pub hooks_settings: PathBuf,
+    /// hooks の受信口。開けなかったときは None（状態表示が無効になるだけで、セッションは動く）
+    pub hook: Option<Endpoint>,
     pub shell: ShellSpec,
 }
 
 impl Manager {
-    pub fn new(hooks_settings: PathBuf) -> Self {
+    pub fn new(hooks_settings: PathBuf, hook: Option<Endpoint>) -> Self {
         Manager {
             sessions: Mutex::new(HashMap::new()),
             active: Mutex::new(None),
             next_id: AtomicU64::new(1),
             hooks_settings,
+            hook,
             shell: find_shell(),
         }
     }
@@ -226,6 +230,10 @@ impl Manager {
         cmd.args(&self.shell.args);
         cmd.cwd(&cwd);
         cmd.env("DASH_SESSION_ID", &id);
+        if let Some(hook) = &self.hook {
+            cmd.env("DASH_HOOK_PORT", hook.port.to_string());
+            cmd.env("DASH_HOOK_TOKEN", &hook.token);
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         // Git Bash の --login がホームに cd しないようにする

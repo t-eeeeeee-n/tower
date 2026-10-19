@@ -21,7 +21,7 @@ struct App {
 #[derive(Serialize)]
 struct Config {
     shell: String,
-    hook_port: u16,
+    hook_port: Option<u16>,
     hooks_error: Option<String>,
     hooks_settings: String,
 }
@@ -30,7 +30,7 @@ struct Config {
 fn get_config(state: State<'_, App>) -> Config {
     Config {
         shell: state.manager.shell.program.clone(),
-        hook_port: hooks::port(),
+        hook_port: state.manager.hook.as_ref().map(|h| h.port),
         hooks_error: state.hooks_error.lock().unwrap().clone(),
         hooks_settings: state.manager.hooks_settings.to_string_lossy().into_owned(),
     }
@@ -107,9 +107,10 @@ pub fn run() {
             if let Err(e) = hooks::write_settings(&settings_path) {
                 hooks_error = Some(format!("hooks設定を書き込めませんでした: {e}"));
             }
-            let manager = Arc::new(Manager::new(settings_path));
-            if let Err(e) = hooks::serve(app.handle().clone(), manager.clone()) {
-                hooks_error = Some(e);
+            let bound = hooks::bind().map_err(|e| hooks_error = Some(e)).ok();
+            let manager = Arc::new(Manager::new(settings_path, bound.as_ref().map(|(_, ep)| ep.clone())));
+            if let Some((server, endpoint)) = bound {
+                hooks::serve(server, endpoint, app.handle().clone(), manager.clone());
             }
             memory::start(app.handle().clone(), manager.clone());
             app.manage(App { manager, hooks_error: Mutex::new(hooks_error) });
