@@ -21,8 +21,17 @@ pub(crate) fn git(program: &Path, dir: &Path, args: &[&str]) -> Result<String, S
 pub(crate) fn git_raw(program: &Path, dir: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new(program);
     // 日本語のファイル名を \343\201... のようにエスケープさせない。
-    // core.fsmonitor はリポジトリの設定から任意のコマンドを実行させられるので、Tower が自動で呼ぶ git では無効にする
-    cmd.args(["-c", "core.quotepath=false", "-c", "core.fsmonitor=false"]).arg("-C").arg(dir).args(args);
+    // core.fsmonitor はリポジトリの設定から任意のコマンドを実行させられるので、Tower が自動で呼ぶ git では無効にする。
+    // Tower が呼ぶ git は通信を必要としない。部分クローンの自動取得や ext:: のような通信方式で
+    // リポジトリの設定からコマンドを動かされないよう、通信はすべて禁止する。
+    // protocol.<name>.allow は protocol.allow より優先され、リポジトリの設定でも書けるので、方式ごとにも禁止する
+    // （コマンドラインの -c は、同じ名前のリポジトリの設定より優先される）
+    cmd.args(["-c", "core.quotepath=false", "-c", "core.fsmonitor=false", "-c", "protocol.allow=never"]);
+    for p in ["ext", "file", "ssh", "git", "http", "https"] {
+        cmd.arg("-c").arg(format!("protocol.{p}.allow=never"));
+    }
+    cmd.env("GIT_NO_LAZY_FETCH", "1");
+    cmd.arg("-C").arg(dir).args(args);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

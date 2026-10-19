@@ -182,6 +182,22 @@ mod tests {
     }
 
     #[test]
+    fn automatic_git_never_uses_transports() {
+        // ext:: は通信の代わりにコマンドを実行する方式。リポジトリの設定で許可されていても、Tower が呼ぶ git では使えない
+        let base = std::env::temp_dir().join(format!("tower-transport-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let program = PathBuf::from("git");
+        git(&program, &base, &["init", "-q"]).unwrap();
+        git(&program, &base, &["config", "protocol.ext.allow", "always"]).unwrap();
+        let marker = base.join("transport-ran");
+        let url = format!("ext::sh -c touch% {}", marker.to_string_lossy().replace('\\', "/"));
+        assert!(git_raw(&program, &base, &["ls-remote", &url]).is_err());
+        assert!(!marker.exists(), "通信方式のコマンドが実行された");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn parses_porcelain_status() {
         let out = " M sub/a.rs\0?? sub/new.txt\0R  sub/b.rs\0sub/old.rs\0D  sub/gone.rs\0A  sub/add.rs\0";
         let got = parse_status(out, "sub/");
