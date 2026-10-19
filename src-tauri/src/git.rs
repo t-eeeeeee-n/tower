@@ -13,9 +13,15 @@ pub fn git_program(shell: &str) -> PathBuf {
     }
 }
 
-fn git(program: &Path, dir: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(program: &Path, dir: &Path, args: &[&str]) -> Result<String, String> {
+    git_raw(program, dir, args).map(|s| s.trim().to_string())
+}
+
+/// 出力の前後の空白を削らない版（`git status --porcelain` は行頭の空白に意味がある）
+pub(crate) fn git_raw(program: &Path, dir: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new(program);
-    cmd.arg("-C").arg(dir).args(args);
+    // 日本語のファイル名を \343\201... のようにエスケープさせない
+    cmd.arg("-c").arg("core.quotepath=false").arg("-C").arg(dir).args(args);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -24,7 +30,7 @@ fn git(program: &Path, dir: &Path, args: &[&str]) -> Result<String, String> {
     }
     let out = cmd.output().map_err(|e| format!("git を実行できませんでした: {e}"))?;
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }

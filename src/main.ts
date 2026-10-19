@@ -7,6 +7,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
+import { createFilesPanel } from "./files";
 
 type Status = "shell" | "starting" | "idle" | "running" | "waiting" | "exited";
 type Agent = "shell" | "claude" | "codex" | "copilot" | "antigravity";
@@ -64,6 +65,7 @@ const STATUS_LABEL: Record<Status, string> = {
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const appWindow = getCurrentWindow();
+const files = createFilesPanel((e) => showError(e));
 
 const sessions = new Map<string, Session>();
 let order: string[] = [];
@@ -133,7 +135,7 @@ new ResizeObserver(() => {
   fitQueued = true;
   requestAnimationFrame(() => {
     fitQueued = false;
-    if (!$("term-wrap").hidden) fit.fit();
+    if (!$("work").hidden) fit.fit();
   });
 }).observe($("term-wrap"));
 
@@ -142,6 +144,7 @@ async function activate(id: string) {
   activeId = id;
   view = "session";
   render();
+  files.setSession(id);
   const token = ++attachToken;
   term.reset();
   fit.fit();
@@ -242,8 +245,10 @@ async function closeSession(id: string) {
   sessions.delete(id);
   order = order.filter((x) => x !== id);
   saveSessions();
+  files.forget(id);
   if (activeId === id) {
     activeId = null;
+    files.setSession(null);
     attachToken++;
     term.reset();
     const next = order[Math.min(idx, order.length - 1)];
@@ -333,7 +338,7 @@ function render() {
   $("overview-btn").classList.toggle("active", overview);
   $("overview").hidden = !overview;
   $("main-head").hidden = !active;
-  $("term-wrap").hidden = !active;
+  $("work").hidden = !active;
   $("empty").hidden = !!active || overview;
   const showRestore = order.length === 0 && restorable.length > 0;
   $("restore").hidden = !showRestore;
@@ -676,6 +681,7 @@ $<HTMLButtonElement>("restore-btn").onclick = async (ev) => {
 $("new-btn").onclick = openNewDialog;
 $("empty-new").onclick = openNewDialog;
 $("close-btn").onclick = () => activeId && closeSession(activeId);
+$("files-btn").onclick = () => files.toggle();
 $("waiting-jump").onclick = nextWaiting;
 $("overview-btn").onclick = showOverview;
 
@@ -698,6 +704,8 @@ document.addEventListener(
       openNewDialog();
     } else if (e.ctrlKey && e.shiftKey && k === "a") {
       nextWaiting();
+    } else if (e.ctrlKey && e.shiftKey && k === "e") {
+      files.toggle();
     } else if (e.ctrlKey && e.shiftKey && k === "w") {
       if (activeId) closeSession(activeId);
     } else if (view === "session" && e.ctrlKey && e.shiftKey && k === "c") {
@@ -748,6 +756,7 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
   const ranFor = s.status === "running" && payload.status === "idle" ? payload.since - s.since : 0;
   Object.assign(s, { status: payload.status, since: payload.since, message: payload.message });
   render();
+  files.sessionChanged(payload.id);
   if (!becameWaiting && ranFor < DONE_NOTIFY_MS) return;
   const watching = payload.id === activeId && view === "session" && (await appWindow.isFocused());
   if (watching) return;

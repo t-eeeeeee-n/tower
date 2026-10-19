@@ -1,4 +1,5 @@
 pub mod agent;
+mod files;
 mod git;
 pub mod hooks;
 mod job;
@@ -53,6 +54,30 @@ fn create_session(
     resume: bool,
 ) -> Result<SessionInfo, String> {
     state.manager.create(&app, name, cwd, agent, resume)
+}
+
+fn session_root(state: &App, id: &str) -> Result<std::path::PathBuf, String> {
+    Ok(std::path::PathBuf::from(&state.manager.get(id)?.cwd))
+}
+
+#[tauri::command]
+fn list_dir(state: State<'_, App>, id: String, path: String) -> Result<Vec<files::Entry>, String> {
+    files::list_dir(&session_root(&state, &id)?, &path)
+}
+
+#[tauri::command]
+fn read_file(state: State<'_, App>, id: String, path: String) -> Result<files::FileContent, String> {
+    files::read_file(&session_root(&state, &id)?, &path)
+}
+
+#[tauri::command]
+fn git_changes(state: State<'_, App>, id: String) -> Result<Vec<files::Change>, String> {
+    Ok(files::changes(&git::git_program(&state.manager.shell.program), &session_root(&state, &id)?))
+}
+
+#[tauri::command]
+fn git_diff(state: State<'_, App>, id: String, path: String) -> Result<String, String> {
+    files::diff(&git::git_program(&state.manager.shell.program), &session_root(&state, &id)?, &path)
 }
 
 #[tauri::command]
@@ -135,6 +160,10 @@ pub fn run() {
             create_session,
             create_worktree,
             installed_agents,
+            list_dir,
+            read_file,
+            git_changes,
+            git_diff,
             notify,
             attach_session,
             peek_sessions,

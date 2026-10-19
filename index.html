@@ -30,10 +30,31 @@
           </div>
           <div class="main-actions">
             <span id="head-status" class="status-text"></span>
+            <button id="files-btn" class="text-btn" title="ファイル（Ctrl+Shift+E）" aria-pressed="false">ファイル</button>
             <button id="close-btn" class="text-btn">閉じる</button>
           </div>
         </header>
-        <div id="term-wrap" class="term-wrap" hidden><div id="term"></div></div>
+        <div id="work" class="work" hidden>
+          <div id="term-wrap" class="term-wrap"><div id="term"></div></div>
+          <div id="files-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="ファイルの幅" hidden></div>
+          <aside id="files" class="files" aria-label="ファイル" hidden>
+            <div class="f-head">
+              <button id="f-collapse" class="f-title" aria-expanded="true" aria-controls="f-tree" title="一覧をたたむ / 開く"><span class="f-chev">▾</span>ファイル</button>
+              <label class="f-toggle"><input id="f-changed-only" type="checkbox" />変更のみ</label>
+              <button id="f-refresh" class="f-icon" title="更新" aria-label="更新">↻</button>
+            </div>
+            <div id="f-tree" class="f-tree" role="tree"></div>
+            <div id="f-hsplit" class="hsplit" role="separator" aria-orientation="horizontal" aria-label="一覧の高さ"></div>
+            <div class="f-head">
+              <span id="fv-path" class="fv-path"></span>
+              <div id="fv-modes" class="fv-modes" hidden>
+                <button data-mode="diff">差分</button>
+                <button data-mode="file">全体</button>
+              </div>
+            </div>
+            <div id="fv-body" class="fv-body"><p class="fv-empty">ファイルを選ぶと中身を表示します。</p></div>
+          </aside>
+        </div>
         <section id="overview" class="overview" hidden>
           <header class="main-head">
             <div class="main-title"><span>一覧</span></div>
