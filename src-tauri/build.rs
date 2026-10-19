@@ -9,5 +9,8 @@ fn main() {
         println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
         println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
     }
+    // rerun-if-changed を出すと監視対象が列挙したものだけになり、アイコンを差し替えても
+    // exe に埋め込むリソースが作り直されなかったので、アイコンのフォルダも監視する
+    println!("cargo:rerun-if-changed=icons");
     tauri_build::try_build(attributes).expect("failed to run tauri-build");
 }
