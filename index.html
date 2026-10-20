@@ -125,9 +125,15 @@
     </dialog>
 
     <dialog id="look-dialog" class="dialog look-dialog">
-      <form id="look-form" method="dialog">
+      <!-- 数値は settings.ts で範囲に収めるので、刻み幅に合わない値（150 など）で送信を止めない -->
+      <form id="look-form" method="dialog" novalidate>
         <h2>設定</h2>
-        <h3 class="look-section">表示</h3>
+        <div class="look-tabs" role="tablist">
+          <button type="button" id="look-tab-view" role="tab" aria-selected="true" aria-controls="look-panel-view">表示</button>
+          <button type="button" id="look-tab-more" role="tab" aria-selected="false" aria-controls="look-panel-more" tabindex="-1">通知と履歴</button>
+        </div>
+        <div class="look-panels">
+        <div id="look-panel-view" role="tabpanel" aria-labelledby="look-tab-view">
         <div class="field">
           <span id="look-themes-label">配色</span>
           <div id="look-themes" class="theme-list" role="listbox" aria-labelledby="look-themes-label"></div>
@@ -159,6 +165,8 @@
             <span>点滅させる</span>
           </label>
         </div>
+        </div>
+        <div id="look-panel-more" role="tabpanel" aria-labelledby="look-tab-more" hidden>
         <h3 class="look-section">通知</h3>
         <label class="check look-notify">
           <input id="look-notify-waiting" type="checkbox" />
@@ -169,6 +177,20 @@
           <span>20 秒以上かかった作業が終わったら知らせる（Windows の通知）</span>
         </label>
         <small class="hint">表示中のセッションを見ているときは知らせません。サイドバーとタイトルの入力待ちの表示はオフにしても残ります。</small>
+        <h3 class="look-section">履歴</h3>
+        <div class="look-row look-history">
+          <label class="field">
+            <span>ターミナルのスクロール履歴（行）</span>
+            <input id="look-scrollback" type="number" min="1000" max="10000" step="500" />
+          </label>
+          <label class="field">
+            <span>一覧でさかのぼれる行数</span>
+            <input id="look-overview" type="number" min="100" max="2000" step="100" />
+          </label>
+        </div>
+        <small class="hint">ターミナルのスクロール履歴は、このあと開くセッションから変わります（開いているセッションは今のまま）。一覧でさかのぼれる行数は、スクロール履歴の行数までです。</small>
+        </div>
+        </div>
         <div class="dialog-actions">
           <button type="button" id="look-gitbash" class="text-btn" title="配色・フォント・カーソルを Git Bash の設定（~/.minttyrc）に合わせる">Git Bash に合わせる</button>
           <button type="button" id="look-reset" class="text-btn look-reset">初期設定に戻す</button>

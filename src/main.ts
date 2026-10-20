@@ -465,6 +465,7 @@ function render() {
 const cards = new Map<string, HTMLElement>();
 const CHOICE = /^[\s│]*(?:[❯›>]\s*)?(\d)\.\s+(.+?)[\s│]*$/;
 let peekTimer = 0;
+let peekLines = 0;
 
 function showOverview() {
   if (view === "overview") return;
@@ -480,9 +481,12 @@ async function pollPeeks() {
     return;
   }
   try {
-    // スクロールしてさかのぼれるよう履歴ごと取る。変わっていないセッションの分は送られてこない
-    const known = Object.fromEntries([...peeks].map(([id, p]) => [id, p.seq]));
-    const list = await invoke<Peek[]>("peek_sessions", { lines: 300, known });
+    // スクロールしてさかのぼれるよう履歴ごと取る。変わっていないセッションの分は送られてこない。
+    // 設定で行数が変わったときは、画面が変わっていなくても全部取り直す
+    const lines = settings.overviewLines();
+    const known = lines === peekLines ? Object.fromEntries([...peeks].map(([id, p]) => [id, p.seq])) : {};
+    peekLines = lines;
+    const list = await invoke<Peek[]>("peek_sessions", { lines, known });
     for (const p of list) peeks.set(p.id, { ...p, lines: p.lines ?? peeks.get(p.id)?.lines ?? [] });
     render();
   } catch (e) {
@@ -576,8 +580,8 @@ function updateCard(card: HTMLElement, s: Session) {
   const peek = peeks.get(s.id);
   const lines = peek?.lines ?? [];
   const tail = q(".c-tail");
-  const text = cleanTail(lines, 300).join("\n");
-  // さかのぼって読んでいる間は更新を止める。300 行を超えると古い行が上から消えて、読んでいる文字がずれるため。
+  const text = cleanTail(lines, settings.overviewLines()).join("\n");
+  // さかのぼって読んでいる間は更新を止める。設定の行数を超えると古い行が上から消えて、読んでいる文字がずれるため。
   // いちばん下まで戻すと、次の更新で最新に追いつく
   const atBottom = !tail.dataset.shown || tail.scrollHeight - tail.scrollTop - tail.clientHeight < 16;
   if (atBottom && tail.textContent !== text) {

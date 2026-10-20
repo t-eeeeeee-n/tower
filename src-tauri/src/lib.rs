@@ -146,6 +146,11 @@ fn rename_session(state: State<'_, App>, id: String, name: String) -> Result<(),
 }
 
 #[tauri::command]
+fn set_scrollback(state: State<'_, App>, lines: usize) {
+    state.manager.set_scrollback(lines);
+}
+
+#[tauri::command]
 fn write_session(state: State<'_, App>, id: String, data: String) -> Result<(), String> {
     state.manager.write(&id, &data)
 }
@@ -205,6 +210,7 @@ pub fn run() {
             attach_session,
             peek_sessions,
             write_session,
+            set_scrollback,
             rename_session,
             resize_session,
             kill_session

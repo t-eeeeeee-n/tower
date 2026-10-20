@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -66,8 +66,10 @@ pub struct Peek {
     pub seq: u64,
 }
 
-/// 仮想端末に残すスクロール履歴の行数（xterm.js の scrollback より少なくする）
-const SCROLLBACK: usize = 2000;
+/// 仮想端末に残すスクロール履歴の行数。設定で変えられ、変えた値は新しく作るセッションから使う
+/// （vt100 の履歴の大きさは作るときに決まる）。フロントは xterm.js の scrollback をこれより大きくする
+const SCROLLBACK_DEFAULT: usize = 2000;
+const SCROLLBACK_RANGE: std::ops::RangeInclusive<usize> = 1000..=10000;
 
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -190,6 +192,7 @@ pub struct Manager {
     /// hooks の受信口。開けなかったときは None（状態表示が無効になるだけで、セッションは動く）
     pub hook: Option<Endpoint>,
     pub shell: ShellSpec,
+    scrollback: AtomicUsize,
 }
 
 impl Manager {
@@ -201,7 +204,13 @@ impl Manager {
             hooks_settings,
             hook,
             shell: find_shell(),
+            scrollback: AtomicUsize::new(SCROLLBACK_DEFAULT),
         }
+    }
+
+    pub fn set_scrollback(&self, lines: usize) {
+        let lines = lines.clamp(*SCROLLBACK_RANGE.start(), *SCROLLBACK_RANGE.end());
+        self.scrollback.store(lines, Ordering::Relaxed);
     }
 
     pub fn get(&self, id: &str) -> Result<Arc<Session>, String> {
@@ -287,7 +296,7 @@ impl Manager {
         let initial = if agent == Agent::Shell { Status::Shell } else { Status::Starting };
         let state = Arc::new(Mutex::new(StatusInfo { status: initial, since: now_ms(), message: None }));
         let term = Arc::new(Mutex::new(Term {
-            parser: vt100::Parser::new(NonZero::new(rows).unwrap(), NonZero::new(cols).unwrap(), SCROLLBACK),
+            parser: vt100::Parser::new(NonZero::new(rows).unwrap(), NonZero::new(cols).unwrap(), self.scrollback.load(Ordering::Relaxed)),
             sink: None,
             carry: Vec::new(),
             seq: 0,

@@ -1,4 +1,4 @@
-// 設定画面：配色・フォント・カーソルと通知。配色は Git Bash（mintty）のテーマファイルから選べる
+// 設定画面：配色・フォント・カーソル、通知、履歴の行数。配色は Git Bash（mintty）のテーマファイルから選べる
 import { invoke } from "@tauri-apps/api/core";
 import type { Terminal } from "@xterm/xterm";
 import { MinttyConfig, Palette, ThemeOption, TOWER, parseMintty, themeOptions, uiTokens, xtermTheme } from "./theme";
@@ -15,6 +15,10 @@ interface Notify {
   waiting: boolean;
   done: boolean;
 }
+interface History {
+  scrollback: number;
+  overview: number;
+}
 
 const DEFAULT: Appearance = { theme: "tower", font: "Cascadia Mono", fontSize: 14, cursor: "block", blink: true };
 const FONTS = ["Cascadia Mono", "Cascadia Code", "Consolas", "BIZ UDGothic", "MS Gothic", "Lucida Console", "Courier New"];
@@ -23,6 +27,14 @@ const FALLBACK = '"Cascadia Code", "BIZ UDGothic", Consolas, "MS Gothic", monosp
 const MIN_SIZE = 8;
 const MAX_SIZE = 32;
 const NOTIFY_DEFAULT: Notify = { waiting: true, done: true };
+const HISTORY_DEFAULT: History = { scrollback: 2000, overview: 300 };
+// Rust 側の SCROLLBACK_RANGE と合わせる
+const SCROLLBACK_MIN = 1000;
+const SCROLLBACK_MAX = 10000;
+const OVERVIEW_MIN = 100;
+const OVERVIEW_MAX = 2000;
+// 切り替えて戻ったとき、仮想端末の履歴に今の画面の行を足した分が xterm.js に入るように余裕を持たせる
+const XTERM_EXTRA_LINES = 300;
 // ~/.minttyrc に書かれていないときの mintty の既定値（mintty のマニュアルの Font・FontHeight・CursorType・CursorBlinks）
 const MINTTY_DEFAULT = { font: "Lucida Console", fontheight: "9", cursortype: "line", cursorblinks: "yes" };
 const CURSOR_BY_MINTTY: Record<string, CursorStyle> = { line: "bar", block: "block", underscore: "underline" };
@@ -78,6 +90,23 @@ function loadNotify(): Notify {
   return { waiting: v.waiting !== false, done: v.done !== false };
 }
 
+function clampInt(n: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, Math.round(n)));
+}
+
+function fitHistory(h: History): History {
+  const scrollback = clampInt(h.scrollback, SCROLLBACK_MIN, SCROLLBACK_MAX);
+  return { scrollback, overview: clampInt(h.overview, OVERVIEW_MIN, Math.min(OVERVIEW_MAX, scrollback)) };
+}
+
+function loadHistory(): History {
+  const v = { ...HISTORY_DEFAULT, ...loadJson<History>("history") };
+  return fitHistory({
+    scrollback: Number.isFinite(v.scrollback) ? v.scrollback : HISTORY_DEFAULT.scrollback,
+    overview: Number.isFinite(v.overview) ? v.overview : HISTORY_DEFAULT.overview,
+  });
+}
+
 function loadSettings(): Appearance {
   const v = { ...DEFAULT, ...loadJson<Appearance>("appearance") };
   return {
@@ -99,11 +128,14 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
   const fFontHint = $("look-font-hint");
   const fNotifyWaiting = $<HTMLInputElement>("look-notify-waiting");
   const fNotifyDone = $<HTMLInputElement>("look-notify-done");
+  const fScrollback = $<HTMLInputElement>("look-scrollback");
+  const fOverview = $<HTMLInputElement>("look-overview");
 
   let settings = loadSettings();
   let options: ThemeOption[] = [{ id: "tower", label: "Tower", palette: TOWER }];
   let gitBash = new Map<string, string>();
   let notify = loadNotify();
+  let history = loadHistory();
   let before = settings;
   // テーマファイルを読み終わるまでは、前回の配色で表示しておく（起動時に Tower の色が一瞬出ないように）
   let cached = loadJson<Palette>("appearancePalette") as Palette | null;
@@ -136,9 +168,16 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
     fFontHint.hidden = !missing;
   }
 
+  function applyHistory() {
+    term.options.scrollback = history.scrollback + XTERM_EXTRA_LINES;
+    invoke("set_scrollback", { lines: history.scrollback }).catch(showError);
+  }
+
   function commit() {
     save("appearance", settings);
     save("notify", notify);
+    save("history", history);
+    applyHistory();
     cached = palette();
     save("appearancePalette", cached);
   }
@@ -188,6 +227,8 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
     fBlink.checked = settings.blink;
     fNotifyWaiting.checked = notify.waiting;
     fNotifyDone.checked = notify.done;
+    fScrollback.value = String(history.scrollback);
+    fOverview.value = String(history.overview);
     checkFont();
     const own = gitBash.get("font");
     $("look-fonts").replaceChildren(
@@ -214,9 +255,11 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
   }
 
   let notifyBefore = notify;
+  let historyBefore = history;
   function cancel() {
     settings = before;
     notify = notifyBefore;
+    history = historyBefore;
     apply();
     dialog.close();
   }
@@ -242,10 +285,41 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
   fBlink.onchange = () => update({ blink: fBlink.checked });
   fNotifyWaiting.onchange = () => (notify = { ...notify, waiting: fNotifyWaiting.checked });
   fNotifyDone.onchange = () => (notify = { ...notify, done: fNotifyDone.checked });
+  // 打っている途中の値（「5」など）で丸めないよう、確定したときに範囲へ収める
+  for (const f of [fScrollback, fOverview]) {
+    f.onchange = () => {
+      const n = Number(f.value);
+      if (f.value && Number.isFinite(n)) {
+        history = fitHistory(f === fScrollback ? { ...history, scrollback: n } : { ...history, overview: n });
+      }
+      fScrollback.value = String(history.scrollback);
+      fOverview.value = String(history.overview);
+    };
+  }
+
+  const tabs = [$("look-tab-view"), $("look-tab-more")];
+  function showTab(i: number) {
+    tabs.forEach((t, j) => {
+      t.setAttribute("aria-selected", String(i === j));
+      t.tabIndex = i === j ? 0 : -1;
+      $(t.getAttribute("aria-controls")!).hidden = i !== j;
+    });
+  }
+  tabs.forEach((t, i) => {
+    t.onclick = () => showTab(i);
+    t.onkeydown = (ev) => {
+      if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+      ev.preventDefault();
+      const next = (i + (ev.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+      showTab(next);
+      tabs[next].focus();
+    };
+  });
   $("look-gitbash").onclick = matchGitBash;
   $("look-reset").onclick = () => {
     update({ ...DEFAULT });
     notify = { ...NOTIFY_DEFAULT };
+    history = { ...HISTORY_DEFAULT };
     fill();
   };
   $("look-cancel").onclick = cancel;
@@ -260,6 +334,7 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
   };
 
   apply();
+  applyHistory();
   invoke<MinttyConfig>("mintty_config")
     .then((m) => {
       options = themeOptions(m);
@@ -274,10 +349,13 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
   return {
     isOpen: () => dialog.open,
     notify: () => notify,
+    overviewLines: () => history.overview,
     open() {
       if (dialog.open) return;
       before = settings;
       notifyBefore = notify;
+      historyBefore = history;
+      showTab(0);
       fill();
       dialog.showModal();
       list.querySelector<HTMLElement>('.theme-opt[tabindex="0"]')?.focus();

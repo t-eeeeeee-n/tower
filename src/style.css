@@ -513,6 +513,22 @@ input:not([type]):focus, input[type="number"]:focus { border-color: var(--st-run
 .look-font-hint[hidden] { display: none; }
 .look-notify { margin: 0 0 8px; }
 .look-notify + .hint { display: block; margin-bottom: 16px; }
+.look-tabs { display: flex; gap: 4px; margin: -4px 0 14px; border-bottom: 1px solid var(--line); }
+.look-tabs button {
+  margin-bottom: -1px;
+  padding: 6px 14px;
+  border: 0; border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+}
+.look-tabs button:hover { color: var(--text); }
+.look-tabs button[aria-selected="true"] { border-bottom-color: var(--st-running); color: var(--text); font-weight: 600; }
+/* 2 つのタブを同じ場所に重ね、高い方に合わせる（切り替えでダイアログの大きさが変わらないように） */
+.look-panels { display: grid; }
+.look-panels > [role="tabpanel"] { grid-area: 1 / 1; }
+.look-panels > [role="tabpanel"][hidden] { display: block; visibility: hidden; }
+.look-row.look-history { grid-template-columns: 1fr 1fr; }
+.look-history + .hint { display: block; margin: -4px 0 16px; }
 .theme-list {
   display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
   max-height: 226px; overflow-y: auto;
