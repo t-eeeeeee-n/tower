@@ -11,7 +11,7 @@
         <header class="sidebar-head">
           <span class="brand"><img class="brand-mark" src="/src/assets/tower.png" width="22" height="22" alt="" /><span class="brand-text">Tower</span></span>
           <button id="new-btn" class="icon-btn" title="新しいセッション（Ctrl+Shift+N）" aria-label="新しいセッション"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.5v11M1.5 7h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
-          <button id="look-btn" class="icon-btn" title="表示の設定（Ctrl+,）" aria-label="表示の設定"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.2a5.8 5.8 0 1 0 0 11.6c.7 0 1.1-.5 1.1-1.1 0-.3-.1-.5-.3-.8-.2-.2-.3-.5-.3-.8 0-.6.5-1.1 1.1-1.1h1.3a3.2 3.2 0 0 0 3.2-3.2C12.8 3.4 10.2 1.2 7 1.2Z" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="4.1" cy="6.2" r="0.9" fill="currentColor"/><circle cx="6" cy="3.9" r="0.9" fill="currentColor"/><circle cx="8.9" cy="4.3" r="0.9" fill="currentColor"/></svg></button>
+          <button id="look-btn" class="icon-btn" title="設定（Ctrl+,）" aria-label="設定"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.3v1.6M7 11.1v1.6M1.3 7h1.6M11.1 7h1.6M2.97 2.97l1.13 1.13M9.9 9.9l1.13 1.13M2.97 11.03l1.13-1.13M9.9 4.1l1.13-1.13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="7" cy="7" r="2.9" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
           <button id="sidebar-toggle" class="icon-btn" title="サイドバーをたたむ（Ctrl+Shift+B）" aria-label="サイドバーをたたむ" aria-expanded="true"><span class="chev">&gt;</span></button>
         </header>
         <button id="overview-btn" class="nav-btn" title="一覧（Ctrl+0）"><span>一覧</span><span class="shortcut">Ctrl+0</span></button>
@@ -79,7 +79,7 @@
             <dt>Ctrl+Shift+A</dt><dd>次の入力待ちへ移動</dd>
             <dt>Ctrl+Shift+C / V</dt><dd>コピー / 貼り付け</dd>
             <dt>Ctrl+Shift+W</dt><dd>セッションを閉じる</dd>
-            <dt>Ctrl+,</dt><dd>表示の設定</dd>
+            <dt>Ctrl+,</dt><dd>設定</dd>
           </dl>
         </section>
       </main>
@@ -124,7 +124,8 @@
 
     <dialog id="look-dialog" class="dialog look-dialog">
       <form id="look-form" method="dialog">
-        <h2>表示の設定</h2>
+        <h2>設定</h2>
+        <h3 class="look-section">表示</h3>
         <div class="field">
           <span id="look-themes-label">配色</span>
           <div id="look-themes" class="theme-list" role="listbox" aria-labelledby="look-themes-label"></div>
@@ -141,6 +142,7 @@
             <input id="look-size" type="number" min="8" max="32" step="1" />
           </label>
         </div>
+        <p id="look-font-hint" class="look-font-hint" role="status" hidden></p>
         <div class="look-row">
           <label class="field">
             <span>カーソル</span>
@@ -155,6 +157,16 @@
             <span>点滅させる</span>
           </label>
         </div>
+        <h3 class="look-section">通知</h3>
+        <label class="check look-notify">
+          <input id="look-notify-waiting" type="checkbox" />
+          <span>入力待ちになったら知らせる（Windows の通知とタスクバーの点滅）</span>
+        </label>
+        <label class="check look-notify">
+          <input id="look-notify-done" type="checkbox" />
+          <span>20 秒以上かかった作業が終わったら知らせる（Windows の通知）</span>
+        </label>
+        <small class="hint">表示中のセッションを見ているときは知らせません。サイドバーとタイトルの入力待ちの表示はオフにしても残ります。</small>
         <div class="dialog-actions">
           <button type="button" id="look-gitbash" class="text-btn" title="配色・フォント・カーソルを Git Bash の設定（~/.minttyrc）に合わせる">Git Bash に合わせる</button>
           <button type="button" id="look-reset" class="text-btn look-reset">初期設定に戻す</button>

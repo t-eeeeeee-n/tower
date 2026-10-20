@@ -8,7 +8,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import { createFilesPanel } from "./files";
-import { createAppearance } from "./appearance";
+import { createSettings } from "./settings";
 
 type Status = "shell" | "starting" | "idle" | "running" | "waiting" | "exited";
 type Agent = "shell" | "claude" | "codex" | "copilot" | "antigravity";
@@ -111,7 +111,7 @@ const term = new Terminal({
 const fit = new FitAddon();
 term.loadAddon(fit);
 term.open($("term"));
-const look = createAppearance(term, () => !$("work").hidden && fit.fit(), (e) => showError(e));
+const settings = createSettings(term, () => !$("work").hidden && fit.fit(), (e) => showError(e));
 
 term.onData((data) => {
   if (activeId) invoke("write_session", { id: activeId, data }).catch(showError);
@@ -686,7 +686,7 @@ $("files-btn").onclick = () => files.toggle();
 $("sidebar-toggle").onclick = toggleSidebar;
 $("waiting-jump").onclick = nextWaiting;
 $("overview-btn").onclick = showOverview;
-$("look-btn").onclick = () => look.open();
+$("look-btn").onclick = () => settings.open();
 
 // ---------- キーボードショートカット ----------
 // キャプチャ段階で拾うので、ターミナルにフォーカスがあっても先に処理される
@@ -694,7 +694,7 @@ $("look-btn").onclick = () => look.open();
 document.addEventListener(
   "keydown",
   async (e) => {
-    if (dialog.open || look.isOpen()) return;
+    if (dialog.open || settings.isOpen()) return;
     const k = e.key.toLowerCase();
     let handled = true;
     if (e.ctrlKey && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key)) {
@@ -704,7 +704,7 @@ document.addEventListener(
       if (view === "session") showOverview();
       else if (activeId) activate(activeId);
     } else if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === ",") {
-      look.open();
+      settings.open();
     } else if (e.ctrlKey && e.shiftKey && k === "n") {
       openNewDialog();
     } else if (e.ctrlKey && e.shiftKey && k === "a") {
@@ -768,9 +768,10 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
   const watching = payload.id === activeId && view === "session" && (await appWindow.isFocused());
   if (watching) return;
   if (becameWaiting) {
+    if (!settings.notify().waiting) return;
     appWindow.requestUserAttention(UserAttentionType.Informational).catch(() => {});
     notify(s.id, `${s.name}: 入力待ち`, s.message ?? "入力を待っています");
-  } else {
+  } else if (settings.notify().done) {
     notify(s.id, `${s.name}: 完了`, `作業が終わりました（${fmtDuration(ranFor)}）`);
   }
 });
