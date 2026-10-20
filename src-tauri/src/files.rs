@@ -39,6 +39,16 @@ impl Changes {
     pub fn untrusted() -> Self {
         Changes { changes: Vec::new(), blocked: None, trusted: false }
     }
+
+    /// Git を使っていないフォルダ（表示するものが無いので、信頼の確認も出さない）
+    pub fn no_repo() -> Self {
+        Changes { changes: Vec::new(), blocked: None, trusted: true }
+    }
+}
+
+/// フォルダかその親に .git（フォルダ、または worktree の .git ファイル）があるか。git は実行しない
+pub fn in_repo(root: &Path) -> bool {
+    root.canonicalize().is_ok_and(|p| p.ancestors().any(|d| d.join(".git").exists()))
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -229,6 +239,12 @@ mod tests {
         std::fs::write(base.join("src/a.txt"), "one\ntwo\n").unwrap();
         std::fs::write(base.join("新規.txt"), "x").unwrap();
         std::fs::write(base.join("bin.dat"), [0u8, 1, 2]).unwrap();
+
+        assert!(in_repo(&base) && in_repo(&base.join("src")), "リポジトリの中のサブフォルダも対象");
+        let plain = std::env::temp_dir().join(format!("tower-norepo-{}", std::process::id()));
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(!in_repo(&plain), "Git を使っていないフォルダ");
+        let _ = std::fs::remove_dir_all(&plain);
 
         let names: Vec<_> = list_dir(&base, "").unwrap().into_iter().map(|e| (e.name, e.dir)).collect();
         assert_eq!(names[0], ("src".into(), true), "フォルダが先で、.git は出さない: {names:?}");

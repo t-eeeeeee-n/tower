@@ -75,6 +75,9 @@ fn read_file(state: State<'_, App>, id: String, path: String) -> Result<files::F
 #[tauri::command]
 fn git_changes(state: State<'_, App>, id: String) -> Result<files::Changes, String> {
     let root = session_root(&state, &id)?;
+    if !files::in_repo(&root) {
+        return Ok(files::Changes::no_repo());
+    }
     if !state.trust.contains(&root) {
         return Ok(files::Changes::untrusted());
     }
