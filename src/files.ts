@@ -103,6 +103,8 @@ export function createFilesPanel(showError: (e: unknown) => void) {
   let changes = new Map<string, string>();
   // 安全のため Git を呼ばなかったときの理由（一覧の上に出す）
   let blocked: string | null = null;
+  // 利用者がこのフォルダで Git の表示を許可しているか（許可していなければ Rust 側で Git を呼ばない）
+  let trusted = true;
   let sessionId: string | null = null;
   let open = load("filesOpen") === "1";
   let shownKey = "";
@@ -150,7 +152,7 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     refreshing = true;
     const id = sessionId;
     try {
-      const res = await invoke<{ changes: Change[]; blocked: string | null }>("git_changes", { id });
+      const res = await invoke<{ changes: Change[]; blocked: string | null; trusted: boolean }>("git_changes", { id });
       const v = view();
       for (const dir of v.expanded) {
         await listing(dir).catch(() => v.expanded.delete(dir));
@@ -158,6 +160,7 @@ export function createFilesPanel(showError: (e: unknown) => void) {
       if (id !== sessionId) return;
       changes = new Map(res.changes.map((c) => [c.path, c.status]));
       blocked = res.blocked;
+      trusted = res.trusted;
       renderTree();
       await renderViewer();
     } catch (e) {
@@ -194,7 +197,7 @@ export function createFilesPanel(showError: (e: unknown) => void) {
 
   function renderTree() {
     const v = view();
-    const notice = blocked ? [el("p", "f-note f-warn", blocked)] : [];
+    const notice = trusted ? (blocked ? [el("p", "f-note f-warn", blocked)] : []) : [trustPrompt()];
     if (changedOnly.checked) {
       const paths = [...changes.keys()].sort();
       tree.replaceChildren(
@@ -229,6 +232,28 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     };
     walk("", 0);
     tree.replaceChildren(...notice, ...(rows.length ? rows : [el("p", "f-note", "ファイルがありません")]));
+  }
+
+  function trustPrompt() {
+    const box = el("div", "f-trust");
+    box.append(
+      el("p", "", "このフォルダで Git の変更を表示しますか？"),
+      el("p", "f-trust-sub", "Git はリポジトリの設定によってコマンドを実行することがあります。自分のリポジトリなど、信用できるフォルダだけ許可してください。ファイルの一覧と中身は、許可しなくても見られます。"),
+    );
+    const b = el("button", "primary-btn", "このフォルダを信頼して表示する");
+    b.type = "button";
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        await invoke("trust_folder", { id: sessionId });
+        refresh();
+      } catch (e) {
+        b.disabled = false;
+        showError(e);
+      }
+    };
+    box.append(b);
+    return box;
   }
 
   async function toggleDir(rel: string) {
@@ -447,6 +472,7 @@ export function createFilesPanel(showError: (e: unknown) => void) {
       listings.clear();
       changes = new Map();
       blocked = null;
+      trusted = true;
       shownKey = "";
       tree.replaceChildren();
       if (id) refresh();

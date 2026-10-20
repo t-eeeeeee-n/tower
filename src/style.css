@@ -251,6 +251,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .f-dot { margin-left: auto; padding-left: 8px; color: var(--st-waiting); font-size: 8px; }
 .f-note { margin: 10px 14px; color: var(--faint); }
 .f-warn { color: var(--st-waiting); }
+.f-trust { margin: 8px 10px 10px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--st-waiting) 50%, var(--line)); border-radius: 6px; background: color-mix(in srgb, var(--st-waiting) 7%, transparent); }
+.f-trust p { margin: 0 0 6px; font-weight: 600; }
+.f-trust .f-trust-sub { font-weight: 400; color: var(--muted); font-size: 12px; margin-bottom: 10px; }
 .fv-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
 .fv-modes { display: flex; margin-left: auto; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; flex: none; }
 .fv-modes[hidden] { display: none; }

@@ -31,6 +31,14 @@ pub struct Changes {
     pub changes: Vec<Change>,
     /// 安全のため Git を呼ばなかったときの理由
     pub blocked: Option<String>,
+    /// 利用者がこのフォルダで Git の表示を許可しているか。許可していなければ Git は呼ばない
+    pub trusted: bool,
+}
+
+impl Changes {
+    pub fn untrusted() -> Self {
+        Changes { changes: Vec::new(), blocked: None, trusted: false }
+    }
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -117,7 +125,7 @@ fn repo_filter(program: &Path, root: &Path) -> Option<String> {
 
 /// フォルダの中の Git の変更。Git リポジトリでなければ空。
 pub fn changes(program: &Path, root: &Path) -> Changes {
-    let none = |blocked| Changes { changes: Vec::new(), blocked };
+    let none = |blocked| Changes { changes: Vec::new(), blocked, trusted: true };
     // status のパスはリポジトリのルートからの相対なので、セッションのフォルダがサブフォルダならその分を取り除く
     let Ok(prefix) = git(program, root, &["rev-parse", "--show-prefix"]) else { return none(None) };
     if let Some(reason) = repo_filter(program, root) {
@@ -126,7 +134,7 @@ pub fn changes(program: &Path, root: &Path) -> Changes {
     // サブモジュールの中は設定が別なので、上の確認が効かない。中までは調べない
     let args = ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all", "--", "."];
     let Ok(out) = git_raw(program, root, &args) else { return none(None) };
-    Changes { changes: parse_status(&out, &prefix), blocked: None }
+    Changes { changes: parse_status(&out, &prefix), blocked: None, trusted: true }
 }
 
 fn parse_status(out: &str, prefix: &str) -> Vec<Change> {

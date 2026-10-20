@@ -1,6 +1,7 @@
 pub mod agent;
 mod files;
 mod git;
+mod trust;
 pub mod hooks;
 mod job;
 pub mod memory;
@@ -19,6 +20,7 @@ use session::{Manager, SessionInfo};
 struct App {
     manager: Arc<Manager>,
     hooks_error: Mutex<Option<String>>,
+    trust: trust::Trust,
 }
 
 #[derive(Serialize)]
@@ -72,12 +74,25 @@ fn read_file(state: State<'_, App>, id: String, path: String) -> Result<files::F
 
 #[tauri::command]
 fn git_changes(state: State<'_, App>, id: String) -> Result<files::Changes, String> {
-    Ok(files::changes(&git::git_program(&state.manager.shell.program), &session_root(&state, &id)?))
+    let root = session_root(&state, &id)?;
+    if !state.trust.contains(&root) {
+        return Ok(files::Changes::untrusted());
+    }
+    Ok(files::changes(&git::git_program(&state.manager.shell.program), &root))
 }
 
 #[tauri::command]
 fn git_diff(state: State<'_, App>, id: String, path: String) -> Result<String, String> {
-    files::diff(&git::git_program(&state.manager.shell.program), &session_root(&state, &id)?, &path)
+    let root = session_root(&state, &id)?;
+    if !state.trust.contains(&root) {
+        return Err("このフォルダは信頼していないので、Git の差分は表示しません".into());
+    }
+    files::diff(&git::git_program(&state.manager.shell.program), &root, &path)
+}
+
+#[tauri::command]
+fn trust_folder(state: State<'_, App>, id: String) -> Result<(), String> {
+    state.trust.add(&session_root(&state, &id)?)
 }
 
 #[tauri::command]
@@ -87,7 +102,12 @@ fn installed_agents() -> Vec<Agent> {
 
 #[tauri::command]
 fn create_worktree(state: State<'_, App>, cwd: String, branch: String) -> Result<String, String> {
-    git::create_worktree(&git::git_program(&state.manager.shell.program), &cwd, &branch)
+    let dir = git::create_worktree(&git::git_program(&state.manager.shell.program), &cwd, &branch)?;
+    // 信頼したフォルダから作った worktree は、同じリポジトリなので信頼済みにする
+    if state.trust.contains(std::path::Path::new(&cwd)) {
+        state.trust.add(std::path::Path::new(&dir))?;
+    }
+    Ok(dir)
 }
 
 #[tauri::command]
@@ -149,7 +169,8 @@ pub fn run() {
                 hooks::serve(server, endpoint, app.handle().clone(), manager.clone());
             }
             memory::start(app.handle().clone(), manager.clone());
-            app.manage(App { manager, hooks_error: Mutex::new(hooks_error) });
+            let trust = trust::Trust::load(dir.join("trusted-folders.json"));
+            app.manage(App { manager, hooks_error: Mutex::new(hooks_error), trust });
             app.manage(notify::Notifier::default());
             notify::init(app.handle());
             Ok(())
@@ -164,6 +185,7 @@ pub fn run() {
             read_file,
             git_changes,
             git_diff,
+            trust_folder,
             notify,
             attach_session,
             peek_sessions,
