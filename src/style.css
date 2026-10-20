@@ -376,22 +376,6 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .c-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .c-status { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; color: var(--st); white-space: nowrap; }
 .c-status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--st); }
-/* 指示と返答 */
-.c-talk {
-  display: flex; flex-direction: column; gap: 14px;
-  flex: 1 1 0; min-height: 0; overflow-y: auto;
-  margin: 0 4px 8px 10px; padding-right: 6px;
-  scrollbar-color: var(--line) transparent;
-}
-.c-talk[hidden] { display: none; }
-.c-turn { display: grid; gap: 6px; }
-.c-who { display: block; margin-bottom: 2px; color: var(--faint); font-size: 11.5px; }
-.c-you-text { margin: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
-.c-reply { padding: 8px 10px; background: var(--ink); border-radius: 4px; }
-.c-reply-text.md-preview { padding: 0; max-width: none; font-size: 13px; line-height: 1.6; }
-.c-reply-text.md-preview pre { background: var(--panel); }
-.c-reply-text.md-preview :is(h1, h2, h3, h4) { margin: 0.9em 0 0.3em; padding: 0; border: 0; font-size: 1.02em; }
-.card .c-talk { cursor: auto; }
 
 .c-tail {
   flex: 1 1 0; min-height: 0;
@@ -419,7 +403,6 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 .c-choices button:hover { background: var(--raise-2); }
 .c-choices button.first { background: var(--st-waiting); border-color: var(--st-waiting); color: var(--on-waiting); font-weight: 600; }
-.has-talk .c-tail { flex: none; height: calc(8 * 1.4em + 12px); opacity: 0.8; }
 .c-input { display: flex; gap: 6px; margin: 8px 10px 0; }
 .c-input input { flex: 1; min-width: 0; padding: 5px 8px; }
 .c-tpl { flex: none; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--muted); font-size: 12px; }

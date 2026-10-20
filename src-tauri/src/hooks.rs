@@ -29,15 +29,8 @@ pub struct Endpoint {
     pub token: String,
 }
 
-/// hook の入力を受信口に送るイベント。入力待ちのメッセージ（notification）と、一覧画面に出す指示と最後の返答だけ。
-/// ツールの実行などの入力にはコマンドやファイルの内容が入るので送らない。
-const BODY_EVENTS: &[&str] = &["notification", "user_prompt_submit", "stop"];
-
-fn sends_body(slug: &str) -> bool {
-    BODY_EVENTS.contains(&slug)
-}
-
-/// bash で受信口に POST するコマンド。with_body が false なら hook の入力は捨てる。
+/// bash で受信口に POST するコマンド。
+/// 入力待ちのメッセージ表示に使う notification 以外は、hook の入力（コマンドやファイル内容を含む）を送らない。
 /// Tower が落ちていてもエージェントの動作は止めない（--max-time と || true）。
 fn post_bash(event: &str, with_body: bool) -> String {
     let (drain, body) = if with_body { ("", "--data-binary @-") } else { ("cat >/dev/null; ", "-d ''") };
@@ -80,7 +73,7 @@ pub fn write_settings(path: &Path) -> std::io::Result<()> {
     ];
     let mut hooks = serde_json::Map::new();
     for (name, slug) in EVENTS {
-        let mut entry = json!({ "hooks": [{ "type": "command", "command": post_bash(slug, sends_body(slug)) }] });
+        let mut entry = json!({ "hooks": [{ "type": "command", "command": post_bash(slug, *slug == "notification") }] });
         if *name == "PreToolUse" {
             entry["matcher"] = json!("*");
         }
@@ -98,7 +91,7 @@ pub fn codex_profile() -> String {
         ("PreToolUse", "pre_tool_use"),
         ("PermissionRequest", "notification"),
         ("Stop", "stop"),
-        // 承認を断ったときや Esc で止めたときは Stop ではなく Interrupt になる（返答は無いので中身は送らない）
+        // 承認を断ったときや Esc で止めたときは Stop ではなく Interrupt になる
         ("Interrupt", "stop"),
         ("SessionEnd", "session_end"),
     ];
@@ -110,10 +103,9 @@ pub fn codex_profile() -> String {
         // Codex は SessionEnd と Interrupt の timeout を 3 秒に切り詰めて毎回警告を出すので、最初から 3 秒にする
         let timeout = if matches!(*name, "SessionEnd" | "Interrupt") { 3 } else { 10 };
         out.push_str(&format!("\n[[hooks.{name}]]\n[[hooks.{name}.hooks]]\ntype = \"command\"\ntimeout = {timeout}\n"));
-        let with_body = sends_body(slug) && !matches!(*name, "PermissionRequest" | "Interrupt");
         // bash 版は '' を含むので、一重引用符を含められる複数行リテラル文字列にする
-        out.push_str(&format!("command = '''{}'''\n", post_bash(slug, with_body)));
-        out.push_str(&format!("commandWindows = '{}'\n", post_powershell(slug, with_body)));
+        out.push_str(&format!("command = '''{}'''\n", post_bash(slug, false)));
+        out.push_str(&format!("commandWindows = '{}'\n", post_powershell(slug, false)));
     }
     out.push_str(CODEX_END);
     out.push('\n');
@@ -170,7 +162,7 @@ pub fn copilot_hooks() -> Value {
     ];
     let mut hooks = serde_json::Map::new();
     for (name, slug) in EVENTS {
-        let with_body = sends_body(slug);
+        let with_body = *slug == "notification";
         hooks.insert(
             (*name).to_string(),
             json!([{
@@ -262,17 +254,6 @@ fn read_notification(body: &str) -> (bool, Option<String>) {
     (waiting, v.get("message").and_then(|m| m.as_str()).map(String::from))
 }
 
-/// 一覧画面に出す、指示（UserPromptSubmit の prompt）と最後の返答（Stop の last_assistant_message）
-fn read_talk(event: &str, body: &str) -> Option<String> {
-    let key = match event {
-        "user_prompt_submit" => "prompt",
-        "stop" => "last_assistant_message",
-        _ => return None,
-    };
-    let v: Value = serde_json::from_str(body.trim_start_matches('\u{feff}')).ok()?;
-    v.get(key)?.as_str().filter(|s| !s.trim().is_empty()).map(String::from)
-}
-
 pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: AppHandle<R>, manager: Arc<Manager>) {
     std::thread::spawn(move || {
         for mut req in server.incoming_requests() {
@@ -293,12 +274,6 @@ pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: App
                         manager.apply_hook(&app, &parts[1], "notification", message);
                     }
                 } else {
-                    let text = read_talk(&parts[2], &body);
-                    match parts[2].as_str() {
-                        "user_prompt_submit" => manager.record_talk(&parts[1], text.as_deref(), None),
-                        "stop" => manager.record_talk(&parts[1], None, text.as_deref()),
-                        _ => {}
-                    }
                     manager.apply_hook(&app, &parts[1], &parts[2], None);
                 }
             }
@@ -321,15 +296,6 @@ mod tests {
         assert_eq!(read_notification(""), (true, None));
         // BOM 付きでも読める
         assert!(!read_notification("\u{feff}{\"notification_type\":\"agent_idle\"}").0);
-    }
-
-    #[test]
-    fn reads_prompt_and_last_reply() {
-        assert_eq!(read_talk("user_prompt_submit", r#"{"prompt":"テストして"}"#).as_deref(), Some("テストして"));
-        assert_eq!(read_talk("stop", r#"{"last_assistant_message":"done"}"#).as_deref(), Some("done"));
-        assert_eq!(read_talk("stop", r#"{"stop_hook_active":false}"#), None);
-        assert_eq!(read_talk("stop", ""), None);
-        assert_eq!(read_talk("pre_tool_use", r#"{"prompt":"x"}"#), None);
     }
 
     #[test]
@@ -361,11 +327,5 @@ mod tests {
             assert_eq!(line.matches('\'').count(), 2, "{line}");
         }
         assert!(p.contains("[[hooks.PermissionRequest]]"));
-        // 中身を送るのは指示と返答だけ（PermissionRequest にはコマンドが入る）
-        let section = |name: &str| p.split(&format!("[[hooks.{name}.hooks]]")).nth(1).unwrap().split("\n\n").next().unwrap().to_string();
-        let permission = section("PermissionRequest");
-        assert!(permission.contains("cat >/dev/null"), "{permission}");
-        let prompt = section("UserPromptSubmit");
-        assert!(prompt.contains("--data-binary @-"), "{prompt}");
     }
 }

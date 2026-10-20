@@ -141,11 +141,6 @@ fn peek_sessions(state: State<'_, App>, lines: usize, known: std::collections::H
 }
 
 #[tauri::command]
-fn session_talk(state: State<'_, App>, id: String) -> Result<Vec<session::Turn>, String> {
-    state.manager.talk(&id)
-}
-
-#[tauri::command]
 fn rename_session(state: State<'_, App>, id: String, name: String) -> Result<(), String> {
     state.manager.rename(&id, &name)
 }
@@ -211,7 +206,6 @@ pub fn run() {
             peek_sessions,
             write_session,
             rename_session,
-            session_talk,
             resize_session,
             kill_session
         ])

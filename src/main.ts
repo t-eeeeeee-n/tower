@@ -7,7 +7,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
-import { createFilesPanel, markdownHtml } from "./files";
+import { createFilesPanel } from "./files";
 import { createTemplates } from "./templates";
 import { createSettings } from "./settings";
 
@@ -39,11 +39,6 @@ interface Peek {
   /** 前回から画面が変わっていなければ null */
   lines: string[] | null;
   seq: number;
-  talk_rev: number;
-}
-interface Turn {
-  prompt: string | null;
-  reply: string | null;
 }
 interface Config {
   shell: string;
@@ -485,22 +480,10 @@ async function pollPeeks() {
     return;
   }
   try {
-    // 枠を取り除くと行が減るので多めに取る
     // スクロールしてさかのぼれるよう履歴ごと取る。変わっていないセッションの分は送られてこない
     const known = Object.fromEntries([...peeks].map(([id, p]) => [id, p.seq]));
     const list = await invoke<Peek[]>("peek_sessions", { lines: 300, known });
     for (const p of list) peeks.set(p.id, { ...p, lines: p.lines ?? peeks.get(p.id)?.lines ?? [] });
-    // やり取りの全文は、増えたときだけ取りに行く
-    await Promise.all(
-      list
-        .filter((p) => p.talk_rev !== talks.get(p.id)?.rev)
-        .map((p) =>
-          invoke<Turn[]>("session_talk", { id: p.id })
-            .then((turns) => talks.set(p.id, { rev: p.talk_rev, turns }))
-            // 取りに行く間に閉じられたセッションは無視する
-            .catch(() => {}),
-        ),
-    );
     render();
   } catch (e) {
     showError(e);
@@ -542,31 +525,11 @@ function cleanTail(lines: string[], max: number) {
   return out.slice(-max);
 }
 
-const talks = new Map<string, { rev: number; turns: Turn[] }>();
-
-function turnEl(t: Turn, agent: Agent) {
-  const div = el("div", "c-turn");
-  if (t.prompt) {
-    const you = el("div", "c-you");
-    you.append(el("span", "c-who", "あなた"), el("p", "c-you-text", t.prompt));
-    div.append(you);
-  }
-  if (t.reply) {
-    const reply = el("div", "c-reply");
-    const body = el("div", "c-reply-text md-preview");
-    body.innerHTML = markdownHtml(t.reply);
-    reply.append(el("span", "c-who", AGENT_LABEL[agent]), body);
-    div.append(reply);
-  }
-  return div;
-}
-
 function makeCard(id: string) {
   const card = el("article", "card");
   card.tabIndex = 0;
   const head = el("header", "c-head");
   head.append(el("span", "c-name"), el("span", "c-agent"), el("span", "c-status"));
-  const talk = el("div", "c-talk");
   const form = el("form", "c-input");
   const input = el("input");
   input.placeholder = "指示を送る（Enter）";
@@ -590,16 +553,10 @@ function makeCard(id: string) {
   };
   const foot = el("footer", "c-foot");
   foot.append(el("span", "c-age"), el("span", "c-mem"));
-  card.append(head, talk, el("pre", "c-tail"), el("div", "c-msg"), el("div", "c-choices"), form, foot);
+  card.append(head, el("pre", "c-tail"), el("div", "c-msg"), el("div", "c-choices"), form, foot);
   card.onclick = (ev) => {
-    const target = ev.target as HTMLElement;
-    // 返答の中のリンクは開かない（Tower の画面ごと移動してしまう）
-    if (target.closest("a")) {
-      ev.preventDefault();
-      return;
-    }
     // 文章を選んでいるときは、選び終わりのクリックで切り替えない
-    if (target.closest("button, input") || getSelection()?.toString()) return;
+    if ((ev.target as HTMLElement).closest("button, input") || getSelection()?.toString()) return;
     activate(id);
   };
   card.onkeydown = (ev) => {
@@ -618,19 +575,6 @@ function updateCard(card: HTMLElement, s: Session) {
 
   const peek = peeks.get(s.id);
   const lines = peek?.lines ?? [];
-  const talk = talks.get(s.id);
-  const hasTalk = !!talk?.turns.length;
-  card.classList.toggle("has-talk", hasTalk);
-  const talkBox = q(".c-talk");
-  talkBox.hidden = !hasTalk;
-  if (talk && talkBox.dataset.rev !== String(talk.rev)) {
-    // さかのぼって読んでいる途中なら位置を保ち、いちばん下を見ているときだけ新しいやり取りに付いていく
-    const follow = !talkBox.dataset.rev || talkBox.scrollHeight - talkBox.scrollTop - talkBox.clientHeight < 24;
-    talkBox.dataset.rev = String(talk.rev);
-    talkBox.replaceChildren(...talk.turns.map((t) => turnEl(t, s.agent)));
-    if (follow) talkBox.scrollTop = talkBox.scrollHeight;
-  }
-
   const tail = q(".c-tail");
   const text = cleanTail(lines, 300).join("\n");
   // さかのぼって読んでいる間は更新を止める。300 行を超えると古い行が上から消えて、読んでいる文字がずれるため。
@@ -682,7 +626,6 @@ function renderOverview(waitingCount: number, total: number) {
     if (!sessions.has(id)) {
       card.remove();
       cards.delete(id);
-      talks.delete(id);
     }
   }
   const rank = (s: Session) => (s.status === "waiting" ? 0 : s.status === "exited" ? 2 : 1);

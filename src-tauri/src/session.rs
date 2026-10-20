@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
@@ -58,67 +58,16 @@ struct StatusEvent {
     state: StatusInfo,
 }
 
-/// 指示とそれへの返答の 1 往復。hooks の取りこぼしや再開したセッションでは、片方だけのこともある
-#[derive(Clone, Serialize, PartialEq, Debug)]
-pub struct Turn {
-    pub prompt: Option<String>,
-    pub reply: Option<String>,
-}
-
-/// hooks で受け取ったやり取り（一覧画面に出す。保存はしない）
-#[derive(Default)]
-struct Talk {
-    turns: VecDeque<Turn>,
-    /// 変わるたびに増やす。一覧画面は毎秒これだけを見て、変わったときだけ全文を取りに来る
-    rev: u64,
-}
-
-impl Talk {
-    fn prompt(&mut self, text: &str) {
-        self.push(Turn { prompt: Some(clip(text)), reply: None });
-    }
-
-    fn reply(&mut self, text: &str) {
-        match self.turns.back_mut() {
-            Some(t) if t.reply.is_none() => {
-                t.reply = Some(clip(text));
-                self.rev += 1;
-            }
-            _ => self.push(Turn { prompt: None, reply: Some(clip(text)) }),
-        }
-    }
-
-    fn push(&mut self, turn: Turn) {
-        self.turns.push_back(turn);
-        if self.turns.len() > MAX_TURNS {
-            self.turns.pop_front();
-        }
-        self.rev += 1;
-    }
-}
-
 #[derive(Serialize)]
 pub struct Peek {
     pub id: String,
     /// 呼び出し側が知っている seq から画面が変わっていなければ None（毎秒送り直さないため）
     pub lines: Option<Vec<String>>,
     pub seq: u64,
-    pub talk_rev: u64,
 }
 
 /// 仮想端末に残すスクロール履歴の行数（xterm.js の scrollback より少なくする）
 const SCROLLBACK: usize = 2000;
-/// 一覧画面に出す指示と返答の最大文字数
-const MAX_TALK_CHARS: usize = 4000;
-/// 覚えておくやり取りの数
-const MAX_TURNS: usize = 50;
-
-fn clip(s: &str) -> String {
-    match s.char_indices().nth(MAX_TALK_CHARS) {
-        Some((i, _)) => format!("{}…", &s[..i]),
-        None => s.to_string(),
-    }
-}
 
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -170,7 +119,6 @@ impl Term {
 pub struct Session {
     pub id: String,
     name: Mutex<String>,
-    talk: Mutex<Talk>,
     pub cwd: String,
     pub created: u64,
     pub agent: Agent,
@@ -440,7 +388,6 @@ impl Manager {
         let session = Arc::new(Session {
             id: id.clone(),
             name: Mutex::new(name),
-            talk: Mutex::default(),
             cwd,
             created: now_ms(),
             agent,
@@ -493,7 +440,7 @@ impl Manager {
                 let mut t = s.term.lock().unwrap();
                 let seq = t.seq;
                 let lines = (known.get(&s.id) != Some(&seq)).then(|| tail_lines(&mut t.parser, max_lines));
-                Peek { id: s.id.clone(), lines, seq, talk_rev: s.talk.lock().unwrap().rev }
+                Peek { id: s.id.clone(), lines, seq }
             })
             .collect()
     }
@@ -505,22 +452,6 @@ impl Manager {
         }
         *self.get(id)?.name.lock().unwrap() = name.to_string();
         Ok(())
-    }
-
-    /// hooks で届いた指示と返答を、やり取りの順に覚える
-    pub fn record_talk(&self, id: &str, prompt: Option<&str>, reply: Option<&str>) {
-        let Ok(session) = self.get(id) else { return };
-        let mut talk = session.talk.lock().unwrap();
-        if let Some(p) = prompt {
-            talk.prompt(p);
-        }
-        if let Some(r) = reply {
-            talk.reply(r);
-        }
-    }
-
-    pub fn talk(&self, id: &str) -> Result<Vec<Turn>, String> {
-        Ok(self.get(id)?.talk.lock().unwrap().turns.iter().cloned().collect())
     }
 
     pub fn write(&self, id: &str, data: &str) -> Result<(), String> {
@@ -646,7 +577,7 @@ fn resize_locked(session: &Session, t: &mut Term, cols: u16, rows: u16) {
 
 #[cfg(test)]
 mod tests {
-    use super::{clip, history, tail_lines, Talk, Term, Turn, MAX_TALK_CHARS, MAX_TURNS};
+    use super::{history, tail_lines, Term};
     use std::num::NonZero;
 
     #[test]
@@ -663,27 +594,6 @@ mod tests {
     }
 
     #[test]
-    fn keeps_turns_in_order() {
-        let turn = |p: Option<&str>, r: Option<&str>| Turn { prompt: p.map(String::from), reply: r.map(String::from) };
-        let mut t = Talk::default();
-        t.prompt("a");
-        t.reply("A");
-        t.prompt("b");
-        assert_eq!(Vec::from(t.turns.clone()), [turn(Some("a"), Some("A")), turn(Some("b"), None)]);
-        t.reply("B");
-        // 指示が届かないまま返答が続いたら、返答だけのやり取りとして足す
-        t.reply("B2");
-        assert_eq!(t.turns.back(), Some(&turn(None, Some("B2"))));
-        assert_eq!(t.rev, 5);
-
-        for i in 0..MAX_TURNS {
-            t.prompt(&i.to_string());
-        }
-        assert_eq!(t.turns.len(), MAX_TURNS);
-        assert_eq!(t.turns.front().unwrap().prompt.as_deref(), Some("0"));
-    }
-
-    #[test]
     fn tail_includes_scrollback() {
         let mut p = vt100::Parser::new(NonZero::new(3).unwrap(), NonZero::new(20).unwrap(), 100);
         for i in 1..=7 {
@@ -694,12 +604,6 @@ mod tests {
         assert_eq!(p.screen().scrollback(), 0);
     }
 
-    #[test]
-    fn clips_long_talk() {
-        assert_eq!(clip("短い"), "短い");
-        let long = "あ".repeat(MAX_TALK_CHARS + 5);
-        assert_eq!(clip(&long).chars().count(), MAX_TALK_CHARS + 1);
-    }
 
     #[test]
     fn shrinking_through_a_wide_char_does_not_panic() {
