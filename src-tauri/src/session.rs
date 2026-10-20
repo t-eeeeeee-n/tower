@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -279,7 +280,7 @@ impl Manager {
         let initial = if agent == Agent::Shell { Status::Shell } else { Status::Starting };
         let state = Arc::new(Mutex::new(StatusInfo { status: initial, since: now_ms(), message: None }));
         let term = Arc::new(Mutex::new(Term {
-            parser: vt100::Parser::new(rows, cols, 0),
+            parser: vt100::Parser::new(NonZero::new(rows).unwrap(), NonZero::new(cols).unwrap(), 0),
             sink: None,
             carry: Vec::new(),
         }));
@@ -412,7 +413,7 @@ impl Manager {
         resize_locked(&session, &mut t, cols, rows);
         let snapshot = t.parser.screen().state_formatted();
         t.sink = Some(channel);
-        Ok(String::from_utf8_lossy(&snapshot).into_owned())
+        Ok(snapshot)
     }
 
     /// 全セッションの画面末尾（空行を除いた最後の max_lines 行）を返す
@@ -423,7 +424,7 @@ impl Manager {
                 let t = s.term.lock().unwrap();
                 let screen = t.parser.screen();
                 let (_, cols) = screen.size();
-                let mut rows: Vec<String> = screen.rows(0, cols).map(|r| r.trim_end().to_string()).collect();
+                let mut rows: Vec<String> = screen.rows(0, cols.get()).map(|r| r.trim_end().to_string()).collect();
                 while rows.last().is_some_and(|r| r.is_empty()) {
                     rows.pop();
                 }
@@ -500,10 +501,10 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 fn resize_locked(session: &Session, t: &mut Term, cols: u16, rows: u16) {
     let (cols, rows) = (cols.max(10), rows.max(4));
     let (cur_rows, cur_cols) = t.parser.screen().size();
-    if cur_rows == rows && cur_cols == cols {
+    if cur_rows.get() == rows && cur_cols.get() == cols {
         return;
     }
-    t.parser.screen_mut().set_size(rows, cols);
+    t.parser.screen_mut().set_size(NonZero::new(rows).unwrap(), NonZero::new(cols).unwrap());
     let _ = session
         .master
         .lock()
@@ -514,10 +515,21 @@ fn resize_locked(session: &Session, t: &mut Term, cols: u16, rows: u16) {
 #[cfg(test)]
 mod tests {
     use super::Term;
+    use std::num::NonZero;
+
+    #[test]
+    fn shrinking_through_a_wide_char_does_not_panic() {
+        // vt100 0.16 は、縮めて右端で切れた全角文字の上に書くと範囲外アクセスで落ちた
+        let mut p = vt100::Parser::new(NonZero::new(24).unwrap(), NonZero::new(52).unwrap(), 0);
+        p.process("日本語".repeat(20).as_bytes());
+        p.screen_mut().set_size(NonZero::new(24).unwrap(), NonZero::new(43).unwrap());
+        p.process(b"[1;43Hx");
+        assert!(p.screen().rows(0, 43).next().unwrap().ends_with('x'));
+    }
 
     #[test]
     fn utf8_split_across_reads() {
-        let mut t = Term { parser: vt100::Parser::new(24, 80, 0), sink: None, carry: Vec::new() };
+        let mut t = Term { parser: vt100::Parser::new(NonZero::new(24).unwrap(), NonZero::new(80).unwrap(), 0), sink: None, carry: Vec::new() };
         let bytes = "日本語テキスト".as_bytes();
         let mut out = String::new();
         // 1バイトずつ届いても文字化けしない
