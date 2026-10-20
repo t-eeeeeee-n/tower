@@ -367,6 +367,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
   border-radius: 6px;
   cursor: pointer;
 }
+/* 高さを固定して、中身が伸び縮みしてもカードの並びが動かないようにする（動くとスクロールしたい場所がずれる） */
+.card { height: 540px; }
 .card:hover { border-color: var(--raise-2); }
 .card[data-status="waiting"] { border-color: var(--st-waiting); }
 .card[data-status="exited"] { opacity: 0.55; }
@@ -377,7 +379,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 /* 指示と返答 */
 .c-talk {
   display: flex; flex-direction: column; gap: 14px;
-  max-height: 420px; overflow-y: auto;
+  flex: 1 1 0; min-height: 0; overflow-y: auto;
   margin: 0 4px 8px 10px; padding-right: 6px;
   scrollbar-color: var(--line) transparent;
 }
@@ -389,13 +391,11 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .c-reply-text.md-preview { padding: 0; max-width: none; font-size: 13px; line-height: 1.6; }
 .c-reply-text.md-preview pre { background: var(--panel); }
 .c-reply-text.md-preview :is(h1, h2, h3, h4) { margin: 0.9em 0 0.3em; padding: 0; border: 0; font-size: 1.02em; }
-.c-tail[hidden] { display: none; }
 .card .c-talk { cursor: auto; }
 
 .c-tail {
-  --tail-lines: 16;
+  flex: 1 1 0; min-height: 0;
   margin: 0 8px;
-  height: calc(var(--tail-lines) * 1.4em + 12px);
   padding: 6px 8px;
   background: var(--ink);
   border-radius: 4px;
@@ -418,7 +418,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 .c-choices button:hover { background: var(--raise-2); }
 .c-choices button.first { background: var(--st-waiting); border-color: var(--st-waiting); color: var(--on-waiting); font-weight: 600; }
-.has-talk .c-tail { --tail-lines: 6; opacity: 0.8; }
+.has-talk .c-tail { flex: none; height: calc(6 * 1.4em + 12px); opacity: 0.8; }
 .c-input { display: flex; gap: 6px; margin: 8px 10px 0; }
 .c-input input { flex: 1; min-width: 0; padding: 5px 8px; }
 .c-tpl { flex: none; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--muted); font-size: 12px; }

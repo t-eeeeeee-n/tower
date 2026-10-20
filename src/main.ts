@@ -628,9 +628,8 @@ function updateCard(card: HTMLElement, s: Session) {
   }
 
   const tail = q(".c-tail");
-  const text = cleanTail(lines, hasTalk ? 6 : 16).join("\n");
+  const text = cleanTail(lines, hasTalk ? 6 : 30).join("\n");
   if (tail.textContent !== text) tail.textContent = text;
-  tail.hidden = hasTalk && !text;
 
   const waiting = s.status === "waiting";
   const msg = q(".c-msg");
@@ -683,9 +682,10 @@ function renderOverview(waitingCount: number, total: number) {
     if (!card) {
       card = makeCard(id);
       cards.set(id, card);
+      grid.append(card);
     }
-    // 並びが変わったときだけ動かす（動かすと入力欄のフォーカスが外れる）
-    if (grid.children[i] !== card) grid.insertBefore(card, grid.children[i] ?? null);
+    // 要素は動かさず、表示の順番だけ変える。動かすと入力欄のフォーカスが外れ、会話の枠のスクロール位置も先頭に戻る
+    card.style.order = String(i);
     updateCard(card, sessions.get(id)!);
   });
 }
