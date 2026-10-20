@@ -7,6 +7,7 @@ import DOMPurify from "dompurify";
 interface Entry {
   name: string;
   dir: boolean;
+  ignored: boolean;
 }
 interface FileContent {
   text: string | null;
@@ -94,7 +95,7 @@ const markdown = new Marked({
  * Tower の画面は Tauri のコマンド（ターミナルへの書き込みなど）を呼べるので、README などに書かれた HTML を
  * そのまま表示すると、勝手に操作される恐れがある。innerHTML に入れてよいのはこの戻り値だけ。
  */
-function markdownHtml(text: string) {
+export function markdownHtml(text: string) {
   return DOMPurify.sanitize(markdown.parse(text) as string, {
     FORBID_TAGS: [
       "style", "img", "picture", "video", "audio", "source", "track", "iframe", "object", "embed",
@@ -210,8 +211,9 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     return b;
   }
 
-  function row(label: string, depth: number, opts: { dir?: boolean; expanded?: boolean; status?: string; changedInside?: boolean; rel: string }) {
+  function row(label: string, depth: number, opts: { dir?: boolean; expanded?: boolean; status?: string; changedInside?: boolean; ignored?: boolean; rel: string }) {
     const r = el("button", "f-row");
+    r.classList.toggle("f-ignored", !!opts.ignored);
     r.type = "button";
     r.setAttribute("role", "treeitem");
     r.style.paddingLeft = `${8 + depth * 12}px`;
@@ -242,24 +244,26 @@ export function createFilesPanel(showError: (e: unknown) => void) {
       return;
     }
     const rows: HTMLElement[] = [];
-    const walk = (dir: string, depth: number) => {
+    // Git は無視されたフォルダの中を見ないので、その中身も無視されたものとして薄く出す
+    const walk = (dir: string, depth: number, inIgnored: boolean) => {
       for (const e of listings.get(dir) ?? []) {
         const rel = dir ? `${dir}/${e.name}` : e.name;
+        const ignored = inIgnored || e.ignored;
         if (e.dir) {
           const expanded = v.expanded.has(rel);
           const changedInside = [...changes.keys()].some((p) => p.startsWith(`${rel}/`));
-          const r = row(e.name, depth, { dir: true, expanded, changedInside, rel });
+          const r = row(e.name, depth, { dir: true, expanded, changedInside, ignored, rel });
           r.onclick = () => toggleDir(rel);
           rows.push(r);
-          if (expanded) walk(rel, depth + 1);
+          if (expanded) walk(rel, depth + 1, ignored);
         } else {
-          const r = row(e.name, depth, { rel, status: changes.get(rel) });
+          const r = row(e.name, depth, { rel, status: changes.get(rel), ignored });
           r.onclick = () => select(rel);
           rows.push(r);
         }
       }
     };
-    walk("", 0);
+    walk("", 0, false);
     tree.replaceChildren(...notice, ...(rows.length ? rows : [el("p", "f-note", "ファイルがありません")]));
   }
 

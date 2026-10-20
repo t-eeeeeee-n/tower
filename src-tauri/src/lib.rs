@@ -141,6 +141,16 @@ fn peek_sessions(state: State<'_, App>, lines: usize) -> Vec<session::Peek> {
 }
 
 #[tauri::command]
+fn session_talk(state: State<'_, App>, id: String) -> Result<Vec<session::Turn>, String> {
+    state.manager.talk(&id)
+}
+
+#[tauri::command]
+fn rename_session(state: State<'_, App>, id: String, name: String) -> Result<(), String> {
+    state.manager.rename(&id, &name)
+}
+
+#[tauri::command]
 fn write_session(state: State<'_, App>, id: String, data: String) -> Result<(), String> {
     state.manager.write(&id, &data)
 }
@@ -200,6 +210,8 @@ pub fn run() {
             attach_session,
             peek_sessions,
             write_session,
+            rename_session,
+            session_talk,
             resize_session,
             kill_session
         ])

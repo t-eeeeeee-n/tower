@@ -7,7 +7,8 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
-import { createFilesPanel } from "./files";
+import { createFilesPanel, markdownHtml } from "./files";
+import { createTemplates } from "./templates";
 import { createSettings } from "./settings";
 
 type Status = "shell" | "starting" | "idle" | "running" | "waiting" | "exited";
@@ -32,6 +33,15 @@ interface SavedSession {
 }
 interface Session extends SessionInfo {
   bytes?: number;
+}
+interface Peek {
+  id: string;
+  lines: string[];
+  talk_rev: number;
+}
+interface Turn {
+  prompt: string | null;
+  reply: string | null;
 }
 interface Config {
   shell: string;
@@ -99,7 +109,8 @@ let order: string[] = [];
 let activeId: string | null = null;
 let attachToken = 0;
 let view: "session" | "overview" = "session";
-const peeks = new Map<string, string[]>();
+const peeks = new Map<string, Peek>();
+const templates = createTemplates();
 
 // ---------- ターミナル（インスタンスは1つだけ） ----------
 
@@ -291,16 +302,102 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
   return e;
 }
 
+// ---------- 並べ替えと名前の変更 ----------
+
+let dragId: string | null = null;
+
+function moveSession(id: string, target: string, after: boolean) {
+  if (id === target) return;
+  order = order.filter((x) => x !== id);
+  order.splice(order.indexOf(target) + (after ? 1 : 0), 0, id);
+  saveSessions();
+  render();
+}
+
+function draggable(li: HTMLElement, id: string) {
+  li.draggable = true;
+  li.ondragstart = (ev) => {
+    dragId = id;
+    ev.dataTransfer!.effectAllowed = "move";
+    ev.dataTransfer!.setData("text/plain", sessions.get(id)?.name ?? "");
+    li.classList.add("dragging");
+  };
+  li.ondragend = () => {
+    dragId = null;
+    render();
+  };
+  li.ondragover = (ev) => {
+    if (!dragId || dragId === id) return;
+    ev.preventDefault();
+    const r = li.getBoundingClientRect();
+    const after = ev.clientY > r.top + r.height / 2;
+    li.classList.toggle("drop-before", !after);
+    li.classList.toggle("drop-after", after);
+  };
+  li.ondragleave = () => li.classList.remove("drop-before", "drop-after");
+  li.ondrop = (ev) => {
+    ev.preventDefault();
+    const from = dragId;
+    dragId = null;
+    if (from) moveSession(from, id, li.classList.contains("drop-after"));
+  };
+}
+
+const renameDialog = $<HTMLDialogElement>("rename-dialog");
+const renameInput = $<HTMLInputElement>("rename-input");
+let renaming: string | null = null;
+
+function openRename(id: string) {
+  const s = sessions.get(id);
+  if (!s || renameDialog.open) return;
+  renaming = id;
+  renameInput.value = s.name;
+  $("rename-error").hidden = true;
+  renameDialog.showModal();
+  renameInput.select();
+}
+
+$<HTMLFormElement>("rename-form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const id = renaming;
+  const name = renameInput.value.trim();
+  const error = $("rename-error");
+  if (!id || !name) {
+    error.textContent = "名前を入力してください";
+    error.hidden = false;
+    return;
+  }
+  try {
+    await invoke("rename_session", { id, name });
+    const s = sessions.get(id);
+    if (s) s.name = name;
+    saveSessions();
+    render();
+    renameDialog.close();
+  } catch (e) {
+    error.textContent = String(e);
+    error.hidden = false;
+  }
+};
+$("rename-cancel").onclick = () => renameDialog.close();
+renameDialog.onclose = () => {
+  renaming = null;
+  if (view === "session" && activeId) term.focus();
+};
+
 function render() {
   const list = $("session-list");
-  list.replaceChildren(
+  // ドラッグ中に作り直すとドラッグが途切れるので、終わるまで一覧はそのままにする
+  if (!dragId) list.replaceChildren(
     ...order.map((id, i) => {
       const s = sessions.get(id)!;
       const li = el("li", "session");
       li.dataset.status = s.status;
       li.classList.toggle("active", view === "session" && id === activeId);
       li.classList.toggle("waiting", s.status === "waiting");
-      li.title = `${s.name}\n${s.cwd}`;
+      li.title = `${s.name}\n${s.cwd}\nダブルクリックで名前を変更、ドラッグで並べ替え`;
+      draggable(li, id);
+      li.ondblclick = () => openRename(id);
       li.append(
         el("span", "s-key", i < 9 ? String(i + 1) : ""),
         el("span", "s-name", s.name),
@@ -386,9 +483,20 @@ async function pollPeeks() {
     return;
   }
   try {
-    for (const p of await invoke<{ id: string; lines: string[] }[]>("peek_sessions", { lines: 12 })) {
-      peeks.set(p.id, p.lines);
-    }
+    // 枠を取り除くと行が減るので多めに取る
+    const list = await invoke<Peek[]>("peek_sessions", { lines: 40 });
+    for (const p of list) peeks.set(p.id, p);
+    // やり取りの全文は、増えたときだけ取りに行く
+    await Promise.all(
+      list
+        .filter((p) => p.talk_rev !== talks.get(p.id)?.rev)
+        .map((p) =>
+          invoke<Turn[]>("session_talk", { id: p.id })
+            .then((turns) => talks.set(p.id, { rev: p.talk_rev, turns }))
+            // 取りに行く間に閉じられたセッションは無視する
+            .catch(() => {}),
+        ),
+    );
     render();
   } catch (e) {
     showError(e);
@@ -404,16 +512,71 @@ async function sendLine(id: string, text: string) {
   await invoke("write_session", { id, data: "\r" });
 }
 
+// エージェントの画面の枠（入力欄・区切り線・操作の案内）を取り除き、会話の部分だけを残す。
+// 各エージェントの画面の作りに合わせた目安で、作りが変わると取り残しが出る
+const RULE = /^\s*[╭╰┌└]?[─━═]{8,}[╮╯┐┘]?\s*$/;
+const BOX_ONLY = /^[\s─━═╌┄╭╮╰╯┌┐└┘├┤┬┴┼│┃]+$/;
+const FOOTER = /\? for shortcuts|esc to (interrupt|cancel)|shift\+tab|context left|bypass permissions|accept edits|⏎|⌃[A-Z]/i;
+const INPUT_LINE = /^\s*[›❯>](\s|$)/;
+
+function cleanTail(lines: string[], max: number) {
+  let end = lines.length;
+  const bottom = Math.max(0, lines.length - 10);
+  const rule = lines.findIndex((l, i) => i >= bottom && RULE.test(l));
+  if (rule >= 0) end = rule;
+  else {
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 6); i--) if (INPUT_LINE.test(lines[i])) end = i;
+  }
+  const out: string[] = [];
+  for (const raw of lines.slice(0, end)) {
+    const l = raw.replace(/^\s*[│┃]\s?/, "").replace(/\s?[│┃]\s*$/, "").trimEnd();
+    if (BOX_ONLY.test(l) || FOOTER.test(l)) continue;
+    if (!l && (!out.length || !out[out.length - 1])) continue;
+    out.push(l);
+  }
+  while (out.length && !out[out.length - 1]) out.pop();
+  return out.slice(-max);
+}
+
+const talks = new Map<string, { rev: number; turns: Turn[] }>();
+
+function turnEl(t: Turn, agent: Agent) {
+  const div = el("div", "c-turn");
+  if (t.prompt) {
+    const you = el("div", "c-you");
+    you.append(el("span", "c-who", "あなた"), el("p", "c-you-text", t.prompt));
+    div.append(you);
+  }
+  if (t.reply) {
+    const reply = el("div", "c-reply");
+    const body = el("div", "c-reply-text md-preview");
+    body.innerHTML = markdownHtml(t.reply);
+    reply.append(el("span", "c-who", AGENT_LABEL[agent]), body);
+    div.append(reply);
+  }
+  return div;
+}
+
 function makeCard(id: string) {
   const card = el("article", "card");
   card.tabIndex = 0;
   const head = el("header", "c-head");
   head.append(el("span", "c-name"), el("span", "c-agent"), el("span", "c-status"));
+  const talk = el("div", "c-talk");
   const form = el("form", "c-input");
   const input = el("input");
   input.placeholder = "指示を送る（Enter）";
   input.autocomplete = "off";
-  form.append(input);
+  const tpl = el("button", "c-tpl", "テンプレート");
+  tpl.type = "button";
+  tpl.title = "テンプレートを入れる（送信はしません）";
+  tpl.onclick = () =>
+    templates.pick(tpl, (text) => {
+      // 1 行の入力欄なので、改行は空白にする
+      input.value = text.replace(/\s*\n\s*/g, " ");
+      input.focus();
+    });
+  form.append(input, tpl);
   form.onsubmit = (ev) => {
     ev.preventDefault();
     const text = input.value;
@@ -423,9 +586,16 @@ function makeCard(id: string) {
   };
   const foot = el("footer", "c-foot");
   foot.append(el("span", "c-age"), el("span", "c-mem"));
-  card.append(head, el("pre", "c-tail"), el("div", "c-msg"), el("div", "c-choices"), form, foot);
+  card.append(head, talk, el("pre", "c-tail"), el("div", "c-msg"), el("div", "c-choices"), form, foot);
   card.onclick = (ev) => {
-    if ((ev.target as HTMLElement).closest("button, input")) return;
+    const target = ev.target as HTMLElement;
+    // 返答の中のリンクは開かない（Tower の画面ごと移動してしまう）
+    if (target.closest("a")) {
+      ev.preventDefault();
+      return;
+    }
+    // 文章を選んでいるときは、選び終わりのクリックで切り替えない
+    if (target.closest("button, input") || getSelection()?.toString()) return;
     activate(id);
   };
   card.onkeydown = (ev) => {
@@ -442,10 +612,25 @@ function updateCard(card: HTMLElement, s: Session) {
   q(".c-agent").textContent = AGENT_LABEL[s.agent];
   q(".c-status").textContent = STATUS_LABEL[s.status];
 
-  const lines = peeks.get(s.id) ?? [];
+  const peek = peeks.get(s.id);
+  const lines = peek?.lines ?? [];
+  const talk = talks.get(s.id);
+  const hasTalk = !!talk?.turns.length;
+  card.classList.toggle("has-talk", hasTalk);
+  const talkBox = q(".c-talk");
+  talkBox.hidden = !hasTalk;
+  if (talk && talkBox.dataset.rev !== String(talk.rev)) {
+    // さかのぼって読んでいる途中なら位置を保ち、いちばん下を見ているときだけ新しいやり取りに付いていく
+    const follow = !talkBox.dataset.rev || talkBox.scrollHeight - talkBox.scrollTop - talkBox.clientHeight < 24;
+    talkBox.dataset.rev = String(talk.rev);
+    talkBox.replaceChildren(...talk.turns.map((t) => turnEl(t, s.agent)));
+    if (follow) talkBox.scrollTop = talkBox.scrollHeight;
+  }
+
   const tail = q(".c-tail");
-  const text = lines.join("\n");
+  const text = cleanTail(lines, hasTalk ? 6 : 16).join("\n");
   if (tail.textContent !== text) tail.textContent = text;
+  tail.hidden = hasTalk && !text;
 
   const waiting = s.status === "waiting";
   const msg = q(".c-msg");
@@ -487,6 +672,7 @@ function renderOverview(waitingCount: number, total: number) {
     if (!sessions.has(id)) {
       card.remove();
       cards.delete(id);
+      talks.delete(id);
     }
   }
   const rank = (s: Session) => (s.status === "waiting" ? 0 : s.status === "exited" ? 2 : 1);
@@ -683,6 +869,17 @@ $<HTMLButtonElement>("restore-btn").onclick = async (ev) => {
 $("new-btn").onclick = openNewDialog;
 $("empty-new").onclick = openNewDialog;
 $("files-btn").onclick = () => files.toggle();
+$("head-name").ondblclick = () => activeId && openRename(activeId);
+
+function insertTemplate() {
+  if (view !== "session" || !activeId) return;
+  // 貼り付けとして入れる。エージェントは貼り付けの改行では送信しない
+  templates.pick($("tpl-btn"), (text) => {
+    term.paste(text);
+    term.focus();
+  }, () => term.focus());
+}
+$("tpl-btn").onclick = insertTemplate;
 $("sidebar-toggle").onclick = toggleSidebar;
 $("waiting-jump").onclick = nextWaiting;
 $("overview-btn").onclick = showOverview;
@@ -694,7 +891,7 @@ $("look-btn").onclick = () => settings.open();
 document.addEventListener(
   "keydown",
   async (e) => {
-    if (dialog.open || settings.isOpen()) return;
+    if (document.querySelector("dialog[open]") || templates.isOpen()) return;
     const k = e.key.toLowerCase();
     let handled = true;
     if (e.ctrlKey && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key)) {
@@ -705,6 +902,8 @@ document.addEventListener(
       else if (activeId) activate(activeId);
     } else if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === ",") {
       settings.open();
+    } else if (e.ctrlKey && e.shiftKey && k === "t") {
+      insertTemplate();
     } else if (e.ctrlKey && e.shiftKey && k === "n") {
       openNewDialog();
     } else if (e.ctrlKey && e.shiftKey && k === "a") {

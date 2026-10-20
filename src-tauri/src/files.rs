@@ -1,6 +1,8 @@
 //! セッションのフォルダのファイル一覧・中身・Git の変更を読む（表示専用で、書き込みはしない）。
 //! パスは常にセッションのフォルダからの相対パスで受け取り、フォルダの外は読ませない。
 
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
@@ -16,6 +18,8 @@ const MAX_FILE_BYTES: u64 = 1024 * 1024;
 pub struct Entry {
     pub name: String,
     pub dir: bool,
+    /// .gitignore などで Git の管理から外れている
+    pub ignored: bool,
 }
 
 #[derive(Serialize)]
@@ -79,13 +83,30 @@ fn resolve(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(canon)
 }
 
+/// フォルダの直下で、.gitignore・.git/info/exclude・利用者の全体の除外設定に当たらない項目の名前。
+/// git を実行せずにファイルを読むだけなので、信頼していないフォルダでも使える
+fn not_ignored(dir: &Path) -> HashSet<OsString> {
+    ignore::WalkBuilder::new(dir)
+        .max_depth(Some(1))
+        .hidden(false)
+        .ignore(false)
+        .parents(true)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|e| e.depth() == 1)
+        .map(|e| e.file_name().to_os_string())
+        .collect()
+}
+
 pub fn list_dir(root: &Path, rel: &str) -> Result<Vec<Entry>, String> {
     let dir = resolve(root, rel)?;
+    let kept = not_ignored(&dir);
     let mut entries: Vec<Entry> = std::fs::read_dir(&dir)
         .map_err(|e| format!("{rel} を開けません: {e}"))?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name() != ".git")
         .map(|e| Entry {
+            ignored: !kept.contains(&e.file_name()),
             name: e.file_name().to_string_lossy().into_owned(),
             dir: e.file_type().is_ok_and(|t| t.is_dir()),
         })
@@ -224,6 +245,34 @@ mod tests {
         for (c, (p, s)) in got.iter().zip(want) {
             assert_eq!((c.path.as_str(), c.status.as_str()), (p, s));
         }
+    }
+
+    #[test]
+    fn marks_gitignored_entries() {
+        let base = std::env::temp_dir().join(format!("tower-ignored-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("dist")).unwrap();
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        git(&PathBuf::from("git"), &base, &["init", "-q"]).unwrap();
+        std::fs::write(base.join(".gitignore"), "dist/\n*.log\n").unwrap();
+        std::fs::write(base.join("app.log"), "").unwrap();
+        std::fs::write(base.join("src/.gitignore"), "gen.ts\n").unwrap();
+        std::fs::write(base.join("src/gen.ts"), "").unwrap();
+        std::fs::write(base.join("src/main.ts"), "").unwrap();
+
+        let ignored = |rel: &str| -> Vec<(String, bool)> {
+            list_dir(&base, rel).unwrap().into_iter().map(|e| (e.name, e.ignored)).collect()
+        };
+        assert_eq!(ignored(""), [
+            ("dist".into(), true), ("src".into(), false), (".gitignore".into(), false), ("app.log".into(), true),
+        ]);
+        // 親フォルダの .gitignore も効く
+        assert_eq!(ignored("src"), [(".gitignore".into(), false), ("gen.ts".into(), true), ("main.ts".into(), false)]);
+
+        // Git を使っていないフォルダでは .gitignore があっても印を付けない
+        std::fs::remove_dir_all(base.join(".git")).unwrap();
+        assert!(ignored("").iter().all(|(_, i)| !i));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

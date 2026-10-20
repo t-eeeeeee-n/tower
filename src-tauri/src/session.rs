@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
@@ -58,10 +58,64 @@ struct StatusEvent {
     state: StatusInfo,
 }
 
+/// 指示とそれへの返答の 1 往復。hooks の取りこぼしや再開したセッションでは、片方だけのこともある
+#[derive(Clone, Serialize, PartialEq, Debug)]
+pub struct Turn {
+    pub prompt: Option<String>,
+    pub reply: Option<String>,
+}
+
+/// hooks で受け取ったやり取り（一覧画面に出す。保存はしない）
+#[derive(Default)]
+struct Talk {
+    turns: VecDeque<Turn>,
+    /// 変わるたびに増やす。一覧画面は毎秒これだけを見て、変わったときだけ全文を取りに来る
+    rev: u64,
+}
+
+impl Talk {
+    fn prompt(&mut self, text: &str) {
+        self.push(Turn { prompt: Some(clip(text)), reply: None });
+    }
+
+    fn reply(&mut self, text: &str) {
+        match self.turns.back_mut() {
+            Some(t) if t.reply.is_none() => {
+                t.reply = Some(clip(text));
+                self.rev += 1;
+            }
+            _ => self.push(Turn { prompt: None, reply: Some(clip(text)) }),
+        }
+    }
+
+    fn push(&mut self, turn: Turn) {
+        self.turns.push_back(turn);
+        if self.turns.len() > MAX_TURNS {
+            self.turns.pop_front();
+        }
+        self.rev += 1;
+    }
+}
+
 #[derive(Serialize)]
 pub struct Peek {
     pub id: String,
     pub lines: Vec<String>,
+    pub talk_rev: u64,
+}
+
+/// 仮想端末に残すスクロール履歴の行数（xterm.js の scrollback より少なくする）
+const SCROLLBACK: usize = 2000;
+/// 一覧画面に出す指示と返答の最大文字数
+const MAX_TALK_CHARS: usize = 4000;
+/// 覚えておくやり取りの数
+const MAX_TURNS: usize = 50;
+
+fn clip(s: &str) -> String {
+    match s.char_indices().nth(MAX_TALK_CHARS) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
+    }
 }
 
 pub fn now_ms() -> u64 {
@@ -111,7 +165,8 @@ impl Term {
 
 pub struct Session {
     pub id: String,
-    pub name: String,
+    name: Mutex<String>,
+    talk: Mutex<Talk>,
     pub cwd: String,
     pub created: u64,
     pub agent: Agent,
@@ -130,7 +185,7 @@ impl Session {
     pub fn info(&self) -> SessionInfo {
         SessionInfo {
             id: self.id.clone(),
-            name: self.name.clone(),
+            name: self.name.lock().unwrap().clone(),
             cwd: self.cwd.clone(),
             created: self.created,
             agent: self.agent,
@@ -280,7 +335,7 @@ impl Manager {
         let initial = if agent == Agent::Shell { Status::Shell } else { Status::Starting };
         let state = Arc::new(Mutex::new(StatusInfo { status: initial, since: now_ms(), message: None }));
         let term = Arc::new(Mutex::new(Term {
-            parser: vt100::Parser::new(NonZero::new(rows).unwrap(), NonZero::new(cols).unwrap(), 0),
+            parser: vt100::Parser::new(NonZero::new(rows).unwrap(), NonZero::new(cols).unwrap(), SCROLLBACK),
             sink: None,
             carry: Vec::new(),
         }));
@@ -378,7 +433,8 @@ impl Manager {
 
         let session = Arc::new(Session {
             id: id.clone(),
-            name,
+            name: Mutex::new(name),
+            talk: Mutex::default(),
             cwd,
             created: now_ms(),
             agent,
@@ -396,7 +452,7 @@ impl Manager {
         Ok(info)
     }
 
-    /// 表示するセッションを切り替え、現在の画面を返す。以降の出力は channel に流れる。
+    /// 表示するセッションを切り替え、スクロール履歴と現在の画面を返す。以降の出力は channel に流れる。
     pub fn attach(&self, id: &str, cols: u16, rows: u16, channel: Channel<String>) -> Result<String, String> {
         let session = self.get(id)?;
         {
@@ -411,7 +467,13 @@ impl Manager {
         // 同じロックの中でサイズ合わせ・画面取得・送り先設定を行うので、出力の取りこぼしや重複が起きない
         let mut t = session.term.lock().unwrap();
         resize_locked(&session, &mut t, cols, rows);
-        let snapshot = t.parser.screen().state_formatted();
+        let mut snapshot = history(&mut t.parser);
+        if !snapshot.is_empty() {
+            // 履歴の最後の行まで画面の外（xterm.js のスクロール履歴）へ押し出してから、今の画面を描く
+            let rows = t.parser.screen().size().0.get();
+            snapshot.push_str(&"\r\n".repeat(usize::from(rows) - 1));
+        }
+        snapshot.push_str(&t.parser.screen().state_formatted());
         t.sink = Some(channel);
         Ok(snapshot)
     }
@@ -429,9 +491,34 @@ impl Manager {
                     rows.pop();
                 }
                 let start = rows.len().saturating_sub(max_lines);
-                Peek { id: s.id.clone(), lines: rows.split_off(start) }
+                Peek { id: s.id.clone(), lines: rows.split_off(start), talk_rev: s.talk.lock().unwrap().rev }
             })
             .collect()
+    }
+
+    pub fn rename(&self, id: &str, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("名前を入力してください".into());
+        }
+        *self.get(id)?.name.lock().unwrap() = name.to_string();
+        Ok(())
+    }
+
+    /// hooks で届いた指示と返答を、やり取りの順に覚える
+    pub fn record_talk(&self, id: &str, prompt: Option<&str>, reply: Option<&str>) {
+        let Ok(session) = self.get(id) else { return };
+        let mut talk = session.talk.lock().unwrap();
+        if let Some(p) = prompt {
+            talk.prompt(p);
+        }
+        if let Some(r) = reply {
+            talk.reply(r);
+        }
+    }
+
+    pub fn talk(&self, id: &str) -> Result<Vec<Turn>, String> {
+        Ok(self.get(id)?.talk.lock().unwrap().turns.iter().cloned().collect())
     }
 
     pub fn write(&self, id: &str, data: &str) -> Result<(), String> {
@@ -498,6 +585,26 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
+/// 画面より上に流れた行を古い順に返す。xterm.js のスクロール履歴に積めるよう、1 行ずつ改行で区切る
+fn history(parser: &mut vt100::Parser) -> String {
+    let screen = parser.screen_mut();
+    let (rows, cols) = screen.size();
+    let mut out = String::new();
+    // 履歴を画面の高さずつめくり、各ページの先頭から未出力の行だけ取る
+    let mut offset = screen.scrollback_len();
+    while offset > 0 {
+        screen.set_scrollback(offset);
+        let take = offset.min(usize::from(rows.get()));
+        for row in screen.rows_formatted(0, cols.get()).take(take) {
+            out.push_str(&row);
+            out.push_str("\x1b[m\r\n");
+        }
+        offset -= take;
+    }
+    screen.set_scrollback(0);
+    out
+}
+
 fn resize_locked(session: &Session, t: &mut Term, cols: u16, rows: u16) {
     let (cols, rows) = (cols.max(10), rows.max(4));
     let (cur_rows, cur_cols) = t.parser.screen().size();
@@ -514,8 +621,49 @@ fn resize_locked(session: &Session, t: &mut Term, cols: u16, rows: u16) {
 
 #[cfg(test)]
 mod tests {
-    use super::Term;
+    use super::{clip, history, Talk, Term, Turn, MAX_TALK_CHARS, MAX_TURNS};
     use std::num::NonZero;
+
+    #[test]
+    fn history_lists_scrolled_off_rows_oldest_first() {
+        let mut p = vt100::Parser::new(NonZero::new(3).unwrap(), NonZero::new(20).unwrap(), 100);
+        assert_eq!(history(&mut p), "");
+        for i in 1..=7 {
+            p.process(format!("line{i}\r\n").as_bytes());
+        }
+        // 3 行の画面に line6, line7 と空行が残り、line1〜5 が履歴に流れている
+        let plain: Vec<String> = history(&mut p).split("\r\n").map(|l| l.replace("\x1b[m", "")).collect();
+        assert_eq!(plain, ["line1", "line2", "line3", "line4", "line5", ""]);
+        assert_eq!(p.screen().scrollback(), 0);
+    }
+
+    #[test]
+    fn keeps_turns_in_order() {
+        let turn = |p: Option<&str>, r: Option<&str>| Turn { prompt: p.map(String::from), reply: r.map(String::from) };
+        let mut t = Talk::default();
+        t.prompt("a");
+        t.reply("A");
+        t.prompt("b");
+        assert_eq!(Vec::from(t.turns.clone()), [turn(Some("a"), Some("A")), turn(Some("b"), None)]);
+        t.reply("B");
+        // 指示が届かないまま返答が続いたら、返答だけのやり取りとして足す
+        t.reply("B2");
+        assert_eq!(t.turns.back(), Some(&turn(None, Some("B2"))));
+        assert_eq!(t.rev, 5);
+
+        for i in 0..MAX_TURNS {
+            t.prompt(&i.to_string());
+        }
+        assert_eq!(t.turns.len(), MAX_TURNS);
+        assert_eq!(t.turns.front().unwrap().prompt.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn clips_long_talk() {
+        assert_eq!(clip("短い"), "短い");
+        let long = "あ".repeat(MAX_TALK_CHARS + 5);
+        assert_eq!(clip(&long).chars().count(), MAX_TALK_CHARS + 1);
+    }
 
     #[test]
     fn shrinking_through_a_wide_char_does_not_panic() {

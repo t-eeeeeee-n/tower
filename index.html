@@ -26,12 +26,13 @@
       <main class="main">
         <header id="main-head" class="main-head" hidden>
           <div class="main-title">
-            <span id="head-name"></span>
+            <span id="head-name" title="ダブルクリックで名前を変更"></span>
             <span id="head-agent" class="agent-tag"></span>
             <span id="head-cwd" class="muted"></span>
           </div>
           <div class="main-actions">
             <span id="head-status" class="status-text"></span>
+            <button id="tpl-btn" class="text-btn" title="テンプレートを入れる（Ctrl+Shift+T）">テンプレート</button>
             <button id="files-btn" class="text-btn" title="ファイル（Ctrl+Shift+E）" aria-pressed="false">ファイル</button>
           </div>
         </header>
@@ -79,6 +80,7 @@
             <dt>Ctrl+Shift+A</dt><dd>次の入力待ちへ移動</dd>
             <dt>Ctrl+Shift+C / V</dt><dd>コピー / 貼り付け</dd>
             <dt>Ctrl+Shift+W</dt><dd>セッションを閉じる</dd>
+            <dt>Ctrl+Shift+T</dt><dd>テンプレートを入れる</dd>
             <dt>Ctrl+,</dt><dd>設定</dd>
           </dl>
         </section>
@@ -172,6 +174,34 @@
           <button type="button" id="look-reset" class="text-btn look-reset">初期設定に戻す</button>
           <button type="button" id="look-cancel" class="text-btn">キャンセル</button>
           <button type="submit" class="primary-btn">OK</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rename-dialog" class="dialog rename-dialog">
+      <form id="rename-form" method="dialog">
+        <h2>名前を変更</h2>
+        <label class="field">
+          <span>表示名</span>
+          <input id="rename-input" autocomplete="off" />
+        </label>
+        <p id="rename-error" class="error" hidden></p>
+        <div class="dialog-actions">
+          <button type="button" id="rename-cancel" class="text-btn">キャンセル</button>
+          <button type="submit" class="primary-btn">変更</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="tpl-dialog" class="dialog tpl-dialog">
+      <form id="tpl-form" method="dialog">
+        <h2>指示のテンプレート</h2>
+        <p class="hint">選ぶとエージェントの入力欄に入ります（送信はしません）。書き足してから Enter で送ってください。</p>
+        <div id="tpl-list" class="tpl-list"></div>
+        <div class="dialog-actions">
+          <button type="button" id="tpl-add" class="text-btn tpl-add">追加</button>
+          <button type="button" id="tpl-cancel" class="text-btn">キャンセル</button>
+          <button type="submit" class="primary-btn">保存</button>
         </div>
       </form>
     </dialog>
