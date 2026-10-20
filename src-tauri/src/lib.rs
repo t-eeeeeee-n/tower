@@ -136,8 +136,8 @@ fn attach_session(
 }
 
 #[tauri::command]
-fn peek_sessions(state: State<'_, App>, lines: usize) -> Vec<session::Peek> {
-    state.manager.peek(lines)
+fn peek_sessions(state: State<'_, App>, lines: usize, known: std::collections::HashMap<String, u64>) -> Vec<session::Peek> {
+    state.manager.peek(lines, &known)
 }
 
 #[tauri::command]

@@ -100,7 +100,9 @@ impl Talk {
 #[derive(Serialize)]
 pub struct Peek {
     pub id: String,
-    pub lines: Vec<String>,
+    /// 呼び出し側が知っている seq から画面が変わっていなければ None（毎秒送り直さないため）
+    pub lines: Option<Vec<String>>,
+    pub seq: u64,
     pub talk_rev: u64,
 }
 
@@ -128,6 +130,8 @@ struct Term {
     sink: Option<Channel<String>>,
     /// UTF-8の途中で切れたバイト（日本語が読み込みの境界で割れることがある）
     carry: Vec<u8>,
+    /// 出力やサイズの変更のたびに増やす
+    seq: u64,
 }
 
 impl Term {
@@ -338,6 +342,7 @@ impl Manager {
             parser: vt100::Parser::new(NonZero::new(rows).unwrap(), NonZero::new(cols).unwrap(), SCROLLBACK),
             sink: None,
             carry: Vec::new(),
+            seq: 0,
         }));
 
         // 出力の読み取り：常に仮想端末へ流し、表示中のときだけフロントへ送る
@@ -353,6 +358,7 @@ impl Manager {
                     };
                     let mut t = term.lock().unwrap();
                     t.parser.process(&buf[..n]);
+                    t.seq += 1;
                     let text = t.decode(&buf[..n]);
                     // ConPTY は起動時などにカーソル位置を問い合わせ、応答まで出力を止める。
                     // 表示中なら xterm.js が答えるので、誰も表示していないときだけ代わりに答える。
@@ -478,20 +484,16 @@ impl Manager {
         Ok(snapshot)
     }
 
-    /// 全セッションの画面末尾（空行を除いた最後の max_lines 行）を返す
-    pub fn peek(&self, max_lines: usize) -> Vec<Peek> {
+    /// 全セッションの出力の末尾（スクロール履歴を含め、最後の空行を除いた max_lines 行）を返す。
+    /// known に渡された seq から変わっていないセッションは、行を返さない
+    pub fn peek(&self, max_lines: usize, known: &HashMap<String, u64>) -> Vec<Peek> {
         self.all()
             .iter()
             .map(|s| {
-                let t = s.term.lock().unwrap();
-                let screen = t.parser.screen();
-                let (_, cols) = screen.size();
-                let mut rows: Vec<String> = screen.rows(0, cols.get()).map(|r| r.trim_end().to_string()).collect();
-                while rows.last().is_some_and(|r| r.is_empty()) {
-                    rows.pop();
-                }
-                let start = rows.len().saturating_sub(max_lines);
-                Peek { id: s.id.clone(), lines: rows.split_off(start), talk_rev: s.talk.lock().unwrap().rev }
+                let mut t = s.term.lock().unwrap();
+                let seq = t.seq;
+                let lines = (known.get(&s.id) != Some(&seq)).then(|| tail_lines(&mut t.parser, max_lines));
+                Peek { id: s.id.clone(), lines, seq, talk_rev: s.talk.lock().unwrap().rev }
             })
             .collect()
     }
@@ -585,6 +587,28 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
+/// スクロール履歴と画面を続けた、最後の max 行（文字だけ）。最後の空行は除く
+fn tail_lines(parser: &mut vt100::Parser, max: usize) -> Vec<String> {
+    let screen = parser.screen_mut();
+    let (rows, cols) = screen.size();
+    let mut out = Vec::new();
+    // 必要な分だけ履歴を画面の高さずつめくる（history と同じ取り出し方）
+    let mut offset = screen.scrollback_len().min(max);
+    while offset > 0 {
+        screen.set_scrollback(offset);
+        let take = offset.min(usize::from(rows.get()));
+        out.extend(screen.rows(0, cols.get()).take(take).map(|r| r.trim_end().to_string()));
+        offset -= take;
+    }
+    screen.set_scrollback(0);
+    out.extend(screen.rows(0, cols.get()).map(|r| r.trim_end().to_string()));
+    while out.last().is_some_and(|r| r.is_empty()) {
+        out.pop();
+    }
+    let start = out.len().saturating_sub(max);
+    out.split_off(start)
+}
+
 /// 画面より上に流れた行を古い順に返す。xterm.js のスクロール履歴に積めるよう、1 行ずつ改行で区切る
 fn history(parser: &mut vt100::Parser) -> String {
     let screen = parser.screen_mut();
@@ -612,6 +636,7 @@ fn resize_locked(session: &Session, t: &mut Term, cols: u16, rows: u16) {
         return;
     }
     t.parser.screen_mut().set_size(NonZero::new(rows).unwrap(), NonZero::new(cols).unwrap());
+    t.seq += 1;
     let _ = session
         .master
         .lock()
@@ -621,7 +646,7 @@ fn resize_locked(session: &Session, t: &mut Term, cols: u16, rows: u16) {
 
 #[cfg(test)]
 mod tests {
-    use super::{clip, history, Talk, Term, Turn, MAX_TALK_CHARS, MAX_TURNS};
+    use super::{clip, history, tail_lines, Talk, Term, Turn, MAX_TALK_CHARS, MAX_TURNS};
     use std::num::NonZero;
 
     #[test]
@@ -659,6 +684,17 @@ mod tests {
     }
 
     #[test]
+    fn tail_includes_scrollback() {
+        let mut p = vt100::Parser::new(NonZero::new(3).unwrap(), NonZero::new(20).unwrap(), 100);
+        for i in 1..=7 {
+            p.process(format!("line{i}\r\n").as_bytes());
+        }
+        assert_eq!(tail_lines(&mut p, 100), ["line1", "line2", "line3", "line4", "line5", "line6", "line7"]);
+        assert_eq!(tail_lines(&mut p, 4), ["line4", "line5", "line6", "line7"]);
+        assert_eq!(p.screen().scrollback(), 0);
+    }
+
+    #[test]
     fn clips_long_talk() {
         assert_eq!(clip("短い"), "短い");
         let long = "あ".repeat(MAX_TALK_CHARS + 5);
@@ -677,7 +713,7 @@ mod tests {
 
     #[test]
     fn utf8_split_across_reads() {
-        let mut t = Term { parser: vt100::Parser::new(NonZero::new(24).unwrap(), NonZero::new(80).unwrap(), 0), sink: None, carry: Vec::new() };
+        let mut t = Term { parser: vt100::Parser::new(NonZero::new(24).unwrap(), NonZero::new(80).unwrap(), 0), sink: None, carry: Vec::new(), seq: 0 };
         let bytes = "日本語テキスト".as_bytes();
         let mut out = String::new();
         // 1バイトずつ届いても文字化けしない

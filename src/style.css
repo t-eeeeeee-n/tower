@@ -402,8 +402,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
   font: 11px/1.4 var(--mono);
   color: var(--term-dim);
   white-space: pre;
-  overflow: hidden;
-  display: flex; flex-direction: column; justify-content: flex-end;
+  overflow: auto;
+  scrollbar-color: var(--line) transparent;
+  cursor: auto;
 }
 .c-msg { margin: 8px 10px 0; color: var(--st-waiting); }
 .c-choices { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 10px 0; }
@@ -418,7 +419,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 .c-choices button:hover { background: var(--raise-2); }
 .c-choices button.first { background: var(--st-waiting); border-color: var(--st-waiting); color: var(--on-waiting); font-weight: 600; }
-.has-talk .c-tail { flex: none; height: calc(6 * 1.4em + 12px); opacity: 0.8; }
+.has-talk .c-tail { flex: none; height: calc(8 * 1.4em + 12px); opacity: 0.8; }
 .c-input { display: flex; gap: 6px; margin: 8px 10px 0; }
 .c-input input { flex: 1; min-width: 0; padding: 5px 8px; }
 .c-tpl { flex: none; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--muted); font-size: 12px; }

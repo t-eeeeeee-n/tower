@@ -66,10 +66,20 @@ fn session_end_to_end() {
     );
 
     // 一覧画面用の末尾取得にも同じ出力が含まれる
-    let peek = manager.peek(5);
+    let peek = manager.peek(5, &Default::default());
     assert!(
-        peek.iter().any(|p| p.id == id && p.lines.iter().any(|l| l.contains(&format!("こんにちは-{id}")))),
+        peek.iter().any(|p| p.id == id && p.lines.iter().flatten().any(|l| l.contains(&format!("こんにちは-{id}")))),
         "peek に無い"
+    );
+    // 画面が変わっていなければ、行は送り直さない（プロンプトの出力などが落ち着くまで待つ）
+    let mut known: std::collections::HashMap<String, u64> = peek.iter().map(|p| (p.id.clone(), p.seq)).collect();
+    assert!(
+        wait_until(5000, || {
+            let next = manager.peek(5, &known);
+            known = next.iter().map(|p| (p.id.clone(), p.seq)).collect();
+            next.iter().all(|p| p.lines.is_none())
+        }),
+        "変わっていない画面を送り直している"
     );
 
     // 別のチャンネルで再接続すると、スナップショットに画面が復元される
@@ -113,9 +123,9 @@ fn session_end_to_end() {
     manager.write(&bg, "echo 裏で動作-$DASH_SESSION_ID\r").unwrap();
     assert!(
         wait_until(15000, || manager
-            .peek(10)
+            .peek(10, &Default::default())
             .iter()
-            .any(|p| p.id == bg && p.lines.iter().any(|l| l.contains(&format!("裏で動作-{bg}"))))),
+            .any(|p| p.id == bg && p.lines.iter().flatten().any(|l| l.contains(&format!("裏で動作-{bg}"))))),
         "表示していないセッションが動かない"
     );
     manager.kill(&bg).unwrap();

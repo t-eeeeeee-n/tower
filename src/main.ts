@@ -36,7 +36,9 @@ interface Session extends SessionInfo {
 }
 interface Peek {
   id: string;
-  lines: string[];
+  /** 前回から画面が変わっていなければ null */
+  lines: string[] | null;
+  seq: number;
   talk_rev: number;
 }
 interface Turn {
@@ -484,8 +486,10 @@ async function pollPeeks() {
   }
   try {
     // 枠を取り除くと行が減るので多めに取る
-    const list = await invoke<Peek[]>("peek_sessions", { lines: 40 });
-    for (const p of list) peeks.set(p.id, p);
+    // スクロールしてさかのぼれるよう履歴ごと取る。変わっていないセッションの分は送られてこない
+    const known = Object.fromEntries([...peeks].map(([id, p]) => [id, p.seq]));
+    const list = await invoke<Peek[]>("peek_sessions", { lines: 300, known });
+    for (const p of list) peeks.set(p.id, { ...p, lines: p.lines ?? peeks.get(p.id)?.lines ?? [] });
     // やり取りの全文は、増えたときだけ取りに行く
     await Promise.all(
       list
@@ -628,8 +632,15 @@ function updateCard(card: HTMLElement, s: Session) {
   }
 
   const tail = q(".c-tail");
-  const text = cleanTail(lines, hasTalk ? 6 : 30).join("\n");
-  if (tail.textContent !== text) tail.textContent = text;
+  const text = cleanTail(lines, 300).join("\n");
+  // さかのぼって読んでいる間は更新を止める。300 行を超えると古い行が上から消えて、読んでいる文字がずれるため。
+  // いちばん下まで戻すと、次の更新で最新に追いつく
+  const atBottom = !tail.dataset.shown || tail.scrollHeight - tail.scrollTop - tail.clientHeight < 16;
+  if (atBottom && tail.textContent !== text) {
+    tail.textContent = text;
+    tail.dataset.shown = "1";
+    tail.scrollTop = tail.scrollHeight;
+  }
 
   const waiting = s.status === "waiting";
   const msg = q(".c-msg");
