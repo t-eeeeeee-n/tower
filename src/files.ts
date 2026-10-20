@@ -1,6 +1,8 @@
 // ターミナルの右に出す、セッションのフォルダのファイル一覧とコード表示（見るだけ）
 import { invoke } from "@tauri-apps/api/core";
 import hljs from "highlight.js/lib/common";
+import { Marked } from "marked";
+import DOMPurify from "dompurify";
 
 interface Entry {
   name: string;
@@ -16,7 +18,7 @@ interface Change {
   path: string;
   status: string;
 }
-type Mode = "diff" | "file";
+type Mode = "diff" | "file" | "preview";
 
 /** セッションごとに覚えておく表示の状態 */
 interface View {
@@ -76,6 +78,34 @@ function highlight(text: string, lang: string | null) {
   return hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
 }
 
+// Markdown の画像は外部から読み込まず、代わりの文字にする（読み込むと開いたことが外部に伝わるため）
+const markdown = new Marked({
+  gfm: true,
+  async: false,
+  renderer: {
+    image({ text }) {
+      return `<span class="md-img">[画像: ${escapeHtml(text)}]</span>`;
+    },
+  },
+});
+
+/**
+ * Markdown を、スクリプト・スタイル・外部の読み込みを取り除いた HTML にする。
+ * Tower の画面は Tauri のコマンド（ターミナルへの書き込みなど）を呼べるので、README などに書かれた HTML を
+ * そのまま表示すると、勝手に操作される恐れがある。innerHTML に入れてよいのはこの戻り値だけ。
+ */
+function markdownHtml(text: string) {
+  return DOMPurify.sanitize(markdown.parse(text) as string, {
+    FORBID_TAGS: [
+      "style", "img", "picture", "video", "audio", "source", "track", "iframe", "object", "embed",
+      "form", "input", "button", "textarea", "select", "link", "meta", "base", "svg", "math",
+    ],
+    FORBID_ATTR: ["style", "srcset"],
+  });
+}
+
+const isMarkdown = (path: string) => /\.(md|markdown|mdx)$/i.test(path);
+
 function load(key: string) {
   try {
     return localStorage.getItem(key);
@@ -122,7 +152,6 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     tree.hidden = treeCollapsed;
     $("f-hsplit").hidden = treeCollapsed;
     $("f-collapse").setAttribute("aria-expanded", String(!treeCollapsed));
-    $("f-collapse").querySelector(".f-chev")!.textContent = treeCollapsed ? "▸" : "▾";
   }
   applyTree();
 
@@ -189,7 +218,7 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     r.title = opts.rel;
     r.classList.toggle("selected", !opts.dir && view().selected === opts.rel);
     if (opts.dir) r.setAttribute("aria-expanded", String(!!opts.expanded));
-    r.append(el("span", "f-chev", opts.dir ? (opts.expanded ? "▾" : "▸") : ""), el("span", "f-name", label));
+    r.append(el("span", "f-chev", opts.dir ? ">" : ""), el("span", "f-name", label));
     const b = opts.dir ? (opts.changedInside ? el("span", "f-dot", "●") : null) : badge(opts.status);
     if (b) r.append(b);
     return r;
@@ -292,9 +321,12 @@ export function createFilesPanel(showError: (e: unknown) => void) {
       return;
     }
     const status = changes.get(rel);
-    const mode: Mode = status === "D" ? "diff" : (v.mode ?? (status ? "diff" : "file"));
-    modes.hidden = !status || status === "D";
+    const md = isMarkdown(rel);
+    let mode: Mode = status === "D" ? "diff" : (v.mode ?? (status ? "diff" : md ? "preview" : "file"));
+    if (mode === "preview" && !md) mode = "file";
+    modes.hidden = status === "D" || (!status && !md);
     for (const b of modes.querySelectorAll<HTMLButtonElement>("button")) {
+      b.hidden = (b.dataset.mode === "diff" && !status) || (b.dataset.mode === "preview" && !md);
       b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
     }
     const lang = langFor(rel);
@@ -313,6 +345,7 @@ export function createFilesPanel(showError: (e: unknown) => void) {
       const text = file.text;
       // Git 管理外のファイルの差分は、全行を追加として表示する
       if (mode === "diff") show(`n:${rel}:${text}`, () => renderAdded(text, lang));
+      else if (mode === "preview") show(`p:${rel}:${text}`, () => renderMarkdown(text));
       else show(`f:${rel}:${text}`, () => renderCode(text, lang));
     } catch (e) {
       show(`e:${rel}:${e}`, () => [el("p", "fv-empty", String(e))]);
@@ -327,6 +360,17 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     shownKey = key;
     body.replaceChildren(...build());
     if (keep) body.scrollTop = top;
+  }
+
+  function renderMarkdown(text: string) {
+    const div = el("div", "md-preview");
+    div.innerHTML = markdownHtml(text);
+    for (const a of div.querySelectorAll("a")) a.title = a.getAttribute("href") ?? "";
+    // リンクを開くと Tower の画面そのものが別のページに移ってしまうので、開かない
+    div.onclick = (ev) => {
+      if ((ev.target as HTMLElement).closest("a")) ev.preventDefault();
+    };
+    return [div];
   }
 
   function renderCode(text: string, lang: string | null) {

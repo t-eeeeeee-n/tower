@@ -9,8 +9,9 @@
     <div class="app">
       <aside class="sidebar">
         <header class="sidebar-head">
-          <span class="brand"><img class="brand-mark" src="/src/assets/tower.png" width="22" height="22" alt="" />Tower</span>
+          <span class="brand"><img class="brand-mark" src="/src/assets/tower.png" width="22" height="22" alt="" /><span class="brand-text">Tower</span></span>
           <button id="new-btn" class="icon-btn" title="新しいセッション（Ctrl+Shift+N）" aria-label="新しいセッション"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.5v11M1.5 7h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+          <button id="sidebar-toggle" class="icon-btn" title="サイドバーをたたむ（Ctrl+Shift+B）" aria-label="サイドバーをたたむ" aria-expanded="true"><span class="chev">&gt;</span></button>
         </header>
         <button id="overview-btn" class="nav-btn" title="一覧（Ctrl+0）"><span>一覧</span><span class="shortcut">Ctrl+0</span></button>
         <button id="waiting-jump" class="waiting-jump" hidden></button>
@@ -39,7 +40,7 @@
           <div id="files-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="ファイルの幅" hidden></div>
           <aside id="files" class="files" aria-label="ファイル" hidden>
             <div class="f-head">
-              <button id="f-collapse" class="f-title" aria-expanded="true" aria-controls="f-tree" title="一覧をたたむ / 開く"><span class="f-chev">▾</span>ファイル</button>
+              <button id="f-collapse" class="f-title" aria-expanded="true" aria-controls="f-tree" title="一覧をたたむ / 開く"><span class="f-chev">&gt;</span>ファイル</button>
               <label class="f-toggle"><input id="f-changed-only" type="checkbox" />変更のみ</label>
               <button id="f-refresh" class="f-icon" title="更新" aria-label="更新">↻</button>
             </div>
@@ -49,6 +50,7 @@
               <span id="fv-path" class="fv-path"></span>
               <div id="fv-modes" class="fv-modes" hidden>
                 <button data-mode="diff">差分</button>
+                <button data-mode="preview">プレビュー</button>
                 <button data-mode="file">全体</button>
               </div>
             </div>

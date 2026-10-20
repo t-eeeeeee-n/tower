@@ -67,6 +67,32 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 const appWindow = getCurrentWindow();
 const files = createFilesPanel((e) => showError(e));
 
+// サイドバーは、たたむと番号と状態のランプだけの細い帯になる（入力待ちに気づけるように、完全には消さない）
+let sidebarCollapsed = false;
+try {
+  sidebarCollapsed = localStorage.getItem("sidebarCollapsed") === "1";
+} catch {
+  /* 読めなければ開いた状態 */
+}
+function applySidebar() {
+  document.querySelector(".app")!.classList.toggle("sidebar-collapsed", sidebarCollapsed);
+  const b = $("sidebar-toggle");
+  b.setAttribute("aria-expanded", String(!sidebarCollapsed));
+  const label = sidebarCollapsed ? "サイドバーを開く（Ctrl+Shift+B）" : "サイドバーをたたむ（Ctrl+Shift+B）";
+  b.title = label;
+  b.setAttribute("aria-label", label);
+}
+function toggleSidebar() {
+  sidebarCollapsed = !sidebarCollapsed;
+  try {
+    localStorage.setItem("sidebarCollapsed", sidebarCollapsed ? "1" : "0");
+  } catch {
+    /* 保存できなくても動作には影響しない */
+  }
+  applySidebar();
+}
+applySidebar();
+
 const sessions = new Map<string, Session>();
 let order: string[] = [];
 let activeId: string | null = null;
@@ -298,7 +324,7 @@ function render() {
       li.dataset.status = s.status;
       li.classList.toggle("active", view === "session" && id === activeId);
       li.classList.toggle("waiting", s.status === "waiting");
-      li.title = s.cwd;
+      li.title = `${s.name}\n${s.cwd}`;
       li.append(
         el("span", "s-key", i < 9 ? String(i + 1) : ""),
         el("span", "s-name", s.name),
@@ -682,6 +708,7 @@ $("new-btn").onclick = openNewDialog;
 $("empty-new").onclick = openNewDialog;
 $("close-btn").onclick = () => activeId && closeSession(activeId);
 $("files-btn").onclick = () => files.toggle();
+$("sidebar-toggle").onclick = toggleSidebar;
 $("waiting-jump").onclick = nextWaiting;
 $("overview-btn").onclick = showOverview;
 
@@ -704,6 +731,8 @@ document.addEventListener(
       openNewDialog();
     } else if (e.ctrlKey && e.shiftKey && k === "a") {
       nextWaiting();
+    } else if (e.ctrlKey && e.shiftKey && k === "b") {
+      toggleSidebar();
     } else if (e.ctrlKey && e.shiftKey && k === "e") {
       files.toggle();
     } else if (e.ctrlKey && e.shiftKey && k === "w") {

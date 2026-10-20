@@ -48,10 +48,27 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .sidebar-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
   padding: 12px 10px 10px 14px;
 }
-.brand { display: flex; align-items: center; gap: 9px; font-size: 14px; font-weight: 600; }
+.brand { display: flex; align-items: center; gap: 9px; margin-right: auto; font-size: 14px; font-weight: 600; }
+.chev { display: inline-block; font-family: var(--mono); line-height: 1; }
+#sidebar-toggle[aria-expanded="true"] .chev { transform: rotate(180deg); }
+
+/* たたんだサイドバー：番号と状態のランプだけの細い帯 */
+.app.sidebar-collapsed { grid-template-columns: 56px 1fr; }
+.sidebar-collapsed .sidebar-head { flex-direction: column; padding: 12px 0 10px; }
+.sidebar-collapsed .brand { margin: 0 0 4px; }
+.sidebar-collapsed .brand-text,
+.sidebar-collapsed .shortcut,
+.sidebar-collapsed .waiting-jump,
+.sidebar-collapsed .sidebar-foot { display: none; }
+.sidebar-collapsed .nav-btn { justify-content: center; margin: 0 4px 6px; padding: 6px 0; font-size: 12px; }
+.sidebar-collapsed .session-list { padding: 4px 4px 0; }
+.sidebar-collapsed .session { display: block; height: 42px; padding: 0; }
+.sidebar-collapsed .session > :not(.s-key) { display: none; }
+.sidebar-collapsed .session::before { left: 50%; top: 10px; margin-left: -3.5px; }
+.sidebar-collapsed .s-key { left: 0; right: 0; width: auto; top: 23px; }
 .brand-mark { display: block; flex: none; }
 .icon-btn {
   width: 28px; height: 28px;
@@ -241,7 +258,29 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 .f-row:hover { background: var(--raise); }
 .f-row.selected { background: var(--raise-2); }
-.f-chev { width: 12px; flex: none; color: var(--faint); font-size: 10px; }
+.f-chev { display: inline-block; width: 12px; flex: none; color: var(--faint); font: 11px/1 var(--mono); text-align: center; }
+.f-row[aria-expanded="true"] .f-chev, #f-collapse[aria-expanded="true"] .f-chev { transform: rotate(90deg); }
+
+/* Markdown のプレビュー */
+.md-preview { padding: 14px 20px 28px; max-width: 860px; font-size: 13.5px; line-height: 1.75; color: var(--text); user-select: text; overflow-wrap: anywhere; }
+.md-preview > :first-child { margin-top: 0; }
+.md-preview h1, .md-preview h2, .md-preview h3, .md-preview h4 { margin: 1.4em 0 0.5em; line-height: 1.35; }
+.md-preview h1 { font-size: 1.6em; padding-bottom: 0.3em; border-bottom: 1px solid var(--line); }
+.md-preview h2 { font-size: 1.3em; padding-bottom: 0.25em; border-bottom: 1px solid var(--line); }
+.md-preview h3 { font-size: 1.1em; }
+.md-preview p, .md-preview ul, .md-preview ol, .md-preview pre, .md-preview table, .md-preview blockquote { margin: 0 0 0.9em; }
+.md-preview ul, .md-preview ol { padding-left: 1.6em; }
+.md-preview li + li { margin-top: 0.2em; }
+.md-preview code { padding: 1px 5px; border-radius: 3px; background: var(--raise); font: 12px var(--mono); }
+.md-preview pre { padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); overflow: auto; }
+.md-preview pre code { padding: 0; background: none; }
+.md-preview a { color: var(--st-running); text-decoration: underline; cursor: default; }
+.md-preview blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid var(--line); color: var(--muted); }
+.md-preview table { border-collapse: collapse; display: block; overflow: auto; }
+.md-preview th, .md-preview td { padding: 4px 10px; border: 1px solid var(--line); }
+.md-preview th { background: var(--raise); }
+.md-preview hr { border: 0; border-top: 1px solid var(--line); }
+.md-img { color: var(--faint); font-style: italic; }
 .f-name { overflow: hidden; text-overflow: ellipsis; }
 .f-badge { margin-left: auto; padding-left: 8px; font: 600 11px/1 var(--mono); }
 .f-M { color: var(--st-waiting); }
@@ -464,6 +503,8 @@ input:not([type]):focus { border-color: var(--st-running); outline: none; }
 [data-status="exited"] { --st: var(--st-exited); }
 
 @media (prefers-reduced-motion: no-preference) {
+  .app { transition: grid-template-columns 0.15s ease; }
+  .f-chev, .chev { transition: transform 0.12s ease; }
   .session[data-status="waiting"]::before,
   .card[data-status="waiting"] .c-status::before { animation: blink 1.6s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0.25; } }
