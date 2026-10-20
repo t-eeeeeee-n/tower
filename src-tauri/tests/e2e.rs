@@ -6,6 +6,7 @@ use tower_lib::{agent::Agent, hooks, session::Manager};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::Listener;
 
+/// bash の起動はウイルス対策ソフトの検査などで 5 秒以上かかることがあるので、待ち時間は長めにとる
 fn wait_until(timeout_ms: u64, mut f: impl FnMut() -> bool) -> bool {
     let start = Instant::now();
     while start.elapsed() < Duration::from_millis(timeout_ms) {
@@ -59,7 +60,7 @@ fn session_end_to_end() {
     // 日本語の出力と、セッションIDの環境変数
     manager.write(&id, "echo こんにちは-$DASH_SESSION_ID\r").unwrap();
     assert!(
-        wait_until(5000, || received.lock().unwrap().contains(&format!("こんにちは-{id}"))),
+        wait_until(15000, || received.lock().unwrap().contains(&format!("こんにちは-{id}"))),
         "出力が届かない: {:?}",
         received.lock().unwrap()
     );
@@ -85,7 +86,7 @@ fn session_end_to_end() {
         .write(&id, &format!("echo '{{\"message\":\"Claude needs your permission to use Bash\"}}' | bash {}\r", bash_path(&script)))
         .unwrap();
     assert!(
-        wait_until(5000, || {
+        wait_until(15000, || {
             let st = serde_json::to_string(&manager.get(&id).unwrap().info()).unwrap();
             st.contains("\"waiting\"") && st.contains("permission")
         }),
@@ -105,13 +106,13 @@ fn session_end_to_end() {
     let script = dir.join("stop.sh");
     std::fs::write(&script, stop).unwrap();
     manager.write(&id, &format!("echo '{{}}' | bash {}\r", bash_path(&script))).unwrap();
-    assert!(wait_until(5000, || serde_json::to_string(&manager.get(&id).unwrap().info()).unwrap().contains("\"idle\"")));
+    assert!(wait_until(15000, || serde_json::to_string(&manager.get(&id).unwrap().info()).unwrap().contains("\"idle\"")));
 
     // 表示していないセッションでも、ConPTY の問い合わせで止まらずに動く（前回のセッションの再開で使う）
     let bg = manager.create(&handle, "bg".into(), dir.to_string_lossy().into(), Agent::Shell, false).unwrap().id;
     manager.write(&bg, "echo 裏で動作-$DASH_SESSION_ID\r").unwrap();
     assert!(
-        wait_until(5000, || manager
+        wait_until(15000, || manager
             .peek(10)
             .iter()
             .any(|p| p.id == bg && p.lines.iter().any(|l| l.contains(&format!("裏で動作-{bg}"))))),
