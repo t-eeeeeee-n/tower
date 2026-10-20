@@ -706,7 +706,6 @@ $<HTMLButtonElement>("restore-btn").onclick = async (ev) => {
 };
 $("new-btn").onclick = openNewDialog;
 $("empty-new").onclick = openNewDialog;
-$("close-btn").onclick = () => activeId && closeSession(activeId);
 $("files-btn").onclick = () => files.toggle();
 $("sidebar-toggle").onclick = toggleSidebar;
 $("waiting-jump").onclick = nextWaiting;
