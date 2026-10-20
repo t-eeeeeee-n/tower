@@ -16,6 +16,19 @@
   --st-shell: #7e8a9c;
   --st-exited: #4d5668;
   --danger: #e57373;
+  --on-running: #08222a;
+  --on-waiting: #2a1d05;
+  --term-dim: #c9d1dd;
+
+  --hl-text: #d5dbe5;
+  --hl-comment: #6b7688;
+  --hl-keyword: #5fb3c8;
+  --hl-string: #8cc48a;
+  --hl-number: #e9b04b;
+  --hl-title: #6f9fe0;
+  --hl-type: #b69be0;
+  --hl-attr: #82cadb;
+  --hl-deletion: #e57373;
 
   --ui: "Segoe UI Variable Text", "Segoe UI", "Yu Gothic UI", "Meiryo UI", system-ui, sans-serif;
   --mono: "Cascadia Mono", "Cascadia Code", "BIZ UDGothic", Consolas, monospace;
@@ -101,13 +114,13 @@ button { font: inherit; color: inherit; cursor: pointer; }
   border: 0;
   border-radius: 4px;
   background: var(--st-waiting);
-  color: #2a1d05;
+  color: var(--on-waiting);
   font-weight: 600;
   text-align: left;
 }
 .waiting-jump[hidden] { display: none; }
 .waiting-jump:hover { filter: brightness(1.06); }
-.waiting-jump .shortcut { color: #5c4210; }
+.waiting-jump .shortcut { color: color-mix(in srgb, var(--on-waiting) 70%, var(--st-waiting)); }
 
 .session-list {
   list-style: none; margin: 0; padding: 4px 6px 0;
@@ -316,16 +329,16 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .d-hunk { margin: 6px 0 2px; padding: 2px 12px; color: var(--st-running); background: var(--raise); white-space: pre; }
 
 /* コードの色分け（ターミナルの配色に合わせる） */
-.hljs { color: #d5dbe5; background: transparent; }
-.hljs-comment, .hljs-quote, .hljs-meta { color: #6b7688; font-style: italic; }
-.hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-doctag { color: #5fb3c8; }
-.hljs-string, .hljs-regexp, .hljs-addition, .hljs-attribute { color: #8cc48a; }
-.hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet { color: #e9b04b; }
-.hljs-title, .hljs-title.function_, .hljs-section { color: #6f9fe0; }
-.hljs-type, .hljs-title.class_, .hljs-class .hljs-title { color: #b69be0; }
-.hljs-variable, .hljs-template-variable, .hljs-params { color: #d5dbe5; }
-.hljs-attr, .hljs-property, .hljs-name, .hljs-tag { color: #82cadb; }
-.hljs-deletion { color: #e57373; }
+.hljs { color: var(--hl-text); background: transparent; }
+.hljs-comment, .hljs-quote, .hljs-meta { color: var(--hl-comment); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-doctag { color: var(--hl-keyword); }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-attribute { color: var(--hl-string); }
+.hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet { color: var(--hl-number); }
+.hljs-title, .hljs-title.function_, .hljs-section { color: var(--hl-title); }
+.hljs-type, .hljs-title.class_, .hljs-class .hljs-title { color: var(--hl-type); }
+.hljs-variable, .hljs-template-variable, .hljs-params { color: var(--hl-text); }
+.hljs-attr, .hljs-property, .hljs-name, .hljs-tag { color: var(--hl-attr); }
+.hljs-deletion { color: var(--hl-deletion); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
 .xterm .xterm-viewport { scrollbar-color: var(--line) transparent; }
@@ -367,7 +380,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   background: var(--ink);
   border-radius: 4px;
   font: 11px/1.4 var(--mono);
-  color: #c9d1dd;
+  color: var(--term-dim);
   white-space: pre;
   overflow: hidden;
   display: flex; flex-direction: column; justify-content: flex-end;
@@ -384,7 +397,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .c-choices button:hover { background: var(--raise-2); }
-.c-choices button.first { background: var(--st-waiting); border-color: var(--st-waiting); color: #2a1d05; font-weight: 600; }
+.c-choices button.first { background: var(--st-waiting); border-color: var(--st-waiting); color: var(--on-waiting); font-weight: 600; }
 .c-input { margin: 8px 10px 0; }
 .c-input input { width: 100%; padding: 5px 8px; }
 .c-foot { display: flex; gap: 12px; padding: 8px 10px 9px; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -416,7 +429,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .text-btn[aria-pressed="true"] { background: var(--raise-2); border-color: var(--st-running); }
 .primary-btn {
   background: var(--st-running);
-  color: #08222a;
+  color: var(--on-running);
   border: 0;
   border-radius: 4px;
   padding: 6px 16px;
@@ -460,7 +473,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .hint { color: var(--faint); font-size: 12px; }
 .row { display: flex; gap: 8px; }
 .row input { flex: 1; }
-input:not([type]) {
+input:not([type]), input[type="number"] {
   background: var(--ink);
   color: var(--text);
   border: 1px solid var(--line);
@@ -479,11 +492,45 @@ select {
   font: inherit;
 }
 select:focus { border-color: var(--st-running); outline: none; }
-input:not([type]):focus { border-color: var(--st-running); outline: none; }
+input:not([type]):focus, input[type="number"]:focus { border-color: var(--st-running); outline: none; }
 .check { display: flex; gap: 8px; align-items: center; margin: 4px 0 16px; }
 .check input { accent-color: var(--st-running); }
 .error { color: var(--danger); margin: 0 0 12px; white-space: pre-wrap; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* 表示の設定 */
+.look-dialog { width: min(600px, 94vw); }
+.theme-list {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+  max-height: 264px; overflow-y: auto;
+  padding: 2px;
+  scrollbar-color: var(--line) transparent;
+}
+.theme-opt {
+  display: flex; align-items: center; gap: 10px;
+  min-width: 0;
+  padding: 5px 8px 5px 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  text-align: left;
+}
+.theme-opt:hover { background: var(--raise); }
+.theme-opt[aria-selected="true"] { border-color: var(--st-running); background: color-mix(in srgb, var(--st-running) 16%, transparent); font-weight: 600; }
+.theme-swatch {
+  flex: none;
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 4px 7px;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px rgb(127 127 127 / 0.3);
+  font: 600 12px/1 var(--mono);
+}
+.theme-swatch > span { margin-right: 3px; }
+.theme-swatch i { width: 7px; height: 7px; border-radius: 50%; }
+.theme-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.look-row { display: grid; grid-template-columns: 1fr 120px; gap: 12px; align-items: end; }
+.look-blink { margin: 0 0 22px; }
+.look-reset { margin-right: auto; }
 
 .toast {
   position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);

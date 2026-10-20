@@ -7,6 +7,7 @@ mod job;
 pub mod memory;
 mod notify;
 pub mod session;
+mod theme;
 
 use std::sync::{Arc, Mutex};
 
@@ -39,6 +40,11 @@ fn get_config(state: State<'_, App>) -> Config {
         hooks_error: state.hooks_error.lock().unwrap().clone(),
         hooks_settings: state.manager.hooks_settings.to_string_lossy().into_owned(),
     }
+}
+
+#[tauri::command]
+fn mintty_config(state: State<'_, App>) -> theme::Mintty {
+    theme::load(&state.manager.shell.program)
 }
 
 #[tauri::command]
@@ -180,6 +186,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
+            mintty_config,
             list_sessions,
             create_session,
             create_worktree,

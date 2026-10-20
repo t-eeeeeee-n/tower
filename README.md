@@ -55,10 +55,13 @@ npm run tauri build
 | Shift+Enter | エージェントの入力欄で改行（Alt+Enter と同じ信号を送る。bash では何もしない） |
 | Ctrl+Shift+C / V | コピー / 貼り付け（Ctrl+C はエージェントの中断に使うため） |
 | Ctrl+Shift+W | 表示中のセッションを閉じる |
+| Ctrl+, | 表示の設定（配色・フォント・カーソル） |
 
 ヘッダーの「ファイル」または Ctrl+Shift+E で、ターミナルの右にセッションのフォルダのファイルを表示します（見るだけで、編集はできません）。Git で変更されたファイルには印（M 変更・A 追加・D 削除・R 名前の変更・U Git 管理外）が付き、選ぶと変更前との差分を表示します。「全体」に切り替えるとファイル全体を表示し、Markdown（.md）は「プレビュー」で整形して表示します（スクリプトやスタイル、外部の画像は取り除き、リンクは開きません）。「変更のみ」にすると変更されたファイルだけに絞れます。表示中は数秒ごとと、エージェントの作業が終わったときに自動で更新します。境目をドラッグすると幅を変えられます。セッションのフォルダの外のファイルは開けません。
 
 Git の変更の表示は、フォルダごとに最初の 1 回だけ「このフォルダを信頼して表示する」で許可が必要です。Git はリポジトリの設定によってコマンドを実行することがあるので、許可していないフォルダでは Tower は git を呼びません（ファイルの一覧と中身は許可しなくても見られます）。信頼したフォルダから作った worktree は最初から許可済みになります。許可したフォルダは `%APPDATA%\dev.tower.app\trusted-folders.json` に記録され、このファイルから消せば許可を取り消せます。許可したフォルダでも、Tower が呼ぶ git では fsmonitor・外部の差分ツール・textconv・通信を使わず、リポジトリの設定に filter があれば git を呼びません。
+
+サイドバーの上のパレットのボタンまたは Ctrl+, で、表示の設定を開きます。配色は Git Bash（mintty）のテーマ（`C:\Program Files\Git\usr\share\mintty\themes`、`~/.mintty/themes`、`~/.config/mintty/themes`、`%APPDATA%\mintty\themes`）から選べ、ターミナルだけでなくサイドバーやファイルの表示もその配色に合わせます。「Git Bash（…）」は `~/.minttyrc` の `ThemeFile` と同じテーマです。「Git Bash に合わせる」を押すと、配色に加えて `~/.minttyrc` のフォント・文字の大きさ・カーソルの形と点滅も合わせます。選ぶとすぐに画面に反映され、「キャンセル」で開く前に戻ります。テーマのファイルを追加したときは、Tower を起動し直すと一覧に出ます。
 
 サイドバーは、上の「<」または Ctrl+Shift+B でたたむと、番号と状態のランプだけの細い帯になります。
 
@@ -100,7 +103,7 @@ Codex は新しい hook を承認するまで動かしません。Tower で最�
   - Codex: 「Hooks need review」で信頼を承認したか確認してください（`/hooks` でも確認できます）。
   - Copilot CLI: `copilot --version` が 1.0 以降か確認してください。古い場合は `npm i -g @github/copilot` で更新します。
 - **bash が起動しない**: 環境変数 `TOWER_BASH` に `C:\Program Files\Git\bin\bash.exe` のようなフルパスを設定してください。
-- **日本語が豆腐になる**: ターミナルのフォントは Cascadia Mono → BIZ UDGothic → Consolas の順で使います。`src/main.ts` の `fontFamily` で変更できます。
+- **日本語が豆腐になる**: ターミナルのフォントは、表示の設定で選んだもの → Cascadia Code → BIZ UDGothic → Consolas の順で使います。選んだフォントに日本語が無ければ BIZ UDGothic で表示します。
 
 ## テスト
 
@@ -117,6 +120,8 @@ PTY・仮想端末・hooks 受信を通しで確認する結合テスト（`test
 src/                 フロントエンド（TypeScript + xterm.js）
   main.ts            サイドバー、ターミナル、ショートカット
   files.ts           ファイルの一覧とコード・差分の表示
+  appearance.ts      表示の設定（配色・フォント・カーソル）
+  theme.ts           mintty のテーマの読み取りと、端末の配色から画面全体の色を作る処理
   style.css
 src-tauri/src/
   lib.rs             Tauri コマンドの定義と起動処理
@@ -129,4 +134,5 @@ src-tauri/src/
   git.rs             git worktree の作成
   files.rs           ファイル一覧・中身・Git の変更と差分の読み取り
   trust.rs           Git の表示を許可したフォルダの記録
+  theme.rs           Git Bash（mintty）のテーマと設定ファイルの読み取り
 ```

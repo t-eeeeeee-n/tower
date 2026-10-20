@@ -8,6 +8,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import { createFilesPanel } from "./files";
+import { createAppearance } from "./appearance";
 
 type Status = "shell" | "starting" | "idle" | "running" | "waiting" | "exited";
 type Agent = "shell" | "claude" | "codex" | "copilot" | "antigravity";
@@ -103,39 +104,14 @@ const peeks = new Map<string, string[]>();
 // ---------- ターミナル（インスタンスは1つだけ） ----------
 
 const term = new Terminal({
-  fontFamily: '"Cascadia Mono", "Cascadia Code", "BIZ UDGothic", Consolas, "MS Gothic", monospace',
-  fontSize: 14,
   lineHeight: 1.1,
   scrollback: 3000,
-  cursorBlink: true,
   allowProposedApi: false,
-  theme: {
-    background: "#121822",
-    foreground: "#e3e8f0",
-    cursor: "#e9b04b",
-    cursorAccent: "#121822",
-    selectionBackground: "#34445e",
-    black: "#1b2331",
-    red: "#e57373",
-    green: "#8cc48a",
-    yellow: "#e9b04b",
-    blue: "#6f9fe0",
-    magenta: "#b69be0",
-    cyan: "#5fb3c8",
-    white: "#c9d1dd",
-    brightBlack: "#566176",
-    brightRed: "#f08f8f",
-    brightGreen: "#a6d8a3",
-    brightYellow: "#f3c56f",
-    brightBlue: "#8db6ee",
-    brightMagenta: "#cbb5ee",
-    brightCyan: "#82cadb",
-    brightWhite: "#f2f5f9",
-  },
 });
 const fit = new FitAddon();
 term.loadAddon(fit);
 term.open($("term"));
+const look = createAppearance(term, () => !$("work").hidden && fit.fit(), (e) => showError(e));
 
 term.onData((data) => {
   if (activeId) invoke("write_session", { id: activeId, data }).catch(showError);
@@ -710,6 +686,7 @@ $("files-btn").onclick = () => files.toggle();
 $("sidebar-toggle").onclick = toggleSidebar;
 $("waiting-jump").onclick = nextWaiting;
 $("overview-btn").onclick = showOverview;
+$("look-btn").onclick = () => look.open();
 
 // ---------- キーボードショートカット ----------
 // キャプチャ段階で拾うので、ターミナルにフォーカスがあっても先に処理される
@@ -717,7 +694,7 @@ $("overview-btn").onclick = showOverview;
 document.addEventListener(
   "keydown",
   async (e) => {
-    if (dialog.open) return;
+    if (dialog.open || look.isOpen()) return;
     const k = e.key.toLowerCase();
     let handled = true;
     if (e.ctrlKey && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key)) {
@@ -726,6 +703,8 @@ document.addEventListener(
     } else if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === "0") {
       if (view === "session") showOverview();
       else if (activeId) activate(activeId);
+    } else if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === ",") {
+      look.open();
     } else if (e.ctrlKey && e.shiftKey && k === "n") {
       openNewDialog();
     } else if (e.ctrlKey && e.shiftKey && k === "a") {
