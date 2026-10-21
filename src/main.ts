@@ -105,6 +105,8 @@ const sessions = new Map<string, Session>();
 let order: string[] = [];
 let activeId: string | null = null;
 let attachToken = 0;
+// ターミナルにつないでいるセッション。activeId は切り替えの途中で先に変わる
+let attachedId: string | null = null;
 let view: "session" | "overview" = "session";
 const peeks = new Map<string, Peek>();
 const templates = createTemplates();
@@ -119,10 +121,21 @@ const term = new Terminal({
 const fit = new FitAddon();
 term.loadAddon(fit);
 term.open($("term"));
-const settings = createSettings(term, () => !$("work").hidden && fit.fit(), (e) => showError(e));
+// 一覧では右の枠、セッションの画面では #work に、同じターミナルを付け替えて使う
+function placeTerm() {
+  const host = view === "overview" ? $("ov-term-body") : $("work");
+  const wrap = $("term-wrap");
+  if (wrap.parentElement !== host) host.prepend(wrap);
+}
+
+function fitTerm() {
+  if ($("term-wrap").offsetParent) fit.fit();
+}
+
+const settings = createSettings(term, fitTerm, (e) => showError(e));
 
 term.onData((data) => {
-  if (activeId) invoke("write_session", { id: activeId, data }).catch(showError);
+  if (attachedId) invoke("write_session", { id: attachedId, data }).catch(showError);
 });
 
 // Shift+Enter は xterm.js では Enter と同じ \r になるので、ESC+CR（Alt+Enter と同じ）を送って改行にする。
@@ -130,13 +143,13 @@ term.onData((data) => {
 // ConPTY の win32-input-mode で Shift+Enter のキーイベントを送る方法は、Claude Code が Enter として扱い送信してしまう。
 term.attachCustomKeyEventHandler((e) => {
   if (e.key !== "Enter" || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return true;
-  if (e.type === "keydown" && activeId) {
-    invoke("write_session", { id: activeId, data: "\x1b\r" }).catch(showError);
+  if (e.type === "keydown" && attachedId) {
+    invoke("write_session", { id: attachedId, data: "\x1b\r" }).catch(showError);
   }
   return false;
 });
 term.onResize(({ cols, rows }) => {
-  if (activeId) invoke("resize_session", { id: activeId, cols, rows }).catch(() => {});
+  if (attachedId) invoke("resize_session", { id: attachedId, cols, rows }).catch(() => {});
 });
 
 let fitQueued = false;
@@ -145,19 +158,36 @@ new ResizeObserver(() => {
   fitQueued = true;
   requestAnimationFrame(() => {
     fitQueued = false;
-    if (!$("work").hidden) fit.fit();
+    fitTerm();
   });
 }).observe($("term-wrap"));
 
 async function activate(id: string) {
   if (!sessions.has(id)) return;
-  activeId = id;
   view = "session";
+  await show(id);
+}
+
+// 一覧のまま、右のターミナルにそのセッションを出す
+async function select(id: string) {
+  if (!sessions.has(id)) return;
+  await show(id);
+}
+
+async function show(id: string) {
+  const reattach = id !== attachedId;
+  activeId = id;
   render();
+  if (!reattach) {
+    fitTerm();
+    term.focus();
+    return;
+  }
+  attachedId = id;
   files.setSession(id);
   const token = ++attachToken;
   term.reset();
-  fit.fit();
+  fitTerm();
 
   // スナップショットより先に届いた出力は一旦ためて、スナップショットの後に書く
   let pending: string[] | null = [];
@@ -262,8 +292,8 @@ async function closeSession(id: string) {
     attachToken++;
     term.reset();
     const next = order[Math.min(idx, order.length - 1)];
-    if (next && view === "session") await activate(next);
-    else activeId = next ?? null;
+    attachedId = null;
+    if (next) await (view === "session" ? activate(next) : select(next));
   }
   render();
 }
@@ -273,7 +303,8 @@ function nextWaiting() {
   if (!waiting.length) return;
   const cur = activeId ? order.indexOf(activeId) : -1;
   const after = waiting.find((id) => order.indexOf(id) > cur) ?? waiting[0];
-  activate(after);
+  if (view === "overview") select(after);
+  else activate(after);
 }
 
 // ---------- 描画 ----------
@@ -311,8 +342,8 @@ function moveSession(id: string, target: string, after: boolean) {
   render();
 }
 
-// horizontal は横に並ぶもの（一覧のカード）で、左右どちらの半分に落としたかで前後を決める
-function draggable(li: HTMLElement, id: string, handle = li, horizontal = false) {
+// grid は一覧のカード。横に並んでいるときは左右どちらの半分に、1 列のときは上下どちらの半分に落としたかで前後を決める
+function draggable(li: HTMLElement, id: string, handle = li, grid = false) {
   handle.draggable = true;
   handle.ondragstart = (ev) => {
     dragId = id;
@@ -330,7 +361,9 @@ function draggable(li: HTMLElement, id: string, handle = li, horizontal = false)
     if (!dragId || dragId === id) return;
     ev.preventDefault();
     const r = li.getBoundingClientRect();
+    const horizontal = grid && getComputedStyle(li.parentElement!).gridTemplateColumns.split(" ").length > 1;
     const after = horizontal ? ev.clientX > r.left + r.width / 2 : ev.clientY > r.top + r.height / 2;
+    li.classList.toggle("drop-x", horizontal);
     li.classList.toggle("drop-before", !after);
     li.classList.toggle("drop-after", after);
   };
@@ -384,7 +417,7 @@ $<HTMLFormElement>("rename-form").onsubmit = async (ev) => {
 $("rename-cancel").onclick = () => renameDialog.close();
 renameDialog.onclose = () => {
   renaming = null;
-  if (view === "session" && activeId) term.focus();
+  if (attachedId) term.focus();
 };
 
 let trayWaiting = 0;
@@ -397,7 +430,7 @@ function render() {
       const s = sessions.get(id)!;
       const li = el("li", "session");
       li.dataset.status = s.status;
-      li.classList.toggle("active", view === "session" && id === activeId);
+      li.classList.toggle("active", id === activeId);
       li.classList.toggle("waiting", s.status === "waiting");
       li.title = `${s.name}\n${s.cwd}\nダブルクリックで名前を変更、ドラッグで並べ替え`;
       draggable(li, id);
@@ -441,6 +474,7 @@ function render() {
   $("total-mem").textContent = order.length ? `${order.length} セッション　合計 ${fmtBytes(total)}` : "";
 
   const overview = view === "overview" && order.length > 0;
+  placeTerm();
   const active = !overview && activeId ? sessions.get(activeId) : undefined;
   $("overview-btn").classList.toggle("active", overview);
   $("overview").hidden = !overview;
@@ -480,8 +514,9 @@ let peekLines = 0;
 function showOverview() {
   if (view === "overview") return;
   view = "overview";
-  term.blur();
-  render();
+  const id = activeId && sessions.has(activeId) ? activeId : order[0];
+  if (id) select(id);
+  else render();
   if (!peekTimer) pollPeeks();
 }
 
@@ -502,8 +537,7 @@ async function pollPeeks() {
   } catch (e) {
     showError(e);
   }
-  // 入力中のカードがあるときは、打った文字がすぐ見えるよう短い間隔で取る
-  peekTimer = window.setTimeout(pollPeeks, document.querySelector(".card.typing") ? 150 : 1000);
+  peekTimer = window.setTimeout(pollPeeks, 1000);
 }
 
 function screenTail(lines: string[], max: number) {
@@ -512,110 +546,26 @@ function screenTail(lines: string[], max: number) {
   return out.slice(-max);
 }
 
-const KEY_SEQ: Record<string, string> = {
-  Enter: "\r",
-  Backspace: "\x7f",
-  Tab: "\t",
-  Escape: "\x1b",
-  ArrowUp: "\x1b[A",
-  ArrowDown: "\x1b[B",
-  ArrowRight: "\x1b[C",
-  ArrowLeft: "\x1b[D",
-  Home: "\x1b[H",
-  End: "\x1b[F",
-  Delete: "\x1b[3~",
-  PageUp: "\x1b[5~",
-  PageDown: "\x1b[6~",
-};
-
-// 文字の入力は textarea の input / compositionend で受ける（日本語入力の変換を通すため）。ここでは文字にならないキーだけを送る
-function keyData(ev: KeyboardEvent) {
-  if (ev.altKey || ev.metaKey || ev.isComposing) return null;
-  if (ev.ctrlKey) {
-    // Ctrl+V は paste イベントで受ける
-    if (ev.shiftKey || !/^[a-z]$/i.test(ev.key) || ev.key.toLowerCase() === "v") return null;
-    return String.fromCharCode(ev.key.toLowerCase().charCodeAt(0) - 96);
-  }
-  // ターミナルと同じく ESC+CR にして、入力欄の改行にする
-  if (ev.shiftKey && ev.key === "Enter") return "\x1b\r";
-  if (ev.shiftKey && ev.key === "Tab") return "\x1b[Z";
-  return KEY_SEQ[ev.key] ?? null;
-}
-
 function makeCard(id: string) {
   const card = el("article", "card");
   card.tabIndex = 0;
   const head = el("header", "c-head");
   head.append(el("span", "c-name"), el("span", "c-agent"), el("span", "c-status"));
-  head.title = "クリックでターミナルを開く、ドラッグで並べ替え";
+  head.title = "ドラッグで並べ替え";
   // カード全体をつかめるようにすると、画面の末尾の文章を選べなくなる
   draggable(card, id, head, true);
   const tail = el("pre", "c-tail");
-  tail.title = "クリックすると、このセッションにそのまま入力できます（ダブルクリックでターミナルを開く）";
-  const kbd = el("textarea", "c-kbd");
-  kbd.setAttribute("aria-label", "セッションへの入力");
-  const send = (data: string) => {
-    if (!data) return;
-    invoke("write_session", { id, data }).catch(showError);
-    tail.scrollTop = tail.scrollHeight;
-  };
-  // 貼り付けとして送る。エージェントは貼り付けの改行では送信しない。
-  // ESC は取り除く。中に終わりの印（ESC[201~）があると、そこから後ろが打ち込んだ文字として扱われ、改行で実行されてしまう
-  const paste = (text: string) => send(`\x1b[200~${text.replace(/\x1b/g, "")}\x1b[201~`);
-  const flush = () => {
-    send(kbd.value);
-    kbd.value = "";
-  };
-  kbd.onkeydown = (ev) => {
-    const data = keyData(ev);
-    if (data === null) return;
-    ev.preventDefault();
-    send(data);
-  };
-  kbd.oninput = (ev) => {
-    if (!(ev as InputEvent).isComposing) flush();
-  };
-  kbd.addEventListener("compositionend", flush);
-  kbd.onpaste = (ev) => {
-    ev.preventDefault();
-    paste(ev.clipboardData?.getData("text") ?? "");
-  };
-  kbd.onfocus = () => {
-    card.classList.add("typing");
-    tail.scrollTop = tail.scrollHeight;
-  };
-  // 末尾の文章を選ぶとフォーカスはカードに移るので、カードの外に出るまでは入力中のままにする
-  card.addEventListener("focusout", (ev) => {
-    if (!card.contains(ev.relatedTarget as Node | null)) card.classList.remove("typing");
-  });
-  const tpl = el("button", "c-tpl", "テンプレート");
-  tpl.type = "button";
-  tpl.title = "テンプレートを入れる（送信はしません）";
-  tpl.onclick = () =>
-    templates.pick(
-      tpl,
-      (text) => {
-        paste(text);
-        kbd.focus();
-      },
-      () => kbd.focus(),
-    );
   const foot = el("footer", "c-foot");
-  foot.append(el("span", "c-age"), el("span", "c-mem"), tpl);
-  card.append(head, tail, kbd, foot);
-  card.onclick = (ev) => {
-    const target = ev.target as HTMLElement;
+  foot.append(el("span", "c-age"), el("span", "c-mem"));
+  card.append(head, tail, foot);
+  card.onclick = () => {
     // 文章を選んでいるときは、選び終わりのクリックで切り替えない
-    if (target.closest("button") || getSelection()?.toString()) return;
-    if (target.closest(".c-tail")) {
-      if (!kbd.disabled) kbd.focus({ preventScroll: true });
-      return;
-    }
-    activate(id);
+    if (getSelection()?.toString()) return;
+    select(id);
   };
-  tail.ondblclick = () => activate(id);
+  card.ondblclick = () => activate(id);
   card.onkeydown = (ev) => {
-    if (ev.key === "Enter" && ev.target === card) activate(id);
+    if (ev.key === "Enter" && ev.target === card) select(id);
   };
   return card;
 }
@@ -623,7 +573,8 @@ function makeCard(id: string) {
 function updateCard(card: HTMLElement, s: Session) {
   const q = (cls: string) => card.querySelector<HTMLElement>(cls)!;
   card.dataset.status = s.status;
-  card.title = s.cwd;
+  card.title = `${s.cwd}\nクリックで右のターミナルに出す、ダブルクリックで全画面に開く`;
+  card.classList.toggle("selected", s.id === activeId);
   q(".c-name").textContent = s.name;
   q(".c-agent").textContent = AGENT_LABEL[s.agent];
   q(".c-status").textContent = STATUS_LABEL[s.status];
@@ -642,9 +593,6 @@ function updateCard(card: HTMLElement, s: Session) {
     tail.scrollTop = tail.scrollHeight;
   }
 
-  const exited = s.status === "exited";
-  card.querySelector<HTMLTextAreaElement>(".c-kbd")!.disabled = exited;
-  q(".c-tpl").hidden = exited;
   q(".c-age").textContent = fmtAge(s.since);
   q(".c-mem").textContent = fmtBytes(s.bytes);
 }
@@ -672,10 +620,17 @@ function renderOverview(waitingCount: number, total: number) {
       cards.set(id, card);
       grid.append(card);
     }
-    // 要素は動かさず、表示の順番だけ変える。動かすと入力欄のフォーカスが外れ、会話の枠のスクロール位置も先頭に戻る
+    // 要素は動かさず、表示の順番だけ変える。動かすと画面の末尾のスクロール位置が先頭に戻る
     card.style.order = String(i);
     updateCard(card, sessions.get(id)!);
   });
+
+  const s = activeId ? sessions.get(activeId) : undefined;
+  $("ovt-name").textContent = s?.name ?? "";
+  $("ovt-agent").textContent = s ? AGENT_LABEL[s.agent] : "";
+  const st = $("ovt-status");
+  st.dataset.status = s?.status ?? "";
+  st.textContent = s ? STATUS_LABEL[s.status] : "";
 }
 
 // ---------- 新規セッションダイアログ ----------
@@ -860,14 +815,17 @@ $("files-btn").onclick = () => files.toggle();
 $("head-name").ondblclick = () => activeId && openRename(activeId);
 
 function insertTemplate() {
-  if (view !== "session" || !activeId) return;
+  if (!attachedId) return;
+  const anchor = view === "overview" ? $("ovt-tpl") : $("tpl-btn");
   // 貼り付けとして入れる。エージェントは貼り付けの改行では送信しない
-  templates.pick($("tpl-btn"), (text) => {
+  templates.pick(anchor, (text) => {
     term.paste(text);
     term.focus();
   }, () => term.focus());
 }
 $("tpl-btn").onclick = insertTemplate;
+$("ovt-tpl").onclick = insertTemplate;
+$("ovt-open").onclick = () => activeId && activate(activeId);
 $("sidebar-toggle").onclick = toggleSidebar;
 $("waiting-jump").onclick = nextWaiting;
 $("overview-btn").onclick = showOverview;
@@ -902,12 +860,12 @@ document.addEventListener(
       files.toggle();
     } else if (e.ctrlKey && e.shiftKey && k === "w") {
       if (activeId) closeSession(activeId);
-    } else if (view === "session" && e.ctrlKey && e.shiftKey && k === "c") {
+    } else if (attachedId && e.ctrlKey && e.shiftKey && k === "c") {
       const sel = term.getSelection();
       if (sel) writeText(sel).catch(showError);
-    } else if (view === "session" && e.ctrlKey && e.shiftKey && k === "v") {
+    } else if (attachedId && e.ctrlKey && e.shiftKey && k === "v") {
       readText()
-        .then((t) => t && activeId && term.paste(t))
+        .then((t) => t && attachedId && term.paste(t))
         .catch(showError);
     } else {
       handled = false;
@@ -952,7 +910,8 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
   render();
   files.sessionChanged(payload.id);
   if (!becameWaiting && ranFor < DONE_NOTIFY_MS) return;
-  const watching = payload.id === activeId && view === "session" && (await appWindow.isFocused());
+  // 一覧でも右のターミナルに出ているので、見ているとみなす
+  const watching = payload.id === attachedId && (await appWindow.isFocused());
   if (watching) return;
   if (becameWaiting) {
     if (!settings.notify().waiting) return;
