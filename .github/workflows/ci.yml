@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # ConPTY・Job Object・Git Bash を使う Windows 専用のアプリなので、Windows で動かす
+    runs-on: windows-latest
+    steps:
+      # 他人の Action はタグではなくコミットで固定する（タグは付け替えられるため）
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # tsc の型チェックも兼ねる。Rust 側は tauri::generate_context! が dist を埋め込むので、先に作っておく
+      - run: npm run build
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: src-tauri
+      - run: cargo test --locked
+        working-directory: src-tauri

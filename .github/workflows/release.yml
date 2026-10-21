@@ -1,0 +1,57 @@
+name: Release
+
+# v0.2.0 のようなタグを push すると、インストーラを作って下書きのリリースに載せる。
+# 下書きなので、中身を確かめてから GitHub の画面で公開する
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      # 他人の Action はタグではなくコミットで固定する（タグは付け替えられるため。このジョブはリポジトリに書き込める）
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: タグとアプリのバージョンが合っているか確かめる
+        shell: bash
+        run: |
+          for f in package.json src-tauri/tauri.conf.json; do
+            v=$(node -p "require('./$f').version")
+            if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+              echo "::error file=$f::タグ $GITHUB_REF_NAME と $f の version（$v）が違います"
+              exit 1
+            fi
+          done
+          v=$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error file=src-tauri/Cargo.toml::タグ $GITHUB_REF_NAME と Cargo.toml の version（$v）が違います"
+            exit 1
+          fi
+      - run: npm ci
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: src-tauri
+      # テストは tauri::generate_context! が埋め込む dist を必要とするので、先に作る（tauri-action も自分で作り直す）
+      - run: npm run build
+      - run: cargo test --locked
+        working-directory: src-tauri
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Tower ${{ github.ref_name }}
+          releaseBody: |
+            Windows 用のインストーラです。`Tower_*_x64-setup.exe`（NSIS）か `Tower_*_x64_en-US.msi` を使ってください。
+            コード署名はしていないので、初回は Windows の SmartScreen に警告されます（「詳細情報」→「実行」で起動できます）。
+          generateReleaseNotes: true
+          releaseDraft: true
+          prerelease: false

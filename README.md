@@ -38,6 +38,17 @@ npm run tauri build
 `src-tauri/target/release/bundle/nsis/` にインストーラ（.exe）、`bundle/msi/` に MSI ができます。
 インストールせずに使うなら `src-tauri/target/release/tower.exe` を直接起動しても動きます。
 
+### リリース（GitHub Actions）
+
+`package.json`・`src-tauri/tauri.conf.json`・`src-tauri/Cargo.toml` の version を揃えて上げ、同じ番号のタグを push すると、GitHub Actions がテストしてからインストーラを作り、下書きのリリースに載せます（`.github/workflows/release.yml`）。タグと version が違うときは止まります。下書きの中身を確かめてから、GitHub の画面で公開してください。
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+コード署名はしていないので、配ったインストーラは初回に Windows の SmartScreen に警告されます。
+
 ## 使い方
 
 「＋」またはCtrl+Shift+Nでフォルダと起動するエージェントを選ぶと、そのフォルダで Git Bash が起動し、続けてエージェントが立ち上がります。
@@ -123,7 +134,9 @@ cd src-tauri
 cargo test
 ```
 
-PTY・仮想端末・hooks 受信を通しで確認する結合テスト（`tests/e2e.rs`）が含まれています。
+PTY・仮想端末・hooks 受信を通しで確認する結合テスト（`tests/e2e.rs`）が含まれています。テストは `tauri::generate_context!` が埋め込む `dist/` を必要とするので、先に `npm run build` を一度実行してください。
+
+main への push とプルリクエストでは、GitHub Actions が Windows で型チェック（`npm run build`）とこのテストを実行します（`.github/workflows/ci.yml`）。
 
 ## 構成
 
