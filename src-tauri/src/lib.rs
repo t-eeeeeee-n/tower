@@ -121,6 +121,49 @@ fn create_worktree(state: State<'_, App>, cwd: String, branch: String) -> Result
 }
 
 #[tauri::command]
+fn session_heads(state: State<'_, App>) -> std::collections::HashMap<String, git::Head> {
+    state
+        .manager
+        .all()
+        .iter()
+        .filter_map(|s| Some((s.id.clone(), git::head(std::path::Path::new(&s.cwd))?)))
+        .collect()
+}
+
+/// 閉じたセッションの worktree を片付ける操作の前に、信頼したフォルダの worktree かを確かめる。
+/// セッションはもう閉じているので、id ではなくフォルダで受け取る
+fn worktree_root(state: &App, cwd: &str) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let head = git::head(std::path::Path::new(cwd)).filter(|h| h.worktree).ok_or("worktree ではありません")?;
+    let root = std::path::PathBuf::from(head.root);
+    if !state.trust.contains(&root) {
+        return Err("このフォルダは信頼していないので、Git の操作はしません".into());
+    }
+    let program = git::git_program(&state.manager.shell.program);
+    if let Some(reason) = files::repo_filter(&program, &root) {
+        return Err(reason);
+    }
+    Ok((program, root))
+}
+
+#[tauri::command(async)]
+fn worktree_state(state: State<'_, App>, cwd: String) -> Result<git::WorktreeState, String> {
+    let (program, root) = worktree_root(&state, &cwd)?;
+    git::worktree_state(&program, &root)
+}
+
+#[tauri::command(async)]
+fn merge_worktree(state: State<'_, App>, cwd: String) -> Result<(), String> {
+    let (program, root) = worktree_root(&state, &cwd)?;
+    git::merge_worktree(&program, &root)
+}
+
+#[tauri::command(async)]
+fn remove_worktree(state: State<'_, App>, cwd: String, delete_branch: bool) -> Result<(), String> {
+    let (program, root) = worktree_root(&state, &cwd)?;
+    git::remove_worktree(&program, &root, delete_branch)
+}
+
+#[tauri::command]
 fn notify(app: AppHandle, notifier: State<'_, notify::Notifier>, id: String, title: String, body: String) -> Result<(), String> {
     notifier.show(&app, &id, &title, &body)
 }
@@ -235,6 +278,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_tray_waiting,
             save_pasted_image,
+            session_heads,
+            worktree_state,
+            merge_worktree,
+            remove_worktree,
             get_config,
             mintty_config,
             list_sessions,

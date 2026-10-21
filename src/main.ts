@@ -32,6 +32,18 @@ interface SavedSession {
   cwd: string;
   agent: Agent;
 }
+interface Head {
+  branch: string;
+  worktree: boolean;
+  root: string;
+}
+interface WorktreeState {
+  branch: string;
+  main: string;
+  main_branch: string;
+  dirty: boolean;
+  ahead: number;
+}
 interface Session extends SessionInfo {
   bytes?: number;
 }
@@ -112,6 +124,7 @@ let view: "session" | "overview" = "session";
 const peeks = new Map<string, Peek>();
 // 作業が終わったが、まだ開いて見ていないセッション
 const unseen = new Set<string>();
+const heads = new Map<string, Head>();
 const templates = createTemplates();
 
 // ---------- ターミナル（インスタンスは1つだけ） ----------
@@ -269,6 +282,7 @@ async function createSession(name: string, cwd: string, agent: Agent, resume = f
   const info = await invoke<SessionInfo>("create_session", { name, cwd, agent, resume });
   sessions.set(info.id, info);
   order.push(info.id);
+  refreshHeads();
   restorable = [];
   saveSessions();
   return info.id;
@@ -335,6 +349,8 @@ async function closeSession(id: string) {
   saveSessions();
   files.forget(id);
   unseen.delete(id);
+  const head = heads.get(id);
+  heads.delete(id);
   if (activeId === id) {
     activeId = null;
     files.setSession(null);
@@ -345,6 +361,7 @@ async function closeSession(id: string) {
     if (next) await (view === "session" ? activate(next) : select(next));
   }
   render();
+  if (head?.worktree) await offerWorktreeCleanup(s.name, head.root);
 }
 
 function nextWaiting() {
@@ -495,6 +512,7 @@ function render() {
         el("span", "s-status", STATUS_LABEL[s.status]),
         el("span", "s-age", fmtAge(s.since)),
         el("span", "s-agent", AGENT_LABEL[s.agent]),
+        ...(heads.has(id) ? [branchTag(heads.get(id)!, "s-branch")] : []),
         ...(unseen.has(id) ? [el("span", "s-unseen", "未確認")] : []),
       );
       li.append(line2);
@@ -549,6 +567,7 @@ function render() {
   if (active) {
     $("head-name").textContent = active.name;
     $("head-agent").textContent = AGENT_LABEL[active.agent];
+    fillBranch($("head-branch"), heads.get(active.id));
     $("head-cwd").textContent = active.cwd;
     const st = $("head-status");
     st.dataset.status = active.status;
@@ -608,7 +627,7 @@ function makeCard(id: string) {
   draggable(card, id, head, true);
   const tail = el("pre", "c-tail");
   const foot = el("footer", "c-foot");
-  foot.append(el("span", "c-age"), el("span", "c-mem"));
+  foot.append(el("span", "c-age"), el("span", "c-branch"), el("span", "c-mem"));
   card.append(head, tail, foot);
   card.onclick = () => {
     // 文章を選んでいるときは、選び終わりのクリックで切り替えない
@@ -647,6 +666,7 @@ function updateCard(card: HTMLElement, s: Session) {
   }
 
   q(".c-age").textContent = fmtAge(s.since);
+  fillBranch(q(".c-branch"), heads.get(s.id));
   q(".c-mem").textContent = fmtBytes(s.bytes);
 }
 
@@ -682,10 +702,92 @@ function renderOverview(waitingCount: number, total: number) {
   const s = activeId ? sessions.get(activeId) : undefined;
   $("ovt-name").textContent = s?.name ?? "";
   $("ovt-agent").textContent = s ? AGENT_LABEL[s.agent] : "";
+  fillBranch($("ovt-branch"), s && heads.get(s.id));
   const st = $("ovt-status");
   st.dataset.status = s?.status ?? "";
   st.textContent = s ? STATUS_LABEL[s.status] : "";
 }
+
+// ---------- ブランチと worktree ----------
+
+function fillBranch(span: HTMLElement, h: Head | undefined) {
+  span.hidden = !h;
+  span.textContent = h?.branch ?? "";
+  span.classList.toggle("worktree", !!h?.worktree);
+  span.title = h ? `${h.worktree ? "worktree のブランチ" : "ブランチ"}: ${h.branch}` : "";
+}
+
+function branchTag(h: Head, cls: string) {
+  const span = el("span", `${cls} branch-tag`);
+  fillBranch(span, h);
+  return span;
+}
+
+// エージェントがブランチを切り替えることもあるので、ときどき読み直す（.git を読むだけで git は動かさない）
+async function refreshHeads() {
+  try {
+    const next = await invoke<Record<string, Head>>("session_heads");
+    const sig = (m: Iterable<[string, Head]>) => JSON.stringify([...m]);
+    if (sig(Object.entries(next)) !== sig(heads)) {
+      heads.clear();
+      for (const [id, h] of Object.entries(next)) heads.set(id, h);
+      render();
+    }
+  } catch {
+    /* 次の回にまた読む */
+  }
+}
+window.setInterval(refreshHeads, 5000);
+
+const wtDialog = $<HTMLDialogElement>("wt-dialog");
+
+// 閉じたセッションが worktree で動いていたら、片付け方を選んでもらう。
+// 信頼していないフォルダなど、Git を動かせないときは何も聞かない
+async function offerWorktreeCleanup(name: string, root: string) {
+  if (order.some((id) => heads.get(id)?.root === root)) return;
+  let st: WorktreeState;
+  try {
+    st = await invoke<WorktreeState>("worktree_state", { cwd: root });
+  } catch {
+    return;
+  }
+  const facts: string[] = [`ブランチ ${st.branch}（元のフォルダ ${st.main} は ${st.main_branch || "ブランチなし"}）`];
+  const canMerge = !st.dirty && st.ahead > 0 && !!st.main_branch;
+  const merged = !st.dirty && st.ahead === 0 && !!st.main_branch;
+  if (st.dirty) facts.push("未コミットの変更があるので、消さずに残します。片付けるときは、コミットしてから worktree を消してください。");
+  else if (merged) facts.push(`変更はすべて ${st.main_branch} に入っています。`);
+  else if (st.main_branch) facts.push(`${st.main_branch} に入っていないコミットが ${st.ahead} 件あります。`);
+  $("wt-text").textContent = `「${name}」は worktree（${root}）で動いていました。`;
+  $("wt-facts").replaceChildren(...facts.map((f) => el("li", "", f)));
+  $("wt-error").hidden = true;
+  $("wt-merge").hidden = !canMerge;
+  $("wt-merge").textContent = `${st.main_branch} に取り込んで削除`;
+  $("wt-remove").hidden = !merged;
+  $("wt-remove-only").hidden = st.dirty || merged;
+  wtDialog.showModal();
+
+  const run = async (action: () => Promise<unknown>) => {
+    const buttons = wtDialog.querySelectorAll("button");
+    buttons.forEach((b) => (b.disabled = true));
+    try {
+      await action();
+      wtDialog.close();
+    } catch (e) {
+      $("wt-error").textContent = String(e);
+      $("wt-error").hidden = false;
+    } finally {
+      buttons.forEach((b) => (b.disabled = false));
+    }
+  };
+  $("wt-merge").onclick = () =>
+    run(async () => {
+      await invoke("merge_worktree", { cwd: root });
+      await invoke("remove_worktree", { cwd: root, deleteBranch: true });
+    });
+  $("wt-remove").onclick = () => run(() => invoke("remove_worktree", { cwd: root, deleteBranch: true }));
+  $("wt-remove-only").onclick = () => run(() => invoke("remove_worktree", { cwd: root, deleteBranch: false }));
+}
+$("wt-keep").onclick = () => wtDialog.close();
 
 // ---------- 新規セッションダイアログ ----------
 
@@ -1024,3 +1126,4 @@ setInterval(render, 20_000);
 appWindow.onFocusChanged(({ payload: focused }) => {
   if (focused && attachedId && unseen.delete(attachedId)) render();
 });
+refreshHeads();

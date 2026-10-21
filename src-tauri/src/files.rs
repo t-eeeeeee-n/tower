@@ -137,7 +137,7 @@ pub fn read_file(root: &Path, rel: &str) -> Result<FileContent, String> {
 /// コマンドが実行されないよう、そういうリポジトリでは git を呼ばない。
 /// 利用者の全体設定（~/.gitconfig の Git LFS など）は利用者自身が入れたものなので対象にしない。
 /// 設定を読むだけの git config は filter を実行しない。
-fn repo_filter(program: &Path, root: &Path) -> Option<String> {
+pub(crate) fn repo_filter(program: &Path, root: &Path) -> Option<String> {
     let out = match git(program, root, &["config", "--show-scope", "--includes", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"]) {
         Ok(out) => out,
         // 該当する設定が無いときは、何も出力せずに終了コード 1 で終わる

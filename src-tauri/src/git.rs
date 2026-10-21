@@ -71,6 +71,104 @@ pub fn create_worktree(program: &Path, cwd: &str, branch: &str) -> Result<String
     Ok(if cfg!(windows) { dir_str.replace('/', "\\") } else { dir_str })
 }
 
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct Head {
+    /// ブランチ名。ブランチに乗っていない（detached）ときはコミットの先頭 7 文字
+    pub branch: String,
+    /// git worktree で作った作業フォルダの中か
+    pub worktree: bool,
+    /// 作業フォルダのいちばん上
+    pub root: String,
+}
+
+/// `.git` を読むだけでブランチを調べる。git を動かさないので、信頼していないフォルダでも使える
+pub fn head(cwd: &Path) -> Option<Head> {
+    let (root, dot_git) = cwd.ancestors().find_map(|d| {
+        let g = d.join(".git");
+        g.exists().then(|| (d.to_path_buf(), g))
+    })?;
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        let target = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+        if target.is_absolute() { target } else { root.join(target) }
+    };
+    // サブモジュールも .git がファイルなので、worktree の印の commondir があるかで見分ける
+    let worktree = git_dir.join("commondir").is_file();
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let branch = match head.strip_prefix("ref: refs/heads/") {
+        Some(b) => b.to_string(),
+        None => head.chars().take(7).collect(),
+    };
+    Some(Head { branch, worktree, root: root.to_string_lossy().into_owned() })
+}
+
+#[derive(serde::Serialize, Debug)]
+pub struct WorktreeState {
+    pub branch: String,
+    /// 元の作業フォルダ（git worktree list の最初のもの）
+    pub main: String,
+    /// 元の作業フォルダのブランチ
+    pub main_branch: String,
+    /// 未コミットの変更があるか
+    pub dirty: bool,
+    /// 元のブランチに入っていないコミットの数
+    pub ahead: usize,
+}
+
+/// 呼び出し側は、信頼したフォルダかどうかと files::repo_filter を確かめてから呼ぶこと（status や merge は filter などを動かす）
+pub fn worktree_state(program: &Path, dir: &Path) -> Result<WorktreeState, String> {
+    let list = git(program, dir, &["worktree", "list", "--porcelain"])?;
+    let main = list.lines().next().and_then(|l| l.strip_prefix("worktree ")).ok_or("worktree の一覧を読めませんでした")?;
+    let main = PathBuf::from(main);
+    let branch = git(program, dir, &["branch", "--show-current"])?;
+    if branch.is_empty() {
+        return Err("ブランチに乗っていない worktree です".into());
+    }
+    let main_branch = git(program, &main, &["branch", "--show-current"])?;
+    let dirty = !git_raw(program, dir, &["status", "--porcelain", "--ignore-submodules=all"])?.trim().is_empty();
+    let ahead = git(program, dir, &["rev-list", "--count", &format!("{main_branch}..{branch}")])?.parse().unwrap_or(0);
+    Ok(WorktreeState { branch, main: main.to_string_lossy().into_owned(), main_branch, dirty, ahead })
+}
+
+/// worktree のブランチを元の作業フォルダのブランチに取り込む。競合したら取り込みをやめて元に戻す
+pub fn merge_worktree(program: &Path, dir: &Path) -> Result<(), String> {
+    let st = worktree_state(program, dir)?;
+    let main = Path::new(&st.main);
+    if !git_raw(program, main, &["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"])?.trim().is_empty() {
+        return Err(format!("元のフォルダ（{}）に未コミットの変更があるので、取り込めません", st.main));
+    }
+    if let Err(e) = git(program, main, &["merge", "--no-edit", &st.branch]) {
+        let _ = git(program, main, &["merge", "--abort"]);
+        return Err(format!("{} に取り込めなかったので、取り込みをやめました（競合など）: {e}", st.main_branch));
+    }
+    Ok(())
+}
+
+/// worktree を消す。未コミットの変更があれば git が断る（--force は付けない）。
+/// delete_branch のときは、取り込み済みのブランチだけ消す（-d は取り込まれていないブランチを断る）
+pub fn remove_worktree(program: &Path, dir: &Path, delete_branch: bool) -> Result<(), String> {
+    let st = worktree_state(program, dir)?;
+    let main = Path::new(&st.main);
+    let dir_str = dir.to_string_lossy();
+    // セッションを閉じた直後は、終わりかけのプロセスがフォルダを握っていて消せないことがある
+    let mut last = Ok(String::new());
+    for _ in 0..5 {
+        last = git(program, main, &["worktree", "remove", &dir_str]);
+        if last.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    last.map_err(|e| format!("worktree を削除できませんでした: {e}"))?;
+    if delete_branch {
+        git(program, main, &["branch", "-d", &st.branch]).map_err(|e| format!("worktree は削除しましたが、ブランチ {} は消せませんでした: {e}", st.branch))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +190,47 @@ mod tests {
         // 同じ名前はフォルダが衝突するのでエラー
         assert!(create_worktree(&program, &repo.to_string_lossy(), "feature/x").is_err());
         assert!(create_worktree(&program, &repo.to_string_lossy(), "bad..name").is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn merges_and_removes_worktree() {
+        let base = std::env::temp_dir().join(format!("tower-git-merge-{}", std::process::id()));
+        let repo = base.join("app");
+        std::fs::create_dir_all(&repo).unwrap();
+        let program = PathBuf::from("git");
+        let commit = |dir: &Path, msg: &str| {
+            git(&program, dir, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", msg]).unwrap();
+        };
+        git(&program, &repo, &["init", "-q", "-b", "main"]).unwrap();
+        commit(&repo, "init");
+
+        let head_main = head(&repo.join("sub")).unwrap();
+        assert_eq!((head_main.branch.as_str(), head_main.worktree), ("main", false));
+
+        let dir = PathBuf::from(create_worktree(&program, &repo.to_string_lossy(), "feature/y").unwrap());
+        let h = head(&dir).unwrap();
+        assert_eq!((h.branch.as_str(), h.worktree), ("feature/y", true));
+
+        commit(&dir, "work");
+        std::fs::write(dir.join("new.txt"), "x").unwrap();
+        let st = worktree_state(&program, &dir).unwrap();
+        assert_eq!((st.main_branch.as_str(), st.ahead, st.dirty), ("main", 1, true));
+        // 未コミットの変更がある worktree は消さない
+        assert!(remove_worktree(&program, &dir, true).is_err());
+        std::fs::remove_file(dir.join("new.txt")).unwrap();
+
+        // 取り込んでいないブランチは -d で消せない
+        assert!(remove_worktree(&program, &dir, true).is_err());
+        assert!(!dir.exists(), "worktree 自体は消える");
+        assert!(git(&program, &repo, &["rev-parse", "--verify", "--quiet", "refs/heads/feature/y"]).is_ok());
+
+        let dir = PathBuf::from(create_worktree(&program, &repo.to_string_lossy(), "feature/y").unwrap());
+        merge_worktree(&program, &dir).unwrap();
+        assert_eq!(worktree_state(&program, &dir).unwrap().ahead, 0);
+        remove_worktree(&program, &dir, true).unwrap();
+        assert!(git(&program, &repo, &["rev-parse", "--verify", "--quiet", "refs/heads/feature/y"]).is_err());
 
         let _ = std::fs::remove_dir_all(&base);
     }

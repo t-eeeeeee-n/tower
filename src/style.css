@@ -630,3 +630,14 @@ textarea:focus { border-color: var(--st-running); outline: none; }
 .s-unseen, .c-unseen { padding: 0 5px; border-radius: 4px; background: color-mix(in srgb, var(--st-idle) 22%, transparent); color: var(--st-idle); font-size: 11px; font-weight: 600; white-space: nowrap; }
 .c-unseen[hidden] { display: none; }
 .ov-sum .unseen { color: var(--st-idle); font-weight: 600; }
+
+.branch-tag { color: var(--muted); font-family: var(--mono); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.branch-tag::before { content: "⎇ "; }
+.branch-tag.worktree { color: var(--hl-type); }
+.branch-tag[hidden] { display: none; }
+.s-branch { max-width: 9em; }
+.c-branch { max-width: 14em; }
+.wt-dialog { width: min(520px, 100vw - 32px); }
+.wt-text { margin: 0 0 8px; overflow-wrap: anywhere; }
+.wt-facts { margin: 0 0 16px; padding-left: 18px; color: var(--muted); overflow-wrap: anywhere; }
+.wt-dialog button[hidden] { display: none; }

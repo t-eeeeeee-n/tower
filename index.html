@@ -28,6 +28,7 @@
           <div class="main-title">
             <span id="head-name" title="ダブルクリックで名前を変更"></span>
             <span id="head-agent" class="agent-tag"></span>
+            <span id="head-branch" class="branch-tag"></span>
             <span id="head-cwd" class="muted"></span>
           </div>
           <div class="main-actions">
@@ -70,6 +71,7 @@
                 <div class="main-title">
                   <span id="ovt-name"></span>
                   <span id="ovt-agent" class="agent-tag"></span>
+                  <span id="ovt-branch" class="branch-tag"></span>
                 </div>
                 <div class="main-actions">
                   <span id="ovt-status" class="status-text"></span>
@@ -214,6 +216,19 @@
           <button type="submit" class="primary-btn">OK</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="wt-dialog" class="dialog wt-dialog">
+      <h2>worktree の片付け</h2>
+      <p id="wt-text" class="wt-text"></p>
+      <ul id="wt-facts" class="wt-facts"></ul>
+      <p id="wt-error" class="error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" id="wt-keep" class="text-btn">残す</button>
+        <button type="button" id="wt-remove-only" class="text-btn" title="ブランチは残します">worktree だけ削除</button>
+        <button type="button" id="wt-remove" class="primary-btn" title="worktree とブランチを削除します">削除</button>
+        <button type="button" id="wt-merge" class="primary-btn"></button>
+      </div>
     </dialog>
 
     <dialog id="rename-dialog" class="dialog rename-dialog">
