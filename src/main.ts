@@ -139,15 +139,8 @@ const term = new Terminal({
 const fit = new FitAddon();
 term.loadAddon(fit);
 term.open($("term"));
-// 一覧では右の枠、セッションの画面では #work に、同じターミナルを付け替えて使う
-function placeTerm() {
-  const host = view === "overview" ? $("ov-term-body") : $("work");
-  const wrap = $("term-wrap");
-  if (wrap.parentElement !== host) host.prepend(wrap);
-}
-
 function fitTerm() {
-  if ($("term-wrap").offsetParent) fit.fit();
+  if (!$("work").hidden) fit.fit();
 }
 
 const settings = createSettings(term, fitTerm, (e) => showError(e));
@@ -183,60 +176,60 @@ new ResizeObserver(() => {
 // ---------- ファイルの場所を入れる ----------
 // ドロップしたファイルや貼り付けた画像は、場所を入力に入れるだけで送信はしない（エージェントはその場所から読む）
 
-function insertPaths(paths: string[]) {
-  const s = attachedId ? sessions.get(attachedId) : undefined;
+// 貼り付けとして送る。エージェントは貼り付けの改行では送信しない。
+// 一覧のカードへは ESC を取り除いてから送る。中に終わりの印（ESC[201~）があると、そこから後ろが打ち込んだ文字として扱われ、改行で実行されてしまう
+function pasteTo(id: string, text: string) {
+  if (!text) return;
+  if (view === "session" && id === attachedId) {
+    term.paste(text);
+    term.focus();
+  } else {
+    invoke("write_session", { id, data: `\x1b[200~${text.replace(/\x1b/g, "")}\x1b[201~` }).catch(showError);
+  }
+}
+
+function insertPaths(id: string, paths: string[]) {
+  const s = sessions.get(id);
   if (!s || !paths.length) return;
   // bash では単一引用符で囲む。\ が消えないようにするためと、ファイル名に入りうる $ や ` を展開させないため（二重引用符では展開される）。
   // エージェントの入力欄はシェルを通らないので、空白を含むときだけ囲む
   const quote = (p: string) =>
     s.agent === "shell" ? `'${p.replace(/'/g, `'\\''`)}'` : /\s/.test(p) ? `"${p}"` : p;
-  term.paste(paths.map(quote).join(" ") + " ");
-  term.focus();
+  pasteTo(id, paths.map(quote).join(" ") + " ");
 }
 
-getCurrentWebview().onDragDropEvent(async ({ payload }) => {
+getCurrentWebview().onDragDropEvent(({ payload }) => {
   if (payload.type !== "drop" || !payload.paths.length || document.querySelector("dialog[open]")) return;
-  // 一覧でカードに落としたときは、そのセッションに入れる
+  // 一覧ではカードに落としたセッションに入れ、そのカードに打ち込める状態にする
   const dpr = window.devicePixelRatio;
   const at = document.elementFromPoint(payload.position.x / dpr, payload.position.y / dpr);
-  const id = at?.closest<HTMLElement>(".card")?.dataset.id;
-  if (id && id !== attachedId) await select(id);
-  insertPaths(payload.paths);
+  const card = view === "overview" ? at?.closest<HTMLElement>(".card") : null;
+  const id = card ? card.dataset.id : view === "session" ? attachedId : null;
+  if (!id) return;
+  insertPaths(id, payload.paths);
+  card?.querySelector<HTMLElement>(".c-kbd")?.focus({ preventScroll: true });
 });
 
-$("term").addEventListener(
-  "paste",
-  async (ev) => {
-    const data = ev.clipboardData;
-    const item = [...(data?.items ?? [])].find((i) => i.kind === "file" && i.type.startsWith("image/"));
-    if (!item || data!.getData("text")) return;
-    ev.preventDefault();
-    ev.stopPropagation();
-    const file = item.getAsFile();
-    if (!file) return;
-    try {
-      const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
-      insertPaths([await invoke<string>("save_pasted_image", { bytes, mime: file.type })]);
-    } catch (e) {
-      showError(e);
-    }
-  },
-  true,
-);
+// クリップボードが画像だけなら、一時フォルダに保存してその場所を入れ、true を返す
+function pasteImage(id: string, ev: ClipboardEvent) {
+  const data = ev.clipboardData;
+  const item = [...(data?.items ?? [])].find((i) => i.kind === "file" && i.type.startsWith("image/"));
+  const file = item?.getAsFile();
+  if (!file || data!.getData("text")) return false;
+  ev.preventDefault();
+  ev.stopPropagation();
+  (async () => {
+    const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+    insertPaths(id, [await invoke<string>("save_pasted_image", { bytes, mime: file.type })]);
+  })().catch(showError);
+  return true;
+}
+
+$("term").addEventListener("paste", (ev) => attachedId && pasteImage(attachedId, ev), true);
 
 async function activate(id: string) {
   if (!sessions.has(id)) return;
   view = "session";
-  await show(id);
-}
-
-// 一覧のまま、右のターミナルにそのセッションを出す
-async function select(id: string) {
-  if (!sessions.has(id)) return;
-  await show(id);
-}
-
-async function show(id: string) {
   const reattach = id !== attachedId;
   unseen.delete(id);
   activeId = id;
@@ -360,7 +353,8 @@ async function closeSession(id: string) {
     term.reset();
     const next = order[Math.min(idx, order.length - 1)];
     attachedId = null;
-    if (next) await (view === "session" ? activate(next) : select(next));
+    if (next && view === "session") await activate(next);
+    else activeId = next ?? null;
   }
   render();
   if (head?.worktree) await offerWorktreeCleanup(s.name, head.root);
@@ -371,8 +365,7 @@ function nextWaiting() {
   if (!waiting.length) return;
   const cur = activeId ? order.indexOf(activeId) : -1;
   const after = waiting.find((id) => order.indexOf(id) > cur) ?? waiting[0];
-  if (view === "overview") select(after);
-  else activate(after);
+  activate(after);
 }
 
 // ---------- 描画 ----------
@@ -525,7 +518,7 @@ $<HTMLFormElement>("rename-form").onsubmit = async (ev) => {
 $("rename-cancel").onclick = () => renameDialog.close();
 renameDialog.onclose = () => {
   renaming = null;
-  if (attachedId) term.focus();
+  if (view === "session" && attachedId) term.focus();
 };
 
 let trayWaiting = 0;
@@ -538,7 +531,7 @@ function render() {
       const s = sessions.get(id)!;
       const li = el("li", "session");
       li.dataset.status = s.status;
-      li.classList.toggle("active", id === activeId);
+      li.classList.toggle("active", view === "session" && id === activeId);
       li.classList.toggle("waiting", s.status === "waiting");
       li.classList.toggle("unseen", unseen.has(id));
       li.title = `${s.name}\n${s.cwd}\nダブルクリックで名前を変更、ドラッグで並べ替え`;
@@ -588,7 +581,6 @@ function render() {
   $("total-mem").textContent = order.length ? `${order.length} セッション　合計 ${fmtBytes(total)}` : "";
 
   const overview = view === "overview" && order.length > 0;
-  placeTerm();
   const active = !overview && activeId ? sessions.get(activeId) : undefined;
   $("overview-btn").classList.toggle("active", overview);
   $("overview").hidden = !overview;
@@ -630,9 +622,8 @@ let peekLines = 0;
 function showOverview() {
   if (view === "overview") return;
   view = "overview";
-  const id = activeId && sessions.has(activeId) ? activeId : order[0];
-  if (id) select(id);
-  else render();
+  term.blur();
+  render();
   if (!peekTimer) pollPeeks();
 }
 
@@ -653,7 +644,8 @@ async function pollPeeks() {
   } catch (e) {
     showError(e);
   }
-  peekTimer = window.setTimeout(pollPeeks, 1000);
+  // 入力中のカードがあるときは、打った文字がすぐ見えるよう短い間隔で取る
+  peekTimer = window.setTimeout(pollPeeks, document.querySelector(".card.typing") ? 150 : 1000);
 }
 
 function screenTail(lines: string[], max: number) {
@@ -662,27 +654,110 @@ function screenTail(lines: string[], max: number) {
   return out.slice(-max);
 }
 
+const KEY_SEQ: Record<string, string> = {
+  Enter: "\r",
+  Backspace: "\x7f",
+  Tab: "\t",
+  Escape: "\x1b",
+  ArrowUp: "\x1b[A",
+  ArrowDown: "\x1b[B",
+  ArrowRight: "\x1b[C",
+  ArrowLeft: "\x1b[D",
+  Home: "\x1b[H",
+  End: "\x1b[F",
+  Delete: "\x1b[3~",
+  PageUp: "\x1b[5~",
+  PageDown: "\x1b[6~",
+};
+
+// 文字の入力は textarea の input / compositionend で受ける（日本語入力の変換を通すため）。ここでは文字にならないキーだけを送る
+function keyData(ev: KeyboardEvent) {
+  if (ev.altKey || ev.metaKey || ev.isComposing) return null;
+  if (ev.ctrlKey) {
+    // Ctrl+V は paste イベントで受ける
+    if (ev.shiftKey || !/^[a-z]$/i.test(ev.key) || ev.key.toLowerCase() === "v") return null;
+    return String.fromCharCode(ev.key.toLowerCase().charCodeAt(0) - 96);
+  }
+  // ターミナルと同じく ESC+CR にして、入力欄の改行にする
+  if (ev.shiftKey && ev.key === "Enter") return "\x1b\r";
+  if (ev.shiftKey && ev.key === "Tab") return "\x1b[Z";
+  return KEY_SEQ[ev.key] ?? null;
+}
+
 function makeCard(id: string) {
   const card = el("article", "card");
   card.dataset.id = id;
   card.tabIndex = 0;
   const head = el("header", "c-head");
   head.append(el("span", "c-name"), el("span", "c-mark mark-tag"), el("span", "c-agent"), el("span", "c-unseen", "未確認"), el("span", "c-status"));
-  head.title = "ドラッグで並べ替え";
+  head.title = "クリックでターミナルを開く、ドラッグで並べ替え";
   // カード全体をつかめるようにすると、画面の末尾の文章を選べなくなる
   draggable(card, id, head, true);
   const tail = el("pre", "c-tail");
-  const foot = el("footer", "c-foot");
-  foot.append(el("span", "c-age"), el("span", "c-branch"), el("span", "c-mem"));
-  card.append(head, tail, foot);
-  card.onclick = () => {
-    // 文章を選んでいるときは、選び終わりのクリックで切り替えない
-    if (getSelection()?.toString()) return;
-    select(id);
+  tail.title = "クリックすると、このセッションにそのまま入力できます（ダブルクリックでターミナルを開く）";
+  const kbd = el("textarea", "c-kbd");
+  kbd.setAttribute("aria-label", "セッションへの入力");
+  const send = (data: string) => {
+    if (!data) return;
+    invoke("write_session", { id, data }).catch(showError);
+    tail.scrollTop = tail.scrollHeight;
   };
-  card.ondblclick = () => activate(id);
+  const flush = () => {
+    send(kbd.value);
+    kbd.value = "";
+  };
+  kbd.onkeydown = (ev) => {
+    const data = keyData(ev);
+    if (data === null) return;
+    ev.preventDefault();
+    send(data);
+  };
+  kbd.oninput = (ev) => {
+    if (!(ev as InputEvent).isComposing) flush();
+  };
+  kbd.addEventListener("compositionend", flush);
+  kbd.onpaste = (ev) => {
+    ev.preventDefault();
+    if (pasteImage(id, ev)) return;
+    pasteTo(id, ev.clipboardData?.getData("text") ?? "");
+    tail.scrollTop = tail.scrollHeight;
+  };
+  kbd.onfocus = () => {
+    card.classList.add("typing");
+    tail.scrollTop = tail.scrollHeight;
+  };
+  // 末尾の文章を選ぶとフォーカスはカードに移るので、カードの外に出るまでは入力中のままにする
+  card.addEventListener("focusout", (ev) => {
+    if (!card.contains(ev.relatedTarget as Node | null)) card.classList.remove("typing");
+  });
+  const tpl = el("button", "c-tpl", "テンプレート");
+  tpl.type = "button";
+  tpl.title = "テンプレートを入れる（送信はしません）";
+  tpl.onclick = () =>
+    templates.pick(
+      tpl,
+      (text) => {
+        pasteTo(id, text);
+        kbd.focus();
+      },
+      () => kbd.focus(),
+    );
+  const foot = el("footer", "c-foot");
+  foot.append(el("span", "c-age"), el("span", "c-branch"), el("span", "c-mem"), tpl);
+  card.append(head, tail, kbd, foot);
+  card.onclick = (ev) => {
+    const target = ev.target as HTMLElement;
+    // 文章を選んでいるときは、選び終わりのクリックで切り替えない
+    if (target.closest("button") || getSelection()?.toString()) return;
+    if (target.closest(".c-tail")) {
+      if (!kbd.disabled) kbd.focus({ preventScroll: true });
+      return;
+    }
+    activate(id);
+  };
+  tail.ondblclick = () => activate(id);
   card.onkeydown = (ev) => {
-    if (ev.key === "Enter" && ev.target === card) select(id);
+    if (ev.key === "Enter" && ev.target === card) activate(id);
   };
   return card;
 }
@@ -690,8 +765,7 @@ function makeCard(id: string) {
 function updateCard(card: HTMLElement, s: Session) {
   const q = (cls: string) => card.querySelector<HTMLElement>(cls)!;
   card.dataset.status = s.status;
-  card.title = `${s.cwd}\nクリックで右のターミナルに出す、ダブルクリックで全画面に開く`;
-  card.classList.toggle("selected", s.id === activeId);
+  card.title = s.cwd;
   q(".c-name").textContent = s.name;
   q(".c-agent").textContent = AGENT_LABEL[s.agent];
   q(".c-status").textContent = STATUS_LABEL[s.status];
@@ -712,6 +786,9 @@ function updateCard(card: HTMLElement, s: Session) {
     tail.scrollTop = tail.scrollHeight;
   }
 
+  const exited = s.status === "exited";
+  card.querySelector<HTMLTextAreaElement>(".c-kbd")!.disabled = exited;
+  q(".c-tpl").hidden = exited;
   q(".c-age").textContent = fmtAge(s.since);
   fillBranch(q(".c-branch"), heads.get(s.id));
   q(".c-mem").textContent = fmtBytes(s.bytes);
@@ -741,19 +818,10 @@ function renderOverview(waitingCount: number, total: number) {
       cards.set(id, card);
       grid.append(card);
     }
-    // 要素は動かさず、表示の順番だけ変える。動かすと画面の末尾のスクロール位置が先頭に戻る
+    // 要素は動かさず、表示の順番だけ変える。動かすと入力中のフォーカスが外れ、画面の末尾のスクロール位置も先頭に戻る
     card.style.order = String(i);
     updateCard(card, sessions.get(id)!);
   });
-
-  const s = activeId ? sessions.get(activeId) : undefined;
-  $("ovt-name").textContent = s?.name ?? "";
-  $("ovt-agent").textContent = s ? AGENT_LABEL[s.agent] : "";
-  fillBranch($("ovt-branch"), s && heads.get(s.id));
-  applyMark($("ovt-mark"), $("ovt-mark"), s?.cwd ?? "");
-  const st = $("ovt-status");
-  st.dataset.status = s?.status ?? "";
-  st.textContent = s ? STATUS_LABEL[s.status] : "";
 }
 
 // ---------- ブランチと worktree ----------
@@ -1019,17 +1087,14 @@ $("files-btn").onclick = () => files.toggle();
 $("head-name").ondblclick = () => activeId && openRename(activeId);
 
 function insertTemplate() {
-  if (!attachedId) return;
-  const anchor = view === "overview" ? $("ovt-tpl") : $("tpl-btn");
+  if (view !== "session" || !attachedId) return;
   // 貼り付けとして入れる。エージェントは貼り付けの改行では送信しない
-  templates.pick(anchor, (text) => {
+  templates.pick($("tpl-btn"), (text) => {
     term.paste(text);
     term.focus();
   }, () => term.focus());
 }
 $("tpl-btn").onclick = insertTemplate;
-$("ovt-tpl").onclick = insertTemplate;
-$("ovt-open").onclick = () => activeId && activate(activeId);
 $("sidebar-toggle").onclick = toggleSidebar;
 $("waiting-jump").onclick = nextWaiting;
 $("overview-btn").onclick = showOverview;
@@ -1064,10 +1129,10 @@ document.addEventListener(
       files.toggle();
     } else if (e.ctrlKey && e.shiftKey && k === "w") {
       if (activeId) closeSession(activeId);
-    } else if (attachedId && e.ctrlKey && e.shiftKey && k === "c") {
+    } else if (view === "session" && e.ctrlKey && e.shiftKey && k === "c") {
       const sel = term.getSelection();
       if (sel) writeText(sel).catch(showError);
-    } else if (attachedId && e.ctrlKey && e.shiftKey && k === "v") {
+    } else if (view === "session" && e.ctrlKey && e.shiftKey && k === "v") {
       readText()
         .then((t) => t && attachedId && term.paste(t))
         .catch(showError);
@@ -1117,8 +1182,7 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
   render();
   files.sessionChanged(payload.id);
   if (!becameWaiting && !finished) return;
-  // 一覧でも右のターミナルに出ているので、見ているとみなす
-  const watching = payload.id === attachedId && (await appWindow.isFocused());
+  const watching = payload.id === attachedId && view === "session" && (await appWindow.isFocused());
   if (watching) return;
   if (finished) {
     unseen.add(s.id);
@@ -1170,8 +1234,8 @@ setInterval(render, 20_000);
   if (order.length) await activate(order[0]);
 })().catch(showError);
 
-// トレイから戻したときなど、右や全画面のターミナルに出ているセッションはその時点で見たことにする
+// トレイから戻したときなど、ターミナルに出ているセッションはその時点で見たことにする
 appWindow.onFocusChanged(({ payload: focused }) => {
-  if (focused && attachedId && unseen.delete(attachedId)) render();
+  if (focused && view === "session" && attachedId && unseen.delete(attachedId)) render();
 });
 refreshHeads();
