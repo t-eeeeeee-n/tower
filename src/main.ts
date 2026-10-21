@@ -500,33 +500,7 @@ async function pollPeeks() {
   peekTimer = window.setTimeout(pollPeeks, document.querySelector(".card.typing") ? 150 : 1000);
 }
 
-// エージェントの画面の枠（入力欄・区切り線・操作の案内）を取り除き、会話の部分だけを残す。
-// 各エージェントの画面の作りに合わせた目安で、作りが変わると取り残しが出る
-const RULE = /^\s*[╭╰┌└]?[─━═]{8,}[╮╯┐┘]?\s*$/;
-const BOX_ONLY = /^[\s─━═╌┄╭╮╰╯┌┐└┘├┤┬┴┼│┃]+$/;
-const FOOTER = /\? for shortcuts|esc to (interrupt|cancel)|shift\+tab|context left|bypass permissions|accept edits|⏎|⌃[A-Z]/i;
-const INPUT_LINE = /^\s*[›❯>](\s|$)/;
-
-function cleanTail(lines: string[], max: number) {
-  let end = lines.length;
-  const bottom = Math.max(0, lines.length - 10);
-  const rule = lines.findIndex((l, i) => i >= bottom && RULE.test(l));
-  if (rule >= 0) end = rule;
-  else {
-    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 6); i--) if (INPUT_LINE.test(lines[i])) end = i;
-  }
-  const out: string[] = [];
-  for (const raw of lines.slice(0, end)) {
-    const l = raw.replace(/^\s*[│┃]\s?/, "").replace(/\s?[│┃]\s*$/, "").trimEnd();
-    if (BOX_ONLY.test(l) || FOOTER.test(l)) continue;
-    if (!l && (!out.length || !out[out.length - 1])) continue;
-    out.push(l);
-  }
-  while (out.length && !out[out.length - 1]) out.pop();
-  return out.slice(-max);
-}
-
-function rawTail(lines: string[], max: number) {
+function screenTail(lines: string[], max: number) {
   const out = lines.map((l) => l.trimEnd());
   while (out.length && !out[out.length - 1]) out.pop();
   return out.slice(-max);
@@ -600,18 +574,13 @@ function makeCard(id: string) {
     ev.preventDefault();
     paste(ev.clipboardData?.getData("text") ?? "");
   };
-  // 入力している間は枠を取り除かずに画面をそのまま出す。/resume などの選択画面や入力欄が、会話の枠と一緒に消えてしまうため
-  const setTyping = (on: boolean) => {
-    if (card.classList.contains("typing") === on) return;
-    card.classList.toggle("typing", on);
-    const s = sessions.get(id);
-    if (s) updateCard(card, s);
-    if (on) tail.scrollTop = tail.scrollHeight;
+  kbd.onfocus = () => {
+    card.classList.add("typing");
+    tail.scrollTop = tail.scrollHeight;
   };
-  kbd.onfocus = () => setTyping(true);
-  // 末尾の文章を選ぶとフォーカスはカードに移る。選んでいる途中で表示が変わらないよう、カードの外に出るまでは入力中のままにする
+  // 末尾の文章を選ぶとフォーカスはカードに移るので、カードの外に出るまでは入力中のままにする
   card.addEventListener("focusout", (ev) => {
-    if (!card.contains(ev.relatedTarget as Node | null)) setTyping(false);
+    if (!card.contains(ev.relatedTarget as Node | null)) card.classList.remove("typing");
   });
   const tpl = el("button", "c-tpl", "テンプレート");
   tpl.type = "button";
@@ -657,7 +626,7 @@ function updateCard(card: HTMLElement, s: Session) {
   const lines = peek?.lines ?? [];
   const tail = q(".c-tail");
   const max = settings.overviewLines();
-  const text = (card.classList.contains("typing") ? rawTail(lines, max) : cleanTail(lines, max)).join("\n");
+  const text = screenTail(lines, max).join("\n");
   // さかのぼって読んでいる間は更新を止める。設定の行数を超えると古い行が上から消えて、読んでいる文字がずれるため。
   // いちばん下まで戻すと、次の更新で最新に追いつく
   const atBottom = !tail.dataset.shown || tail.scrollHeight - tail.scrollTop - tail.clientHeight < 16;
