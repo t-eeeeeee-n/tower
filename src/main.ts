@@ -590,7 +590,11 @@ function render() {
   const showRestore = order.length === 0 && restorable.length > 0;
   $("restore").hidden = !showRestore;
   $("empty").classList.toggle("has-restore", showRestore);
-  if (!active && !overview) $("empty-recents").hidden = renderRecents($("empty-recent-list")) === 0;
+  if (!active && !overview) {
+    const hasRecents = renderRecents($("empty-recent-list")) > 0;
+    $("empty-recents").hidden = !hasRecents;
+    $("empty").classList.toggle("has-recents", hasRecents);
+  }
   if (showRestore) {
     $("restore-btn").textContent = `前回の ${restorable.length} 件を再開`;
     $("restore-list").replaceChildren(
@@ -1148,11 +1152,21 @@ $("pick-new").onclick = () => {
   pickDialog.close();
   openNewDialog();
 };
-$("pick-browse").onclick = async () => {
+async function browseAndOpen() {
   const dir = await open({ directory: true });
   if (typeof dir !== "string") return;
   pickDialog.close();
   openNewDialog(dir);
+}
+$("pick-browse").onclick = browseAndOpen;
+$("pick-close").onclick = () => pickDialog.close();
+// 枠の外（背景）のクリックでも閉じる。背景のクリックは dialog 自身に届く。
+// キーボードで押したボタンのクリックは座標が 0,0 になるので、座標だけでは判断しない
+pickDialog.onclick = (ev) => {
+  if (ev.target !== pickDialog) return;
+  const r = pickDialog.getBoundingClientRect();
+  const inside = ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom;
+  if (!inside) pickDialog.close();
 };
 
 // 前回のエージェントがわからないか、もう入っていなければ、ダイアログで選んでもらう
@@ -1254,7 +1268,9 @@ $<HTMLButtonElement>("restore-btn").onclick = async (ev) => {
   }
 };
 $("new-btn").onclick = openProjectPicker;
-$("empty-new").onclick = openProjectPicker;
+// 空の画面には最近のプロジェクトが並んでいるので、ここからはプロジェクトを開く画面を挟まない
+$("empty-new").onclick = () => openNewDialog();
+$("empty-browse").onclick = () => browseAndOpen();
 $("files-btn").onclick = () => files.toggle();
 $("head-name").ondblclick = () => activeId && openRename(activeId);
 

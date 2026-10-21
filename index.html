@@ -68,27 +68,32 @@
           <div id="ov-grid" class="ov-grid"></div>
         </section>
         <section id="empty" class="empty">
-          <p class="empty-title">セッションがありません</p>
-          <p class="muted">プロジェクトのフォルダを選ぶと、そこでコーディングエージェントを起動します。</p>
-          <div id="restore" class="restore" hidden>
-            <button id="restore-btn" class="primary-btn"></button>
-            <ul id="restore-list" class="restore-list"></ul>
+          <div class="welcome-main">
+            <p class="empty-title">セッションがありません</p>
+            <p class="muted">プロジェクトのフォルダを選ぶと、そこでコーディングエージェントを起動します。</p>
+            <div id="restore" class="restore" hidden>
+              <button id="restore-btn" class="primary-btn"></button>
+              <ul id="restore-list" class="restore-list"></ul>
+            </div>
+            <div class="welcome-actions">
+              <button id="empty-new" class="primary-btn">新しく作る</button>
+              <button id="empty-browse" class="text-btn">参照…</button>
+            </div>
+            <dl class="keys">
+              <dt>Ctrl+Shift+N</dt><dd>新しいセッション</dd>
+              <dt>Ctrl+0</dt><dd>一覧を表示</dd>
+              <dt>Ctrl+1〜9</dt><dd>セッションを切り替え</dd>
+              <dt>Ctrl+Shift+A</dt><dd>次の入力待ちへ移動</dd>
+              <dt>Ctrl+Shift+C / V</dt><dd>コピー / 貼り付け</dd>
+              <dt>Ctrl+Shift+W</dt><dd>セッションを閉じる</dd>
+              <dt>Ctrl+Shift+T</dt><dd>テンプレートを入れる</dd>
+              <dt>Ctrl+,</dt><dd>設定</dd>
+            </dl>
           </div>
-          <button id="empty-new" class="primary-btn">セッションを作成</button>
-          <div id="empty-recents" class="empty-recents" hidden>
-            <p class="empty-sub">最近開いたフォルダ（クリックで前回のエージェントで開く）</p>
+          <div id="empty-recents" class="welcome-recents" hidden>
+            <p class="empty-sub">最近開いたプロジェクト</p>
             <ul id="empty-recent-list" class="recent-list"></ul>
           </div>
-          <dl class="keys">
-            <dt>Ctrl+Shift+N</dt><dd>新しいセッション</dd>
-            <dt>Ctrl+0</dt><dd>一覧を表示</dd>
-            <dt>Ctrl+1〜9</dt><dd>セッションを切り替え</dd>
-            <dt>Ctrl+Shift+A</dt><dd>次の入力待ちへ移動</dd>
-            <dt>Ctrl+Shift+C / V</dt><dd>コピー / 貼り付け</dd>
-            <dt>Ctrl+Shift+W</dt><dd>セッションを閉じる</dd>
-            <dt>Ctrl+Shift+T</dt><dd>テンプレートを入れる</dd>
-            <dt>Ctrl+,</dt><dd>設定</dd>
-          </dl>
         </section>
       </main>
     </div>
@@ -99,6 +104,7 @@
         <div class="pick-actions">
           <button type="button" id="pick-browse" class="text-btn">参照…</button>
           <button type="button" id="pick-new" class="primary-btn">新しく作る</button>
+          <button type="button" id="pick-close" class="icon-btn" title="閉じる（Esc）" aria-label="閉じる">×</button>
         </div>
       </div>
       <input id="pick-search" class="pick-search" placeholder="検索" autocomplete="off" aria-label="プロジェクトを検索" aria-controls="pick-list" />

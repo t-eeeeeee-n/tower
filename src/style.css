@@ -410,16 +410,20 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 /* 空の状態 */
 .empty { margin: auto; width: min(420px, 100% - 48px); padding: 24px 0; }
+/* 最近のプロジェクトがあるときは、WebStorm のようこそ画面のように左に操作、右に一覧を並べる */
+.empty.has-recents { width: min(900px, 100% - 48px); display: grid; grid-template-columns: minmax(260px, 340px) minmax(0, 1fr); gap: 40px; align-items: start; }
+@media (max-width: 860px) { .empty.has-recents { grid-template-columns: minmax(0, 1fr); gap: 24px; } }
 .empty[hidden] { display: none; }
 .empty-title { font-size: 18px; font-weight: 600; margin: 0 0 6px; }
-.empty #empty-new { margin: 16px 0 24px; }
-.empty.has-restore #empty-new { margin-top: 0; background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 400; }
+.welcome-actions { display: flex; gap: 8px; margin: 16px 0 24px; }
+.empty.has-restore .welcome-actions { margin-top: 0; }
+.empty.has-restore #empty-new { background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 400; }
 .restore { margin-top: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); margin-bottom: 12px; }
 .restore[hidden] { display: none; }
 .restore-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 2px; color: var(--muted); font-size: 12px; }
 .restore-list li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .restore-list b { color: var(--text); font-weight: 600; margin-right: 8px; }
-.keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 20px; margin: 0; color: var(--muted); }
+.keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 20px; margin: 0; color: var(--muted); font-size: 12px; }
 .keys dt { color: var(--text); font-variant-numeric: tabular-nums; }
 .keys dd { margin: 0; }
 
@@ -692,9 +696,10 @@ textarea:focus { border-color: var(--st-running); outline: none; }
 .recent-del { flex: none; visibility: hidden; padding: 0 6px; border: 0; background: transparent; color: var(--muted); font-size: 14px; }
 .recent:hover .recent-del, .recent:focus-within .recent-del { visibility: visible; }
 .recent-del:hover { color: var(--text); }
-.empty-recents { margin: 0 0 24px; }
-.empty-recents[hidden] { display: none; }
-.empty-sub { margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+.welcome-recents { min-width: 0; padding: 12px 8px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.welcome-recents[hidden] { display: none; }
+.welcome-recents .recent-list { max-height: min(520px, 70vh); }
+.empty-sub { margin: 0 4px 8px; color: var(--muted); font-size: 12px; font-weight: 600; }
 .recent { padding: 8px 10px; }
 .recent-tile {
   flex: none;
