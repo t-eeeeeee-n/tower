@@ -387,6 +387,8 @@ renameDialog.onclose = () => {
   if (view === "session" && activeId) term.focus();
 };
 
+let trayWaiting = 0;
+
 function render() {
   const list = $("session-list");
   // ドラッグ中に作り直すとドラッグが途切れるので、終わるまで一覧はそのままにする
@@ -430,6 +432,10 @@ function render() {
   jump.hidden = waitingCount === 0;
   jump.replaceChildren(el("span", "", `入力待ち ${waitingCount} 件`), el("span", "shortcut", "Ctrl+Shift+A"));
   appWindow.setTitle(waitingCount ? `(${waitingCount}) Tower` : "Tower").catch(() => {});
+  if (waitingCount !== trayWaiting) {
+    trayWaiting = waitingCount;
+    invoke("set_tray_waiting", { count: waitingCount }).catch(() => {});
+  }
 
   const total = order.reduce((sum, id) => sum + (sessions.get(id)?.bytes ?? 0), 0);
   $("total-mem").textContent = order.length ? `${order.length} セッション　合計 ${fmtBytes(total)}` : "";

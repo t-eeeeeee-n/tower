@@ -228,6 +228,10 @@ impl Manager {
         v
     }
 
+    pub fn has_live(&self) -> bool {
+        self.sessions.lock().unwrap().values().any(|s| s.state.lock().unwrap().status != Status::Exited)
+    }
+
     pub fn create<R: Runtime>(
         &self,
         app: &AppHandle<R>,

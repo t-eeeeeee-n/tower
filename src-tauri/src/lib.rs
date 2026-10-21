@@ -8,12 +8,13 @@ pub mod memory;
 mod notify;
 pub mod session;
 mod theme;
+mod tray;
 
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Manager as _, State};
+use tauri::{AppHandle, Manager as _, State, WindowEvent};
 
 use agent::Agent;
 use session::{Manager, SessionInfo};
@@ -165,9 +166,16 @@ fn kill_session(state: State<'_, App>, id: String) -> Result<(), String> {
     state.manager.kill(&id)
 }
 
+#[tauri::command]
+fn set_tray_waiting(app: AppHandle, count: usize) {
+    tray::set_waiting(&app, count);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 2 つ目の Tower を起動すると、セッションも hooks の受信口も別々になってしまうので、トレイにいる方を前に出す
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| tray::show_main(app)))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
@@ -192,9 +200,22 @@ pub fn run() {
             app.manage(App { manager, hooks_error: Mutex::new(hooks_error), trust });
             app.manage(notify::Notifier::default());
             notify::init(app.handle());
+            let state = app.state::<App>();
+            let manager = state.manager.clone();
+            tray::init(app.handle(), move || manager.has_live())?;
             Ok(())
         })
+        .on_window_event(|window, event| {
+            // 動いているセッションがあるときは終了せずトレイに隠れる。無ければそのまま終了する
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.state::<App>().manager.has_live() {
+                    api.prevent_close();
+                    tray::hide_main(window.app_handle());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            set_tray_waiting,
             get_config,
             mintty_config,
             list_sessions,
