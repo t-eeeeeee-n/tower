@@ -366,13 +366,17 @@ button { font: inherit; color: inherit; cursor: pointer; }
   border: 1px solid var(--line);
   border-radius: 6px;
   cursor: pointer;
+  position: relative;
 }
 /* 高さを固定して、中身が伸び縮みしてもカードの並びが動かないようにする（動くとスクロールしたい場所がずれる） */
 .card { height: 540px; }
 .card:hover { border-color: var(--raise-2); }
 .card[data-status="waiting"] { border-color: var(--st-waiting); }
 .card[data-status="exited"] { opacity: 0.55; }
-.c-head { display: flex; align-items: baseline; gap: 8px; padding: 8px 10px 6px; min-width: 0; }
+.c-head { display: flex; align-items: baseline; gap: 8px; padding: 8px 10px 6px; min-width: 0; cursor: grab; }
+.card.dragging { opacity: 0.45; }
+.card.drop-before { box-shadow: -3px 0 0 var(--st-running); }
+.card.drop-after { box-shadow: 3px 0 0 var(--st-running); }
 .c-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .c-status { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; color: var(--st); white-space: nowrap; }
 .c-status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--st); }
@@ -390,21 +394,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
   scrollbar-color: var(--line) transparent;
   cursor: auto;
 }
-.c-msg { margin: 8px 10px 0; color: var(--st-waiting); }
-.c-choices { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 10px 0; }
-.c-choices[hidden], .c-msg[hidden] { display: none; }
-.c-choices button {
-  max-width: 100%;
-  padding: 3px 10px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--raise);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.c-choices button:hover { background: var(--raise-2); }
-.c-choices button.first { background: var(--st-waiting); border-color: var(--st-waiting); color: var(--on-waiting); font-weight: 600; }
-.c-input { display: flex; gap: 6px; margin: 8px 10px 0; }
-.c-input input { flex: 1; min-width: 0; padding: 5px 8px; }
+/* 文字の入力（日本語入力を含む）を受けるためだけの欄。打った文字はセッションの画面に出るので、欄そのものは見せない */
+.c-kbd { position: absolute; left: 0; top: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; resize: none; pointer-events: none; }
+.card.typing .c-tail { outline: 1px solid var(--st-running); cursor: text; }
+.c-tpl[hidden] { display: none; }
 .c-tpl { flex: none; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--muted); font-size: 12px; }
 .c-tpl:hover { background: var(--raise); color: var(--text); }
 .c-foot { display: flex; gap: 12px; padding: 8px 10px 9px; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }

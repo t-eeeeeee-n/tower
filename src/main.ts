@@ -311,23 +311,26 @@ function moveSession(id: string, target: string, after: boolean) {
   render();
 }
 
-function draggable(li: HTMLElement, id: string) {
-  li.draggable = true;
-  li.ondragstart = (ev) => {
+// horizontal は横に並ぶもの（一覧のカード）で、左右どちらの半分に落としたかで前後を決める
+function draggable(li: HTMLElement, id: string, handle = li, horizontal = false) {
+  handle.draggable = true;
+  handle.ondragstart = (ev) => {
     dragId = id;
     ev.dataTransfer!.effectAllowed = "move";
     ev.dataTransfer!.setData("text/plain", sessions.get(id)?.name ?? "");
+    if (handle !== li) ev.dataTransfer!.setDragImage(li, ev.offsetX, ev.offsetY);
     li.classList.add("dragging");
   };
-  li.ondragend = () => {
+  handle.ondragend = () => {
     dragId = null;
+    li.classList.remove("dragging");
     render();
   };
   li.ondragover = (ev) => {
     if (!dragId || dragId === id) return;
     ev.preventDefault();
     const r = li.getBoundingClientRect();
-    const after = ev.clientY > r.top + r.height / 2;
+    const after = horizontal ? ev.clientX > r.left + r.width / 2 : ev.clientY > r.top + r.height / 2;
     li.classList.toggle("drop-before", !after);
     li.classList.toggle("drop-after", after);
   };
@@ -336,7 +339,9 @@ function draggable(li: HTMLElement, id: string) {
     ev.preventDefault();
     const from = dragId;
     dragId = null;
-    if (from) moveSession(from, id, li.classList.contains("drop-after"));
+    const after = li.classList.contains("drop-after");
+    li.classList.remove("drop-before", "drop-after");
+    if (from) moveSession(from, id, after);
   };
 }
 
@@ -463,7 +468,6 @@ function render() {
 // ---------- 一覧 ----------
 
 const cards = new Map<string, HTMLElement>();
-const CHOICE = /^[\s│]*(?:[❯›>]\s*)?(\d)\.\s+(.+?)[\s│]*$/;
 let peekTimer = 0;
 let peekLines = 0;
 
@@ -492,15 +496,8 @@ async function pollPeeks() {
   } catch (e) {
     showError(e);
   }
-  peekTimer = window.setTimeout(pollPeeks, 1000);
-}
-
-async function sendLine(id: string, text: string) {
-  await invoke("write_session", { id, data: text });
-  // Enter は別の書き込みにして間を空ける。続けて届いた入力を貼り付けとみなす TUI では、直後の改行が送信にならない
-  // （Codex は 50ms では貼り付けの一部として扱った）
-  await new Promise((r) => setTimeout(r, 300));
-  await invoke("write_session", { id, data: "\r" });
+  // 入力中のカードがあるときは、打った文字がすぐ見えるよう短い間隔で取る
+  peekTimer = window.setTimeout(pollPeeks, document.querySelector(".card.typing") ? 150 : 1000);
 }
 
 // エージェントの画面の枠（入力欄・区切り線・操作の案内）を取り除き、会話の部分だけを残す。
@@ -535,58 +532,112 @@ function rawTail(lines: string[], max: number) {
   return out.slice(-max);
 }
 
-const NAV_KEYS: Record<string, string> = { ArrowUp: "\x1b[A", ArrowDown: "\x1b[B", Enter: "\r", Escape: "\x1b" };
+const KEY_SEQ: Record<string, string> = {
+  Enter: "\r",
+  Backspace: "\x7f",
+  Tab: "\t",
+  Escape: "\x1b",
+  ArrowUp: "\x1b[A",
+  ArrowDown: "\x1b[B",
+  ArrowRight: "\x1b[C",
+  ArrowLeft: "\x1b[D",
+  Home: "\x1b[H",
+  End: "\x1b[F",
+  Delete: "\x1b[3~",
+  PageUp: "\x1b[5~",
+  PageDown: "\x1b[6~",
+};
+
+// 文字の入力は textarea の input / compositionend で受ける（日本語入力の変換を通すため）。ここでは文字にならないキーだけを送る
+function keyData(ev: KeyboardEvent) {
+  if (ev.altKey || ev.metaKey || ev.isComposing) return null;
+  if (ev.ctrlKey) {
+    // Ctrl+V は paste イベントで受ける
+    if (ev.shiftKey || !/^[a-z]$/i.test(ev.key) || ev.key.toLowerCase() === "v") return null;
+    return String.fromCharCode(ev.key.toLowerCase().charCodeAt(0) - 96);
+  }
+  // ターミナルと同じく ESC+CR にして、入力欄の改行にする
+  if (ev.shiftKey && ev.key === "Enter") return "\x1b\r";
+  if (ev.shiftKey && ev.key === "Tab") return "\x1b[Z";
+  return KEY_SEQ[ev.key] ?? null;
+}
 
 function makeCard(id: string) {
   const card = el("article", "card");
   card.tabIndex = 0;
   const head = el("header", "c-head");
   head.append(el("span", "c-name"), el("span", "c-agent"), el("span", "c-status"));
-  const form = el("form", "c-input");
-  const input = el("input");
-  input.placeholder = "指示を送る（Enter）";
-  input.autocomplete = "off";
+  head.title = "クリックでターミナルを開く、ドラッグで並べ替え";
+  // カード全体をつかめるようにすると、画面の末尾の文章を選べなくなる
+  draggable(card, id, head, true);
+  const tail = el("pre", "c-tail");
+  tail.title = "クリックすると、このセッションにそのまま入力できます（ダブルクリックでターミナルを開く）";
+  const kbd = el("textarea", "c-kbd");
+  kbd.setAttribute("aria-label", "セッションへの入力");
+  const send = (data: string) => {
+    if (!data) return;
+    invoke("write_session", { id, data }).catch(showError);
+    tail.scrollTop = tail.scrollHeight;
+  };
+  // 貼り付けとして送る。エージェントは貼り付けの改行では送信しない
+  const paste = (text: string) => send(`\x1b[200~${text}\x1b[201~`);
+  const flush = () => {
+    send(kbd.value);
+    kbd.value = "";
+  };
+  kbd.onkeydown = (ev) => {
+    const data = keyData(ev);
+    if (data === null) return;
+    ev.preventDefault();
+    send(data);
+  };
+  kbd.oninput = (ev) => {
+    if (!(ev as InputEvent).isComposing) flush();
+  };
+  kbd.addEventListener("compositionend", flush);
+  kbd.onpaste = (ev) => {
+    ev.preventDefault();
+    paste(ev.clipboardData?.getData("text") ?? "");
+  };
+  // 入力している間は枠を取り除かずに画面をそのまま出す。/resume などの選択画面や入力欄が、会話の枠と一緒に消えてしまうため
+  const setTyping = (on: boolean) => {
+    if (card.classList.contains("typing") === on) return;
+    card.classList.toggle("typing", on);
+    const s = sessions.get(id);
+    if (s) updateCard(card, s);
+    if (on) tail.scrollTop = tail.scrollHeight;
+  };
+  kbd.onfocus = () => setTyping(true);
+  // 末尾の文章を選ぶとフォーカスはカードに移る。選んでいる途中で表示が変わらないよう、カードの外に出るまでは入力中のままにする
+  card.addEventListener("focusout", (ev) => {
+    if (!card.contains(ev.relatedTarget as Node | null)) setTyping(false);
+  });
   const tpl = el("button", "c-tpl", "テンプレート");
   tpl.type = "button";
   tpl.title = "テンプレートを入れる（送信はしません）";
   tpl.onclick = () =>
-    templates.pick(tpl, (text) => {
-      // 1 行の入力欄なので、改行は空白にする
-      input.value = text.replace(/\s*\n\s*/g, " ");
-      input.focus();
-    });
-  form.append(input, tpl);
-  input.title = "空欄のときは ↑ ↓ Enter Esc をそのまま送る（/resume などの選択画面の操作用）";
-  // /resume などの選択画面は会話の枠と見分けられず cleanTail で消えてしまうので、操作している間は画面をそのまま出す
-  const setRaw = (on: boolean) => {
-    card.dataset.raw = on ? "1" : "";
-    const s = sessions.get(id);
-    if (s) updateCard(card, s);
-  };
-  input.onkeydown = (ev) => {
-    if (input.value || ev.isComposing || ev.ctrlKey || ev.altKey || ev.metaKey || ev.shiftKey) return;
-    const key = NAV_KEYS[ev.key];
-    if (!key) return;
-    ev.preventDefault();
-    invoke("write_session", { id, data: key }).catch(showError);
-    setRaw(ev.key !== "Escape" && ev.key !== "Enter");
-  };
-  form.onsubmit = (ev) => {
-    ev.preventDefault();
-    const text = input.value;
-    if (!text.trim()) return;
-    input.value = "";
-    setRaw(text.trimStart().startsWith("/"));
-    sendLine(id, text).catch(showError);
-  };
+    templates.pick(
+      tpl,
+      (text) => {
+        paste(text);
+        kbd.focus();
+      },
+      () => kbd.focus(),
+    );
   const foot = el("footer", "c-foot");
-  foot.append(el("span", "c-age"), el("span", "c-mem"));
-  card.append(head, el("pre", "c-tail"), el("div", "c-msg"), el("div", "c-choices"), form, foot);
+  foot.append(el("span", "c-age"), el("span", "c-mem"), tpl);
+  card.append(head, tail, kbd, foot);
   card.onclick = (ev) => {
+    const target = ev.target as HTMLElement;
     // 文章を選んでいるときは、選び終わりのクリックで切り替えない
-    if ((ev.target as HTMLElement).closest("button, input") || getSelection()?.toString()) return;
+    if (target.closest("button") || getSelection()?.toString()) return;
+    if (target.closest(".c-tail")) {
+      if (!kbd.disabled) kbd.focus({ preventScroll: true });
+      return;
+    }
     activate(id);
   };
+  tail.ondblclick = () => activate(id);
   card.onkeydown = (ev) => {
     if (ev.key === "Enter" && ev.target === card) activate(id);
   };
@@ -605,7 +656,7 @@ function updateCard(card: HTMLElement, s: Session) {
   const lines = peek?.lines ?? [];
   const tail = q(".c-tail");
   const max = settings.overviewLines();
-  const text = (card.dataset.raw ? rawTail(lines, max) : cleanTail(lines, max)).join("\n");
+  const text = (card.classList.contains("typing") ? rawTail(lines, max) : cleanTail(lines, max)).join("\n");
   // さかのぼって読んでいる間は更新を止める。設定の行数を超えると古い行が上から消えて、読んでいる文字がずれるため。
   // いちばん下まで戻すと、次の更新で最新に追いつく
   const atBottom = !tail.dataset.shown || tail.scrollHeight - tail.scrollTop - tail.clientHeight < 16;
@@ -615,30 +666,9 @@ function updateCard(card: HTMLElement, s: Session) {
     tail.scrollTop = tail.scrollHeight;
   }
 
-  const waiting = s.status === "waiting";
-  const msg = q(".c-msg");
-  msg.hidden = !(waiting && s.message);
-  msg.textContent = s.message ?? "";
-
-  const choices = waiting
-    ? lines.map((l) => CHOICE.exec(l)).filter((m) => m !== null).map((m) => ({ key: m[1], label: m[2] }))
-    : [];
-  const box = q(".c-choices");
-  const sig = choices.map((c) => `${c.key}.${c.label}`).join("\n");
-  if (box.dataset.sig !== sig) {
-    box.dataset.sig = sig;
-    box.replaceChildren(
-      ...choices.map((c, i) => {
-        const b = el("button", i === 0 ? "first" : "", `${c.key}. ${c.label}`);
-        b.title = c.label;
-        b.onclick = () => invoke("write_session", { id: s.id, data: c.key }).catch(showError);
-        return b;
-      }),
-    );
-  }
-  box.hidden = choices.length === 0;
-
-  q(".c-input").hidden = s.status === "exited";
+  const exited = s.status === "exited";
+  card.querySelector<HTMLTextAreaElement>(".c-kbd")!.disabled = exited;
+  q(".c-tpl").hidden = exited;
   q(".c-age").textContent = fmtAge(s.since);
   q(".c-mem").textContent = fmtBytes(s.bytes);
 }
@@ -657,10 +687,9 @@ function renderOverview(waitingCount: number, total: number) {
       cards.delete(id);
     }
   }
-  const rank = (s: Session) => (s.status === "waiting" ? 0 : s.status === "exited" ? 2 : 1);
-  const ids = [...order].sort((a, b) => rank(sessions.get(a)!) - rank(sessions.get(b)!));
+  // 状態で並べ替えるとドラッグで決めた順番と食い違うので、サイドバーと同じ順番にする
   const grid = $("ov-grid");
-  ids.forEach((id, i) => {
+  order.forEach((id, i) => {
     let card = cards.get(id);
     if (!card) {
       card = makeCard(id);
