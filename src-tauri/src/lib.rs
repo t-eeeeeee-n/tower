@@ -9,6 +9,7 @@ mod notify;
 pub mod session;
 mod theme;
 mod tray;
+mod update;
 
 use std::sync::{Arc, Mutex};
 
@@ -234,13 +235,17 @@ fn set_tray_waiting(app: AppHandle, count: usize) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    update::wait_previous();
+    let launched = update::Launched::now();
     tauri::Builder::default()
-        // 2 つ目の Tower を起動すると、セッションも hooks の受信口も別々になってしまうので、トレイにいる方を前に出す
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| tray::show_main(app)))
+        // 2 つ目の Tower を起動すると、セッションも hooks の受信口も別々になってしまうので、トレイにいる方を前に出す。
+        // 新しい版をインストールしたあとなら、再起動を勧める
+        .plugin(tauri_plugin_single_instance::init(move |app, _args, _cwd| update::on_second_instance(app, &launched)))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            update::remove_old_binaries();
             let dir = app.path().app_data_dir()?;
             let settings_path = dir.join("hooks-settings.json");
             let mut hooks_error = None;
