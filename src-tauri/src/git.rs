@@ -90,19 +90,34 @@ pub fn head(cwd: &Path) -> Option<Head> {
     let git_dir = if dot_git.is_dir() {
         dot_git
     } else {
-        let text = std::fs::read_to_string(&dot_git).ok()?;
-        let target = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+        let text = read_small(&dot_git)?;
+        let target = text.trim().strip_prefix("gitdir:")?.trim();
+        // 信頼していないフォルダの .git にも従うので、ネットワークやデバイスの場所は辿らない。
+        // \\server\share を読みにいくと、Windows がサインインの情報（NTLM）を相手に送ってしまう
+        if target.starts_with("\\\\") || target.starts_with("//") {
+            return None;
+        }
+        let target = PathBuf::from(target);
         if target.is_absolute() { target } else { root.join(target) }
     };
     // サブモジュールも .git がファイルなので、worktree の印の commondir があるかで見分ける
     let worktree = git_dir.join("commondir").is_file();
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = read_small(&git_dir.join("HEAD"))?;
     let head = head.trim();
     let branch = match head.strip_prefix("ref: refs/heads/") {
         Some(b) => b.to_string(),
         None => head.chars().take(7).collect(),
     };
     Some(Head { branch, worktree, root: root.to_string_lossy().into_owned() })
+}
+
+/// .git や HEAD は数十バイトなので、それより大きいものや普通のファイルでないものは読まない
+fn read_small(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > 4096 {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -194,6 +209,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+
+    #[test]
+    fn head_ignores_network_gitdir() {
+        let base = std::env::temp_dir().join(format!("tower-git-unc-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join(".git"), r"gitdir: \\attacker\share\x").unwrap();
+        assert_eq!(head(&base), None);
+        std::fs::write(base.join(".git"), "gitdir: //attacker/share/x\n").unwrap();
+        assert_eq!(head(&base), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
     #[test]
     fn merges_and_removes_worktree() {
         let base = std::env::temp_dir().join(format!("tower-git-merge-{}", std::process::id()));
