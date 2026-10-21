@@ -75,6 +75,10 @@
             <ul id="restore-list" class="restore-list"></ul>
           </div>
           <button id="empty-new" class="primary-btn">セッションを作成</button>
+          <div id="empty-recents" class="empty-recents" hidden>
+            <p class="empty-sub">最近開いたフォルダ（クリックで前回のエージェントで開く）</p>
+            <ul id="empty-recent-list" class="recent-list"></ul>
+          </div>
           <dl class="keys">
             <dt>Ctrl+Shift+N</dt><dd>新しいセッション</dd>
             <dt>Ctrl+0</dt><dd>一覧を表示</dd>
@@ -92,6 +96,10 @@
     <dialog id="new-dialog" class="dialog">
       <form id="new-form" method="dialog">
         <h2>新しいセッション</h2>
+        <div id="f-recents" class="field" hidden>
+          <span>最近開いたフォルダ（クリックで選ぶ、ダブルクリックで作成）</span>
+          <ul id="f-recent-list" class="recent-list"></ul>
+        </div>
         <label class="field">
           <span>フォルダ</span>
           <div class="row">

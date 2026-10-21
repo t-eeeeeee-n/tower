@@ -590,6 +590,7 @@ function render() {
   const showRestore = order.length === 0 && restorable.length > 0;
   $("restore").hidden = !showRestore;
   $("empty").classList.toggle("has-restore", showRestore);
+  if (!active && !overview) $("empty-recents").hidden = renderRecents($("empty-recent-list"), openRecent) === 0;
   if (showRestore) {
     $("restore-btn").textContent = `前回の ${restorable.length} 件を再開`;
     $("restore-list").replaceChildren(
@@ -985,32 +986,118 @@ const fWorktree = $<HTMLInputElement>("f-worktree");
 const fBranch = $<HTMLInputElement>("f-branch");
 const fError = $("f-error");
 
-function recentDirs(): string[] {
+// ---------- 最近開いたフォルダ ----------
+// VS Code の「最近開いたもの」のように、一度開いたフォルダを前回のエージェントで開き直せるようにする
+
+interface Recent {
+  cwd: string;
+  agent: Agent | null;
+  at: number;
+}
+
+const sameDir = (a: string, b: string) => a.replace(/\//g, "\\").toLowerCase() === b.replace(/\//g, "\\").toLowerCase();
+
+function recents(): Recent[] {
   try {
-    return JSON.parse(localStorage.getItem("recentDirs") ?? "[]");
+    const v = JSON.parse(localStorage.getItem("recentProjects") ?? "null");
+    if (Array.isArray(v)) return v.filter((r) => typeof r?.cwd === "string");
+    // 以前は場所だけを覚えていた
+    const dirs = JSON.parse(localStorage.getItem("recentDirs") ?? "[]");
+    return Array.isArray(dirs) ? dirs.filter((d) => typeof d === "string").map((cwd) => ({ cwd, agent: null, at: 0 })) : [];
   } catch {
     return [];
   }
 }
-function rememberDir(dir: string) {
+
+function saveRecents(list: Recent[]) {
   try {
-    const dirs = [dir, ...recentDirs().filter((d) => d !== dir)].slice(0, 12);
-    localStorage.setItem("recentDirs", JSON.stringify(dirs));
+    localStorage.setItem("recentProjects", JSON.stringify(list));
   } catch {
     /* 保存できなくても動作には影響しない */
   }
 }
 
-function openNewDialog() {
+function rememberRecent(cwd: string, agent: Agent) {
+  saveRecents([{ cwd, agent, at: Date.now() }, ...recents().filter((r) => !sameDir(r.cwd, cwd))].slice(0, 20));
+}
+
+function forgetRecent(cwd: string) {
+  saveRecents(recents().filter((r) => !sameDir(r.cwd, cwd)));
+}
+
+const baseName = (dir: string) => dir.split(/[\/]/).filter(Boolean).pop() ?? dir;
+
+// onPick はクリック、onOpen はダブルクリック（空の画面ではクリックで開くので onOpen は無し）
+function renderRecents(list: HTMLElement, onPick: (r: Recent) => void, onOpen?: (r: Recent) => void) {
+  list.replaceChildren(
+    ...recents().map((r) => {
+      const li = el("li", "recent");
+      li.tabIndex = 0;
+      li.title = r.cwd;
+      const text = el("div", "recent-text");
+      text.append(el("span", "recent-name", baseName(r.cwd)), el("span", "recent-path", r.cwd));
+      li.append(text);
+      if (r.agent) li.append(el("span", "agent-tag", AGENT_LABEL[r.agent]));
+      const del = el("button", "recent-del", "×");
+      del.type = "button";
+      del.title = "一覧から外す（フォルダは消しません）";
+      del.setAttribute("aria-label", `${baseName(r.cwd)} を一覧から外す`);
+      del.onclick = (ev) => {
+        ev.stopPropagation();
+        forgetRecent(r.cwd);
+        renderRecents(list, onPick, onOpen);
+        render();
+      };
+      li.append(del);
+      li.onclick = () => onPick(r);
+      if (onOpen) li.ondblclick = () => onOpen(r);
+      li.onkeydown = (ev) => {
+        if (ev.key === "Enter" && ev.target === li) (onOpen ?? onPick)(r);
+      };
+      return li;
+    }),
+  );
+  return list.childElementCount;
+}
+
+// 前回のエージェントがわからないか、もう入っていなければ、ダイアログで選んでもらう
+async function openRecent(r: Recent) {
+  await refreshInstalled();
+  if (!r.agent || !installedAgents.has(r.agent)) {
+    openNewDialog(r.cwd);
+    return;
+  }
+  try {
+    const id = await createSession(baseName(r.cwd), r.cwd, r.agent);
+    rememberRecent(r.cwd, r.agent);
+    await activate(id);
+  } catch (e) {
+    showError(e);
+  }
+}
+
+
+function openNewDialog(cwd?: string) {
   if (dialog.open) return;
+  const list = recents();
   $("recent-dirs").replaceChildren(
-    ...recentDirs().map((d) => {
+    ...list.map((r) => {
       const o = el("option");
-      o.value = d;
+      o.value = r.cwd;
       return o;
     }),
   );
-  fCwd.value = recentDirs()[0] ?? "";
+  const pick = (r: Recent) => {
+    fCwd.value = r.cwd;
+    if (r.agent && installedAgents.has(r.agent)) pickAgent(r.agent);
+    $<HTMLButtonElement>("f-submit").focus();
+  };
+  const count = renderRecents($("f-recent-list"), pick, (r) => {
+    pick(r);
+    $<HTMLFormElement>("new-form").requestSubmit();
+  });
+  $("f-recents").hidden = count === 0;
+  fCwd.value = cwd ?? list[0]?.cwd ?? "";
   fName.value = "";
   fWorktree.checked = false;
   fBranch.value = "";
@@ -1052,7 +1139,7 @@ $<HTMLFormElement>("new-form").onsubmit = async (ev) => {
   if (submit) submit.disabled = true;
   try {
     const dir = fWorktree.checked ? await invoke<string>("create_worktree", { cwd, branch }) : cwd;
-    rememberDir(cwd);
+    rememberRecent(cwd, agent);
     const name = fName.value.trim() || dir.split(/[\\/]/).pop() || dir;
     try {
       localStorage.setItem("lastAgent", agent);
@@ -1081,8 +1168,8 @@ $<HTMLButtonElement>("restore-btn").onclick = async (ev) => {
     btn.disabled = false;
   }
 };
-$("new-btn").onclick = openNewDialog;
-$("empty-new").onclick = openNewDialog;
+$("new-btn").onclick = () => openNewDialog();
+$("empty-new").onclick = () => openNewDialog();
 $("files-btn").onclick = () => files.toggle();
 $("head-name").ondblclick = () => activeId && openRename(activeId);
 
