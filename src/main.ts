@@ -529,6 +529,14 @@ function cleanTail(lines: string[], max: number) {
   return out.slice(-max);
 }
 
+function rawTail(lines: string[], max: number) {
+  const out = lines.map((l) => l.trimEnd());
+  while (out.length && !out[out.length - 1]) out.pop();
+  return out.slice(-max);
+}
+
+const NAV_KEYS: Record<string, string> = { ArrowUp: "\x1b[A", ArrowDown: "\x1b[B", Enter: "\r", Escape: "\x1b" };
+
 function makeCard(id: string) {
   const card = el("article", "card");
   card.tabIndex = 0;
@@ -548,11 +556,27 @@ function makeCard(id: string) {
       input.focus();
     });
   form.append(input, tpl);
+  input.title = "空欄のときは ↑ ↓ Enter Esc をそのまま送る（/resume などの選択画面の操作用）";
+  // /resume などの選択画面は会話の枠と見分けられず cleanTail で消えてしまうので、操作している間は画面をそのまま出す
+  const setRaw = (on: boolean) => {
+    card.dataset.raw = on ? "1" : "";
+    const s = sessions.get(id);
+    if (s) updateCard(card, s);
+  };
+  input.onkeydown = (ev) => {
+    if (input.value || ev.isComposing || ev.ctrlKey || ev.altKey || ev.metaKey || ev.shiftKey) return;
+    const key = NAV_KEYS[ev.key];
+    if (!key) return;
+    ev.preventDefault();
+    invoke("write_session", { id, data: key }).catch(showError);
+    setRaw(ev.key !== "Escape" && ev.key !== "Enter");
+  };
   form.onsubmit = (ev) => {
     ev.preventDefault();
     const text = input.value;
     if (!text.trim()) return;
     input.value = "";
+    setRaw(text.trimStart().startsWith("/"));
     sendLine(id, text).catch(showError);
   };
   const foot = el("footer", "c-foot");
@@ -580,7 +604,8 @@ function updateCard(card: HTMLElement, s: Session) {
   const peek = peeks.get(s.id);
   const lines = peek?.lines ?? [];
   const tail = q(".c-tail");
-  const text = cleanTail(lines, settings.overviewLines()).join("\n");
+  const max = settings.overviewLines();
+  const text = (card.dataset.raw ? rawTail(lines, max) : cleanTail(lines, max)).join("\n");
   // さかのぼって読んでいる間は更新を止める。設定の行数を超えると古い行が上から消えて、読んでいる文字がずれるため。
   // いちばん下まで戻すと、次の更新で最新に追いつく
   const atBottom = !tail.dataset.shown || tail.scrollHeight - tail.scrollTop - tail.clientHeight < 16;
