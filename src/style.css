@@ -695,3 +695,25 @@ textarea:focus { border-color: var(--st-running); outline: none; }
 .empty-recents { margin: 0 0 24px; }
 .empty-recents[hidden] { display: none; }
 .empty-sub { margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+.recent { padding: 8px 10px; }
+.recent-tile {
+  flex: none;
+  width: 30px; height: 30px;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  color: #fff; font-weight: 700; font-size: 14px;
+}
+.recent-name { font-size: 14px; }
+
+/* プロジェクトを開く */
+.pick-dialog { width: min(640px, 100vw - 32px); padding: 18px 18px 12px; }
+.pick-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.pick-head h2 { margin: 0; }
+.pick-actions { display: flex; gap: 8px; }
+.pick-search { width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 7px 10px; }
+.pick-list { list-style: none; margin: 0; padding: 0; height: min(420px, 60vh); overflow-y: auto; scrollbar-color: var(--line) transparent; }
+.pick-list .recent[aria-selected="true"] { background: var(--raise-2); }
+.pick-list .recent:hover:not([aria-selected="true"]) { background: transparent; }
+.pick-empty { margin: 8px 0 0; color: var(--muted); text-align: center; }
+.pick-empty[hidden] { display: none; }
+.pick-hint { margin: 10px 0 0; color: var(--faint); font-size: 12px; }

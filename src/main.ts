@@ -590,7 +590,7 @@ function render() {
   const showRestore = order.length === 0 && restorable.length > 0;
   $("restore").hidden = !showRestore;
   $("empty").classList.toggle("has-restore", showRestore);
-  if (!active && !overview) $("empty-recents").hidden = renderRecents($("empty-recent-list"), openRecent) === 0;
+  if (!active && !overview) $("empty-recents").hidden = renderRecents($("empty-recent-list")) === 0;
   if (showRestore) {
     $("restore-btn").textContent = `前回の ${restorable.length} 件を再開`;
     $("restore-list").replaceChildren(
@@ -1025,40 +1025,135 @@ function forgetRecent(cwd: string) {
   saveRecents(recents().filter((r) => !sameDir(r.cwd, cwd)));
 }
 
-const baseName = (dir: string) => dir.split(/[\/]/).filter(Boolean).pop() ?? dir;
+const baseName = (dir: string) => dir.split(/[\\/]/).filter(Boolean).pop() ?? dir;
 
-// onPick はクリック、onOpen はダブルクリック（空の画面ではクリックで開くので onOpen は無し）
-function renderRecents(list: HTMLElement, onPick: (r: Recent) => void, onOpen?: (r: Recent) => void) {
+// 頭文字のアイコンの色。フォルダに印の色があればそれを使い、無ければ名前から決める（同じフォルダはいつも同じ色）
+function tileColor(r: Recent) {
+  const mark = marks.markFor(r.cwd)?.color;
+  if (mark) return `var(--mark-${mark})`;
+  const name = baseName(r.cwd);
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return `var(--mark-${MARK_COLORS[h % MARK_COLORS.length].key})`;
+}
+
+// プロジェクトの 1 行。頭文字のアイコン、名前と薄いパス、前回のエージェント、一覧から外す ×
+function projectItem(r: Recent, onRemove: () => void) {
+  const li = el("li", "recent");
+  li.title = r.cwd;
+  const name = baseName(r.cwd);
+  const tile = el("span", "recent-tile", [...name][0]?.toUpperCase() ?? "?");
+  tile.style.background = tileColor(r);
+  const text = el("div", "recent-text");
+  text.append(el("span", "recent-name", name), el("span", "recent-path", r.cwd));
+  li.append(tile, text);
+  if (r.agent) li.append(el("span", "agent-tag", AGENT_LABEL[r.agent]));
+  const del = el("button", "recent-del", "×");
+  del.type = "button";
+  del.tabIndex = -1;
+  del.title = "一覧から外す（フォルダは消しません）";
+  del.setAttribute("aria-label", `${name} を一覧から外す`);
+  del.onclick = (ev) => {
+    ev.stopPropagation();
+    forgetRecent(r.cwd);
+    onRemove();
+  };
+  li.append(del);
+  return li;
+}
+
+// セッションが無いときの画面の一覧。クリックで前回のエージェントで開く
+function renderRecents(list: HTMLElement) {
   list.replaceChildren(
     ...recents().map((r) => {
-      const li = el("li", "recent");
+      const li = projectItem(r, () => render());
       li.tabIndex = 0;
-      li.title = r.cwd;
-      const text = el("div", "recent-text");
-      text.append(el("span", "recent-name", baseName(r.cwd)), el("span", "recent-path", r.cwd));
-      li.append(text);
-      if (r.agent) li.append(el("span", "agent-tag", AGENT_LABEL[r.agent]));
-      const del = el("button", "recent-del", "×");
-      del.type = "button";
-      del.title = "一覧から外す（フォルダは消しません）";
-      del.setAttribute("aria-label", `${baseName(r.cwd)} を一覧から外す`);
-      del.onclick = (ev) => {
-        ev.stopPropagation();
-        forgetRecent(r.cwd);
-        renderRecents(list, onPick, onOpen);
-        render();
-      };
-      li.append(del);
-      li.onclick = () => onPick(r);
-      if (onOpen) li.ondblclick = () => onOpen(r);
+      li.onclick = () => openRecent(r);
       li.onkeydown = (ev) => {
-        if (ev.key === "Enter" && ev.target === li) (onOpen ?? onPick)(r);
+        if (ev.key === "Enter" && ev.target === li) openRecent(r);
       };
       return li;
     }),
   );
   return list.childElementCount;
 }
+
+// ---------- プロジェクトを開く（WebStorm のようこそ画面のように、最近のものから選ぶ） ----------
+
+const pickDialog = $<HTMLDialogElement>("pick-dialog");
+const pickSearch = $<HTMLInputElement>("pick-search");
+let pickItems: Recent[] = [];
+let pickIndex = 0;
+
+function openProjectPicker() {
+  if (pickDialog.open || dialog.open) return;
+  if (!recents().length) {
+    openNewDialog();
+    return;
+  }
+  pickSearch.value = "";
+  pickIndex = 0;
+  renderPick();
+  pickDialog.showModal();
+  pickSearch.focus();
+}
+
+function renderPick() {
+  const q = pickSearch.value.trim().toLowerCase();
+  pickItems = recents().filter((r) => !q || r.cwd.toLowerCase().includes(q));
+  pickIndex = Math.max(0, Math.min(pickIndex, pickItems.length - 1));
+  $("pick-list").replaceChildren(
+    ...pickItems.map((r, i) => {
+      const li = projectItem(r, renderPick);
+      li.setAttribute("role", "option");
+      li.setAttribute("aria-selected", String(i === pickIndex));
+      li.onmousemove = () => {
+        if (pickIndex === i) return;
+        pickIndex = i;
+        renderPick();
+      };
+      li.onclick = (ev) => choosePick(r, ev.shiftKey);
+      return li;
+    }),
+  );
+  $("pick-list").querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+  $("pick-empty").hidden = pickItems.length > 0;
+}
+
+// detailed のときは、エージェントや worktree を選べるダイアログで開く
+function choosePick(r: Recent, detailed: boolean) {
+  pickDialog.close();
+  if (detailed) openNewDialog(r.cwd, r.agent);
+  else openRecent(r);
+}
+
+pickSearch.oninput = () => {
+  pickIndex = 0;
+  renderPick();
+};
+pickSearch.onkeydown = (ev) => {
+  if (ev.isComposing) return;
+  if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+    ev.preventDefault();
+    const n = pickItems.length;
+    if (n) pickIndex = (pickIndex + (ev.key === "ArrowDown" ? 1 : n - 1)) % n;
+    renderPick();
+  } else if (ev.key === "Enter") {
+    ev.preventDefault();
+    const r = pickItems[pickIndex];
+    if (r) choosePick(r, ev.shiftKey);
+  }
+};
+$("pick-new").onclick = () => {
+  pickDialog.close();
+  openNewDialog();
+};
+$("pick-browse").onclick = async () => {
+  const dir = await open({ directory: true });
+  if (typeof dir !== "string") return;
+  pickDialog.close();
+  openNewDialog(dir);
+};
 
 // 前回のエージェントがわからないか、もう入っていなければ、ダイアログで選んでもらう
 async function openRecent(r: Recent) {
@@ -1077,7 +1172,7 @@ async function openRecent(r: Recent) {
 }
 
 
-function openNewDialog(cwd?: string) {
+function openNewDialog(cwd?: string, agent?: Agent | null) {
   if (dialog.open) return;
   const list = recents();
   $("recent-dirs").replaceChildren(
@@ -1087,21 +1182,11 @@ function openNewDialog(cwd?: string) {
       return o;
     }),
   );
-  const pick = (r: Recent) => {
-    fCwd.value = r.cwd;
-    if (r.agent && installedAgents.has(r.agent)) pickAgent(r.agent);
-    $<HTMLButtonElement>("f-submit").focus();
-  };
-  const count = renderRecents($("f-recent-list"), pick, (r) => {
-    pick(r);
-    $<HTMLFormElement>("new-form").requestSubmit();
-  });
-  $("f-recents").hidden = count === 0;
   fCwd.value = cwd ?? list[0]?.cwd ?? "";
   fName.value = "";
   fWorktree.checked = false;
   fBranch.value = "";
-  pickedAgent = savedAgent();
+  pickedAgent = agent && installedAgents.has(agent) ? agent : savedAgent();
   renderPicker();
   refreshInstalled();
   $("f-branch-field").hidden = true;
@@ -1168,8 +1253,8 @@ $<HTMLButtonElement>("restore-btn").onclick = async (ev) => {
     btn.disabled = false;
   }
 };
-$("new-btn").onclick = () => openNewDialog();
-$("empty-new").onclick = () => openNewDialog();
+$("new-btn").onclick = openProjectPicker;
+$("empty-new").onclick = openProjectPicker;
 $("files-btn").onclick = () => files.toggle();
 $("head-name").ondblclick = () => activeId && openRename(activeId);
 
@@ -1207,7 +1292,7 @@ document.addEventListener(
     } else if (e.ctrlKey && e.shiftKey && k === "t") {
       insertTemplate();
     } else if (e.ctrlKey && e.shiftKey && k === "n") {
-      openNewDialog();
+      openProjectPicker();
     } else if (e.ctrlKey && e.shiftKey && k === "a") {
       nextWaiting();
     } else if (e.ctrlKey && e.shiftKey && k === "b") {

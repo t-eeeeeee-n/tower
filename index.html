@@ -93,13 +93,23 @@
       </main>
     </div>
 
+    <dialog id="pick-dialog" class="dialog pick-dialog" aria-labelledby="pick-title">
+      <div class="pick-head">
+        <h2 id="pick-title">プロジェクトを開く</h2>
+        <div class="pick-actions">
+          <button type="button" id="pick-browse" class="text-btn">参照…</button>
+          <button type="button" id="pick-new" class="primary-btn">新しく作る</button>
+        </div>
+      </div>
+      <input id="pick-search" class="pick-search" placeholder="検索" autocomplete="off" aria-label="プロジェクトを検索" aria-controls="pick-list" />
+      <ul id="pick-list" class="pick-list" role="listbox" aria-label="最近開いたプロジェクト"></ul>
+      <p id="pick-empty" class="pick-empty" hidden>見つかりません</p>
+      <p class="pick-hint">クリックか Enter で前回のエージェントで開く　Shift を押しながらだと、エージェントや worktree を選んで開く</p>
+    </dialog>
+
     <dialog id="new-dialog" class="dialog">
       <form id="new-form" method="dialog">
         <h2>新しいセッション</h2>
-        <div id="f-recents" class="field" hidden>
-          <span>最近開いたフォルダ（クリックで選ぶ、ダブルクリックで作成）</span>
-          <ul id="f-recent-list" class="recent-list"></ul>
-        </div>
         <label class="field">
           <span>フォルダ</span>
           <div class="row">
