@@ -171,8 +171,10 @@ new ResizeObserver(() => {
 function insertPaths(paths: string[]) {
   const s = attachedId ? sessions.get(attachedId) : undefined;
   if (!s || !paths.length) return;
-  // bash では \ が消えるので囲む。エージェントの入力欄では、空白を含むときだけ囲む
-  const quote = (p: string) => (s.agent === "shell" || /\s/.test(p) ? `"${p}"` : p);
+  // bash では単一引用符で囲む。\ が消えないようにするためと、ファイル名に入りうる $ や ` を展開させないため（二重引用符では展開される）。
+  // エージェントの入力欄はシェルを通らないので、空白を含むときだけ囲む
+  const quote = (p: string) =>
+    s.agent === "shell" ? `'${p.replace(/'/g, `'\\''`)}'` : /\s/.test(p) ? `"${p}"` : p;
   term.paste(paths.map(quote).join(" ") + " ");
   term.focus();
 }
