@@ -579,8 +579,9 @@ function makeCard(id: string) {
     invoke("write_session", { id, data }).catch(showError);
     tail.scrollTop = tail.scrollHeight;
   };
-  // 貼り付けとして送る。エージェントは貼り付けの改行では送信しない
-  const paste = (text: string) => send(`\x1b[200~${text}\x1b[201~`);
+  // 貼り付けとして送る。エージェントは貼り付けの改行では送信しない。
+  // ESC は取り除く。中に終わりの印（ESC[201~）があると、そこから後ろが打ち込んだ文字として扱われ、改行で実行されてしまう
+  const paste = (text: string) => send(`\x1b[200~${text.replace(/\x1b/g, "")}\x1b[201~`);
   const flush = () => {
     send(kbd.value);
     kbd.value = "";
