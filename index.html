@@ -26,7 +26,8 @@
       <main class="main">
         <header id="main-head" class="main-head" hidden>
           <div class="main-title">
-            <span id="head-name" title="ダブルクリックで名前を変更"></span>
+            <span id="head-name" title="ダブルクリックで名前と印を変更"></span>
+            <span id="head-mark" class="mark-tag" hidden></span>
             <span id="head-agent" class="agent-tag"></span>
             <span id="head-branch" class="branch-tag"></span>
             <span id="head-cwd" class="muted"></span>
@@ -70,6 +71,7 @@
               <header class="ov-term-head">
                 <div class="main-title">
                   <span id="ovt-name"></span>
+                  <span id="ovt-mark" class="mark-tag" hidden></span>
                   <span id="ovt-agent" class="agent-tag"></span>
                   <span id="ovt-branch" class="branch-tag"></span>
                 </div>
@@ -233,11 +235,19 @@
 
     <dialog id="rename-dialog" class="dialog rename-dialog">
       <form id="rename-form" method="dialog">
-        <h2>名前を変更</h2>
+        <h2>名前と印</h2>
         <label class="field">
           <span>表示名</span>
           <input id="rename-input" autocomplete="off" />
         </label>
+        <div class="field">
+          <span>フォルダの印</span>
+          <small id="mark-folder" class="mark-folder"></small>
+          <div class="mark-row">
+            <input id="mark-label" maxlength="12" placeholder="例: prod" autocomplete="off" aria-label="印の文字" />
+            <div id="mark-colors" class="mark-colors" role="radiogroup" aria-label="印の色"></div>
+          </div>
+        </div>
         <p id="rename-error" class="error" hidden></p>
         <div class="dialog-actions">
           <button type="button" id="rename-cancel" class="text-btn">キャンセル</button>

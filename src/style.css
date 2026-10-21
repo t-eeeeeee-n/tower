@@ -641,3 +641,40 @@ textarea:focus { border-color: var(--st-running); outline: none; }
 .wt-text { margin: 0 0 8px; overflow-wrap: anywhere; }
 .wt-facts { margin: 0 0 16px; padding-left: 18px; color: var(--muted); overflow-wrap: anywhere; }
 .wt-dialog button[hidden] { display: none; }
+
+/* フォルダの印。色はテーマによらず固定（見分けるための印なので） */
+:root {
+  --mark-red: #e5534b;
+  --mark-orange: #e0823d;
+  --mark-yellow: #d4b43c;
+  --mark-green: #57ab5a;
+  --mark-blue: #4a8fe0;
+  --mark-purple: #a371f7;
+}
+.mark-tag {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--mark, var(--raise-2));
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.mark-tag:empty { width: 9px; height: 9px; padding: 0; border-radius: 50%; align-self: center; }
+.mark-tag[hidden] { display: none; }
+.session.marked { box-shadow: inset 3px 0 0 var(--mark); }
+.card.marked { border-top: 3px solid var(--mark); }
+.mark-folder { color: var(--faint); overflow-wrap: anywhere; }
+.mark-row { display: flex; gap: 10px; align-items: center; }
+.mark-row input { width: 9em; }
+.mark-colors { display: flex; gap: 6px; }
+.mark-swatch {
+  width: 22px; height: 22px; padding: 0;
+  border: 2px solid transparent; border-radius: 50%;
+  background: var(--mark, transparent);
+  color: var(--muted); font-size: 12px; line-height: 1;
+}
+.mark-swatch:not([style]) { border-color: var(--line); }
+.mark-swatch[aria-checked="true"] { outline: 2px solid var(--text); outline-offset: 1px; }

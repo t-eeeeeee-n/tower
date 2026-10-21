@@ -11,6 +11,7 @@ import "./style.css";
 import { createFilesPanel } from "./files";
 import { createTemplates } from "./templates";
 import { createSettings } from "./settings";
+import { createMarks, MARK_COLORS, type MarkColor } from "./marks";
 
 type Status = "shell" | "starting" | "idle" | "running" | "waiting" | "exited";
 type Agent = "shell" | "claude" | "codex" | "copilot" | "antigravity";
@@ -126,6 +127,7 @@ const peeks = new Map<string, Peek>();
 const unseen = new Set<string>();
 const heads = new Map<string, Head>();
 const templates = createTemplates();
+const marks = createMarks();
 
 // ---------- ターミナル（インスタンスは1つだけ） ----------
 
@@ -453,9 +455,48 @@ function openRename(id: string) {
   if (!s || renameDialog.open) return;
   renaming = id;
   renameInput.value = s.name;
+  // 親フォルダに付けた印があれば、それを直す
+  const mark = marks.markFor(s.cwd);
+  markFolder = mark?.folder ?? s.cwd;
+  $("mark-folder").textContent = `${markFolder} とその中のセッションに付きます`;
+  $<HTMLInputElement>("mark-label").value = mark?.label ?? "";
+  pickMarkColor(mark?.color ?? "");
   $("rename-error").hidden = true;
   renameDialog.showModal();
   renameInput.select();
+}
+
+let markFolder = "";
+let markColor: MarkColor | "" = "";
+
+function pickMarkColor(color: MarkColor | "") {
+  markColor = color;
+  $("mark-colors").replaceChildren(
+    ...[{ key: "" as const, name: "なし" }, ...MARK_COLORS].map((c) => {
+      const b = el("button", "mark-swatch");
+      b.type = "button";
+      b.title = c.name;
+      b.setAttribute("role", "radio");
+      b.setAttribute("aria-label", c.name);
+      b.setAttribute("aria-checked", String(c.key === color));
+      if (c.key) b.style.setProperty("--mark", `var(--mark-${c.key})`);
+      else b.textContent = "×";
+      b.onclick = () => pickMarkColor(c.key);
+      return b;
+    }),
+  );
+}
+
+// 印の色と文字を、要素に付ける（--mark と marked）。文字の印は tag に入れる
+function applyMark(target: HTMLElement, tag: HTMLElement | null, cwd: string) {
+  const m = marks.markFor(cwd);
+  target.classList.toggle("marked", !!m?.color);
+  if (m?.color) target.style.setProperty("--mark", `var(--mark-${m.color})`);
+  else target.style.removeProperty("--mark");
+  if (tag) {
+    tag.hidden = !m?.label && !m?.color;
+    tag.textContent = m?.label ?? "";
+  }
 }
 
 $<HTMLFormElement>("rename-form").onsubmit = async (ev) => {
@@ -472,6 +513,7 @@ $<HTMLFormElement>("rename-form").onsubmit = async (ev) => {
     await invoke("rename_session", { id, name });
     const s = sessions.get(id);
     if (s) s.name = name;
+    marks.set(markFolder, $<HTMLInputElement>("mark-label").value.trim(), markColor);
     saveSessions();
     render();
     renameDialog.close();
@@ -502,9 +544,12 @@ function render() {
       li.title = `${s.name}\n${s.cwd}\nダブルクリックで名前を変更、ドラッグで並べ替え`;
       draggable(li, id);
       li.ondblclick = () => openRename(id);
+      const markTag = el("span", "s-mark mark-tag");
+      applyMark(li, markTag, s.cwd);
       li.append(
         el("span", "s-key", i < 9 ? String(i + 1) : ""),
         el("span", "s-name", s.name),
+        markTag,
         el("span", "s-mem", fmtBytes(s.bytes)),
       );
       const line2 = el("div", "s-line2");
@@ -568,6 +613,7 @@ function render() {
     $("head-name").textContent = active.name;
     $("head-agent").textContent = AGENT_LABEL[active.agent];
     fillBranch($("head-branch"), heads.get(active.id));
+    applyMark($("head-mark"), $("head-mark"), active.cwd);
     $("head-cwd").textContent = active.cwd;
     const st = $("head-status");
     st.dataset.status = active.status;
@@ -621,7 +667,7 @@ function makeCard(id: string) {
   card.dataset.id = id;
   card.tabIndex = 0;
   const head = el("header", "c-head");
-  head.append(el("span", "c-name"), el("span", "c-agent"), el("span", "c-unseen", "未確認"), el("span", "c-status"));
+  head.append(el("span", "c-name"), el("span", "c-mark mark-tag"), el("span", "c-agent"), el("span", "c-unseen", "未確認"), el("span", "c-status"));
   head.title = "ドラッグで並べ替え";
   // カード全体をつかめるようにすると、画面の末尾の文章を選べなくなる
   draggable(card, id, head, true);
@@ -650,6 +696,7 @@ function updateCard(card: HTMLElement, s: Session) {
   q(".c-agent").textContent = AGENT_LABEL[s.agent];
   q(".c-status").textContent = STATUS_LABEL[s.status];
   q(".c-unseen").hidden = !unseen.has(s.id);
+  applyMark(card, q(".c-mark"), s.cwd);
 
   const peek = peeks.get(s.id);
   const lines = peek?.lines ?? [];
@@ -703,6 +750,7 @@ function renderOverview(waitingCount: number, total: number) {
   $("ovt-name").textContent = s?.name ?? "";
   $("ovt-agent").textContent = s ? AGENT_LABEL[s.agent] : "";
   fillBranch($("ovt-branch"), s && heads.get(s.id));
+  applyMark($("ovt-mark"), $("ovt-mark"), s?.cwd ?? "");
   const st = $("ovt-status");
   st.dataset.status = s?.status ?? "";
   st.textContent = s ? STATUS_LABEL[s.status] : "";
