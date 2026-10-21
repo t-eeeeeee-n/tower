@@ -166,6 +166,24 @@ fn kill_session(state: State<'_, App>, id: String) -> Result<(), String> {
     state.manager.kill(&id)
 }
 
+/// xterm.js は画像を貼り付けられないので、クリップボードの画像を一時フォルダに保存し、その場所をエージェントに渡す
+#[tauri::command]
+fn save_pasted_image(bytes: Vec<u8>, mime: String) -> Result<String, String> {
+    // Claude Code などが読める形式だけ受け付ける
+    let ext = match mime.as_str() {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => return Err(format!("この形式の画像は貼り付けられません（{mime}）")),
+    };
+    let dir = std::env::temp_dir().join("tower-images");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("画像を保存できませんでした: {e}"))?;
+    let path = dir.join(format!("paste-{}.{ext}", session::now_ms()));
+    std::fs::write(&path, bytes).map_err(|e| format!("画像を保存できませんでした: {e}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn set_tray_waiting(app: AppHandle, count: usize) {
     tray::set_waiting(&app, count);
@@ -216,6 +234,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             set_tray_waiting,
+            save_pasted_image,
             get_config,
             mintty_config,
             list_sessions,

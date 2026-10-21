@@ -1,6 +1,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, ask } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Terminal } from "@xterm/xterm";
@@ -109,6 +110,8 @@ let attachToken = 0;
 let attachedId: string | null = null;
 let view: "session" | "overview" = "session";
 const peeks = new Map<string, Peek>();
+// 作業が終わったが、まだ開いて見ていないセッション
+const unseen = new Set<string>();
 const templates = createTemplates();
 
 // ---------- ターミナル（インスタンスは1つだけ） ----------
@@ -162,6 +165,48 @@ new ResizeObserver(() => {
   });
 }).observe($("term-wrap"));
 
+// ---------- ファイルの場所を入れる ----------
+// ドロップしたファイルや貼り付けた画像は、場所を入力に入れるだけで送信はしない（エージェントはその場所から読む）
+
+function insertPaths(paths: string[]) {
+  const s = attachedId ? sessions.get(attachedId) : undefined;
+  if (!s || !paths.length) return;
+  // bash では \ が消えるので囲む。エージェントの入力欄では、空白を含むときだけ囲む
+  const quote = (p: string) => (s.agent === "shell" || /\s/.test(p) ? `"${p}"` : p);
+  term.paste(paths.map(quote).join(" ") + " ");
+  term.focus();
+}
+
+getCurrentWebview().onDragDropEvent(async ({ payload }) => {
+  if (payload.type !== "drop" || !payload.paths.length || document.querySelector("dialog[open]")) return;
+  // 一覧でカードに落としたときは、そのセッションに入れる
+  const dpr = window.devicePixelRatio;
+  const at = document.elementFromPoint(payload.position.x / dpr, payload.position.y / dpr);
+  const id = at?.closest<HTMLElement>(".card")?.dataset.id;
+  if (id && id !== attachedId) await select(id);
+  insertPaths(payload.paths);
+});
+
+$("term").addEventListener(
+  "paste",
+  async (ev) => {
+    const data = ev.clipboardData;
+    const item = [...(data?.items ?? [])].find((i) => i.kind === "file" && i.type.startsWith("image/"));
+    if (!item || data!.getData("text")) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const file = item.getAsFile();
+    if (!file) return;
+    try {
+      const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+      insertPaths([await invoke<string>("save_pasted_image", { bytes, mime: file.type })]);
+    } catch (e) {
+      showError(e);
+    }
+  },
+  true,
+);
+
 async function activate(id: string) {
   if (!sessions.has(id)) return;
   view = "session";
@@ -176,6 +221,7 @@ async function select(id: string) {
 
 async function show(id: string) {
   const reattach = id !== attachedId;
+  unseen.delete(id);
   activeId = id;
   render();
   if (!reattach) {
@@ -286,6 +332,7 @@ async function closeSession(id: string) {
   order = order.filter((x) => x !== id);
   saveSessions();
   files.forget(id);
+  unseen.delete(id);
   if (activeId === id) {
     activeId = null;
     files.setSession(null);
@@ -432,6 +479,7 @@ function render() {
       li.dataset.status = s.status;
       li.classList.toggle("active", id === activeId);
       li.classList.toggle("waiting", s.status === "waiting");
+      li.classList.toggle("unseen", unseen.has(id));
       li.title = `${s.name}\n${s.cwd}\nダブルクリックで名前を変更、ドラッグで並べ替え`;
       draggable(li, id);
       li.ondblclick = () => openRename(id);
@@ -445,6 +493,7 @@ function render() {
         el("span", "s-status", STATUS_LABEL[s.status]),
         el("span", "s-age", fmtAge(s.since)),
         el("span", "s-agent", AGENT_LABEL[s.agent]),
+        ...(unseen.has(id) ? [el("span", "s-unseen", "未確認")] : []),
       );
       li.append(line2);
       if (s.status === "waiting" && s.message) li.append(el("div", "s-msg", s.message));
@@ -548,9 +597,10 @@ function screenTail(lines: string[], max: number) {
 
 function makeCard(id: string) {
   const card = el("article", "card");
+  card.dataset.id = id;
   card.tabIndex = 0;
   const head = el("header", "c-head");
-  head.append(el("span", "c-name"), el("span", "c-agent"), el("span", "c-status"));
+  head.append(el("span", "c-name"), el("span", "c-agent"), el("span", "c-unseen", "未確認"), el("span", "c-status"));
   head.title = "ドラッグで並べ替え";
   // カード全体をつかめるようにすると、画面の末尾の文章を選べなくなる
   draggable(card, id, head, true);
@@ -578,6 +628,7 @@ function updateCard(card: HTMLElement, s: Session) {
   q(".c-name").textContent = s.name;
   q(".c-agent").textContent = AGENT_LABEL[s.agent];
   q(".c-status").textContent = STATUS_LABEL[s.status];
+  q(".c-unseen").hidden = !unseen.has(s.id);
 
   const peek = peeks.get(s.id);
   const lines = peek?.lines ?? [];
@@ -602,6 +653,7 @@ function renderOverview(waitingCount: number, total: number) {
   $("ov-sum").replaceChildren(
     el("span", "", `稼働中 ${live}`),
     ...(waitingCount ? [el("span", "waiting", `入力待ち ${waitingCount}`)] : []),
+    ...(unseen.size ? [el("span", "unseen", `未確認 ${unseen.size}`)] : []),
     el("span", "", `合計 ${fmtBytes(total)}`),
   );
 
@@ -905,19 +957,26 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
   const s = sessions.get(payload.id);
   if (!s) return;
   const becameWaiting = payload.status === "waiting" && s.status !== "waiting";
-  const ranFor = s.status === "running" && payload.status === "idle" ? payload.since - s.since : 0;
+  const finished = s.status === "running" && payload.status === "idle";
+  const ranFor = finished ? payload.since - s.since : 0;
   Object.assign(s, { status: payload.status, since: payload.since, message: payload.message });
+  // また動き出したり入力待ちになったりしたら、終わった印は外す（入力待ちは別の印で目立たせる）
+  if (payload.status !== "idle") unseen.delete(s.id);
   render();
   files.sessionChanged(payload.id);
-  if (!becameWaiting && ranFor < DONE_NOTIFY_MS) return;
+  if (!becameWaiting && !finished) return;
   // 一覧でも右のターミナルに出ているので、見ているとみなす
   const watching = payload.id === attachedId && (await appWindow.isFocused());
   if (watching) return;
+  if (finished) {
+    unseen.add(s.id);
+    render();
+  }
   if (becameWaiting) {
     if (!settings.notify().waiting) return;
     appWindow.requestUserAttention(UserAttentionType.Informational).catch(() => {});
     notify(s.id, `${s.name}: 入力待ち`, s.message ?? "入力を待っています");
-  } else if (settings.notify().done) {
+  } else if (ranFor >= DONE_NOTIFY_MS && settings.notify().done) {
     notify(s.id, `${s.name}: 完了`, `作業が終わりました（${fmtDuration(ranFor)}）`);
   }
 });
@@ -958,3 +1017,8 @@ setInterval(render, 20_000);
   render();
   if (order.length) await activate(order[0]);
 })().catch(showError);
+
+// トレイから戻したときなど、右や全画面のターミナルに出ているセッションはその時点で見たことにする
+appWindow.onFocusChanged(({ payload: focused }) => {
+  if (focused && attachedId && unseen.delete(attachedId)) render();
+});
