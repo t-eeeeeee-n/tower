@@ -8,6 +8,7 @@ pub mod memory;
 mod notify;
 pub mod session;
 mod theme;
+mod transcript;
 mod tray;
 mod update;
 
@@ -186,6 +187,11 @@ fn peek_sessions(state: State<'_, App>, lines: usize, known: std::collections::H
 }
 
 #[tauri::command]
+fn read_transcript(state: State<'_, App>, id: String, path: Option<String>, offset: u64) -> Result<transcript::Chunk, String> {
+    transcript::read(state.manager.transcript(&id)?, path, offset)
+}
+
+#[tauri::command]
 fn rename_session(state: State<'_, App>, id: String, name: String) -> Result<(), String> {
     state.manager.rename(&id, &name)
 }
@@ -301,6 +307,7 @@ pub fn run() {
             notify,
             attach_session,
             peek_sessions,
+            read_transcript,
             write_session,
             set_scrollback,
             rename_session,

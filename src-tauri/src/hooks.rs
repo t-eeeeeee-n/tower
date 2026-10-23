@@ -30,7 +30,8 @@ pub struct Endpoint {
 }
 
 /// bash で受信口に POST するコマンド。
-/// 入力待ちのメッセージ表示に使う notification 以外は、hook の入力（コマンドやファイル内容を含む）を送らない。
+/// hook の入力（コマンドやファイル内容を含む）は送らない。例外は入力待ちのメッセージ表示に使う notification と、
+/// 会話の記録ファイルの場所を知るための Claude Code と Codex の SessionStart（中身は ID・パス・起動の種類・モデルなど）。
 /// Tower が落ちていてもエージェントの動作は止めない（--max-time と || true）。
 fn post_bash(event: &str, with_body: bool) -> String {
     let (drain, body) = if with_body { ("", "--data-binary @-") } else { ("cat >/dev/null; ", "-d ''") };
@@ -73,7 +74,7 @@ pub fn write_settings(path: &Path) -> std::io::Result<()> {
     ];
     let mut hooks = serde_json::Map::new();
     for (name, slug) in EVENTS {
-        let mut entry = json!({ "hooks": [{ "type": "command", "command": post_bash(slug, *slug == "notification") }] });
+        let mut entry = json!({ "hooks": [{ "type": "command", "command": post_bash(slug, matches!(*slug, "notification" | "session_start")) }] });
         if *name == "PreToolUse" {
             entry["matcher"] = json!("*");
         }
@@ -104,8 +105,9 @@ pub fn codex_profile() -> String {
         let timeout = if matches!(*name, "SessionEnd" | "Interrupt") { 3 } else { 10 };
         out.push_str(&format!("\n[[hooks.{name}]]\n[[hooks.{name}.hooks]]\ntype = \"command\"\ntimeout = {timeout}\n"));
         // bash 版は '' を含むので、一重引用符を含められる複数行リテラル文字列にする
-        out.push_str(&format!("command = '''{}'''\n", post_bash(slug, false)));
-        out.push_str(&format!("commandWindows = '{}'\n", post_powershell(slug, false)));
+        let with_body = *slug == "session_start";
+        out.push_str(&format!("command = '''{}'''\n", post_bash(slug, with_body)));
+        out.push_str(&format!("commandWindows = '{}'\n", post_powershell(slug, with_body)));
     }
     out.push_str(CODEX_END);
     out.push('\n');
@@ -274,6 +276,11 @@ pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: App
                         manager.apply_hook(&app, &parts[1], "notification", message);
                     }
                 } else {
+                    if parts[2] == "session_start" {
+                        if let Some(path) = crate::transcript::path_from_hook(&body) {
+                            manager.set_transcript(&parts[1], path);
+                        }
+                    }
                     manager.apply_hook(&app, &parts[1], &parts[2], None);
                 }
             }

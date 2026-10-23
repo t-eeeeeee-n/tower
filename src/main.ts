@@ -9,6 +9,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import { createFilesPanel } from "./files";
+import { createTranscriptPanel, TRANSCRIPT_AGENTS } from "./transcript";
 import { createTemplates } from "./templates";
 import { createSettings } from "./settings";
 import { createMarks, MARK_COLORS, type MarkColor } from "./marks";
@@ -88,6 +89,62 @@ const STATUS_LABEL: Record<Status, string> = {
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const appWindow = getCurrentWindow();
 const files = createFilesPanel((e) => showError(e));
+// 入力欄の文字は貼り付けとして入れてから Enter を送る（貼り付けの中の改行では送信されない）。
+// 終わりの印（ESC[201~）が中に混ざると後ろが打ち込んだ文字になるので、ESC は取り除く
+const log = createTranscriptPanel(
+  (e) => showError(e),
+  async (text) => {
+    const id = attachedId;
+    if (!id || sessions.get(id)?.status !== "idle") throw new Error("指示待ちのときだけ送れます");
+    const body = text.replace(/\x1b/g, "").replace(/\r?\n/g, "\r");
+    await invoke("write_session", { id, data: `\x1b[200~${body}\x1b[201~` });
+    // 貼り付けと同じ書き込みに Enter を続けると、貼り付けの一部として扱われることがある
+    await new Promise((r) => setTimeout(r, 80));
+    await invoke("write_session", { id, data: "\r" });
+  },
+  () => attachedId && invoke("write_session", { id: attachedId, data: "\x1b" }).catch(showError),
+);
+
+// 許可の確認や選択肢はターミナルにしか出ないので、入力待ちになったら作業が再開するまでターミナルに戻す
+let preferLog = false;
+try {
+  preferLog = localStorage.getItem("logOpen") === "1";
+} catch {
+  /* 読めなければターミナル */
+}
+let termUntilRunning = false;
+
+function applyLogView() {
+  const agent = attachedId ? sessions.get(attachedId)?.agent : undefined;
+  const supported = !!agent && TRANSCRIPT_AGENTS.includes(agent);
+  const showLog = supported && preferLog && !termUntilRunning;
+  $("term-wrap").hidden = showLog;
+  log.show(showLog);
+  $("log-btn").hidden = !supported;
+  $("log-btn").setAttribute("aria-pressed", String(showLog));
+  log.setStatus((attachedId && sessions.get(attachedId)?.status) || "");
+  if (!showLog) fitTerm();
+}
+
+function toggleLogView() {
+  if (!attachedId || view !== "session") return;
+  const showingLog = $("term-wrap").hidden;
+  preferLog = !showingLog;
+  termUntilRunning = false;
+  try {
+    localStorage.setItem("logOpen", preferLog ? "1" : "0");
+  } catch {
+    /* 保存できなくても切り替えは効く */
+  }
+  applyLogView();
+  focusInput();
+}
+
+function focusInput() {
+  if ($("term-wrap").hidden) log.focus();
+  else term.focus();
+}
+
 
 // サイドバーは、たたむと番号と状態のランプだけの細い帯になる（入力待ちに気づけるように、完全には消さない）
 let sidebarCollapsed = false;
@@ -139,8 +196,9 @@ const term = new Terminal({
 const fit = new FitAddon();
 term.loadAddon(fit);
 term.open($("term"));
+// 隠れているターミナルを測ると PTY が極端に小さくされて、エージェントの画面が崩れる
 function fitTerm() {
-  if (!$("work").hidden) fit.fit();
+  if (!$("work").hidden && !$("term-wrap").hidden) fit.fit();
 }
 
 const settings = createSettings(term, fitTerm, (e) => showError(e));
@@ -182,7 +240,9 @@ new ResizeObserver(() => {
 // 一覧のカードへは ESC を取り除いてから送る。中に終わりの印（ESC[201~）があると、そこから後ろが打ち込んだ文字として扱われ、改行で実行されてしまう
 function pasteTo(id: string, text: string) {
   if (!text) return;
-  if (view === "session" && id === attachedId) {
+  if (view === "session" && id === attachedId && $("term-wrap").hidden) {
+    log.insert(text);
+  } else if (view === "session" && id === attachedId) {
     term.paste(text);
     term.focus();
   } else {
@@ -228,6 +288,7 @@ function pasteImage(id: string, ev: ClipboardEvent) {
 }
 
 $("term").addEventListener("paste", (ev) => attachedId && pasteImage(attachedId, ev), true);
+$("log-input").addEventListener("paste", (ev) => attachedId && pasteImage(attachedId, ev));
 
 async function activate(id: string) {
   if (!sessions.has(id)) return;
@@ -243,6 +304,9 @@ async function activate(id: string) {
   }
   attachedId = id;
   files.setSession(id);
+  log.setSession(id, sessions.get(id)!.agent);
+  termUntilRunning = sessions.get(id)!.status === "waiting";
+  applyLogView();
   const token = ++attachToken;
   term.reset();
   fitTerm();
@@ -270,7 +334,7 @@ async function activate(id: string) {
   } finally {
     pending = null;
   }
-  term.focus();
+  focusInput();
 }
 
 // ---------- セッション操作 ----------
@@ -351,6 +415,8 @@ async function closeSession(id: string) {
   if (activeId === id) {
     activeId = null;
     files.setSession(null);
+    log.setSession(null, null);
+    termUntilRunning = false;
     attachToken++;
     term.reset();
     const next = order[Math.min(idx, order.length - 1)];
@@ -1274,21 +1340,32 @@ $("new-btn").onclick = openProjectPicker;
 $("empty-new").onclick = () => openNewDialog();
 $("empty-browse").onclick = () => browseAndOpen();
 $("files-btn").onclick = () => files.toggle();
+$("log-btn").onclick = toggleLogView;
 $("head-name").ondblclick = () => activeId && openRename(activeId);
 
 function insertTemplate() {
   if (view !== "session" || !attachedId) return;
   // 貼り付けとして入れる。エージェントは貼り付けの改行では送信しない
-  templates.pick($("tpl-btn"), (text) => {
-    term.paste(text);
-    term.focus();
-  }, () => term.focus());
+  templates.pick($("tpl-btn"), (text) => attachedId && pasteTo(attachedId, text), focusInput);
 }
 $("tpl-btn").onclick = insertTemplate;
 $("sidebar-toggle").onclick = toggleSidebar;
 $("waiting-jump").onclick = nextWaiting;
 $("overview-btn").onclick = showOverview;
 $("look-btn").onclick = () => settings.open();
+
+// 会話の表示中に入力欄の外で文字を打ったら、入力欄に入れる
+document.addEventListener("keydown", (e) => {
+  if (view !== "session" || !attachedId || !$("term-wrap").hidden) return;
+  if (e.ctrlKey || e.altKey || e.metaKey || e.defaultPrevented) return;
+  if ((e.target as HTMLElement).closest("input, textarea, select, dialog, button")) return;
+  if (e.key.length === 1) {
+    e.preventDefault();
+    log.insert(e.key);
+  } else if (e.key === "Process") {
+    log.focus();
+  }
+});
 
 // ---------- キーボードショートカット ----------
 // キャプチャ段階で拾うので、ターミナルにフォーカスがあっても先に処理される
@@ -1317,6 +1394,8 @@ document.addEventListener(
       toggleSidebar();
     } else if (e.ctrlKey && e.shiftKey && k === "e") {
       files.toggle();
+    } else if (e.ctrlKey && e.shiftKey && k === "l") {
+      toggleLogView();
     } else if (e.ctrlKey && e.shiftKey && k === "w") {
       if (activeId) closeSession(activeId);
     } else if (view === "session" && e.ctrlKey && e.shiftKey && k === "c") {
@@ -1324,7 +1403,7 @@ document.addEventListener(
       if (sel) writeText(sel).catch(showError);
     } else if (view === "session" && e.ctrlKey && e.shiftKey && k === "v") {
       readText()
-        .then((t) => t && attachedId && term.paste(t))
+        .then((t) => t && attachedId && pasteTo(attachedId, t))
         .catch(showError);
     } else {
       handled = false;
@@ -1369,6 +1448,10 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
   Object.assign(s, { status: payload.status, since: payload.since, message: payload.message });
   // また動き出したり入力待ちになったりしたら、終わった印は外す（入力待ちは別の印で目立たせる）
   if (payload.status !== "idle") unseen.delete(s.id);
+  if (payload.id === attachedId) {
+    if (payload.status === "waiting" || payload.status === "running") termUntilRunning = payload.status === "waiting";
+    applyLogView();
+  }
   render();
   files.sessionChanged(payload.id);
   if (!becameWaiting && !finished) return;

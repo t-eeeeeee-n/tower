@@ -132,6 +132,8 @@ pub struct Session {
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     /// hooks のイベントが一度でも届いたか。届くまでは画面から状態を推測する
     hooks_seen: Arc<AtomicBool>,
+    /// Claude Code の会話の記録（JSONL）。SessionStart の hook で届き、/clear や再開のたびに変わる
+    transcript: Mutex<Option<PathBuf>>,
     _job: Option<Job>,
 }
 
@@ -411,6 +413,7 @@ impl Manager {
             master: Mutex::new(pair.master),
             killer: Mutex::new(killer),
             hooks_seen,
+            transcript: Mutex::new(None),
             _job: job,
         });
         let info = session.info();
@@ -493,6 +496,16 @@ impl Manager {
             // s が破棄されると Job のハンドルが閉じられ、子孫プロセスもまとめて終了する
         }
         Ok(())
+    }
+
+    pub fn set_transcript(&self, id: &str, path: PathBuf) {
+        if let Ok(session) = self.get(id) {
+            *session.transcript.lock().unwrap() = Some(path);
+        }
+    }
+
+    pub fn transcript(&self, id: &str) -> Result<Option<PathBuf>, String> {
+        Ok(self.get(id)?.transcript.lock().unwrap().clone())
     }
 
     /// hooks から届いたイベントで状態を更新する

@@ -95,7 +95,7 @@ const markdown = new Marked({
  * Tower の画面は Tauri のコマンド（ターミナルへの書き込みなど）を呼べるので、README などに書かれた HTML を
  * そのまま表示すると、勝手に操作される恐れがある。innerHTML に入れてよいのはこの戻り値だけ。
  */
-function markdownHtml(text: string) {
+export function markdownHtml(text: string) {
   return DOMPurify.sanitize(markdown.parse(text) as string, {
     FORBID_TAGS: [
       "style", "img", "picture", "video", "audio", "source", "track", "iframe", "object", "embed",

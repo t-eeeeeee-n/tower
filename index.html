@@ -35,11 +35,19 @@
           <div class="main-actions">
             <span id="head-status" class="status-text"></span>
             <button id="tpl-btn" class="text-btn" title="テンプレートを入れる（Ctrl+Shift+T）">テンプレート</button>
+            <button id="log-btn" class="text-btn" title="ターミナルと会話の表示を切り替える（Ctrl+Shift+L）" aria-pressed="false" hidden>会話</button>
             <button id="files-btn" class="text-btn" title="ファイル（Ctrl+Shift+E）" aria-pressed="false">ファイル</button>
           </div>
         </header>
         <div id="work" class="work" hidden>
           <div id="term-wrap" class="term-wrap"><div id="term"></div></div>
+          <section id="log" class="log" aria-label="会話" hidden>
+            <div id="log-body" class="log-body"></div>
+            <div class="log-compose">
+              <textarea id="log-input" rows="1" aria-label="指示" spellcheck="false"></textarea>
+              <button id="log-send" class="primary-btn" disabled>送信</button>
+            </div>
+          </section>
           <div id="files-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="ファイルの幅" hidden></div>
           <aside id="files" class="files" aria-label="ファイル" hidden>
             <div class="f-head">
@@ -87,6 +95,7 @@
               <dt>Ctrl+Shift+C / V</dt><dd>コピー / 貼り付け</dd>
               <dt>Ctrl+Shift+W</dt><dd>セッションを閉じる</dd>
               <dt>Ctrl+Shift+T</dt><dd>テンプレートを入れる</dd>
+              <dt>Ctrl+Shift+L</dt><dd>ターミナル / 会話の切り替え</dd>
               <dt>Ctrl+,</dt><dd>設定</dd>
             </dl>
           </div>

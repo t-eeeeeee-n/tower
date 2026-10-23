@@ -278,6 +278,30 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .f-chev { display: inline-block; width: 12px; flex: none; color: var(--faint); font: 11px/1 var(--mono); text-align: center; }
 .f-row[aria-expanded="true"] .f-chev, #f-collapse[aria-expanded="true"] .f-chev { transform: rotate(90deg); }
 
+/* 会話 */
+.log { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; background: var(--ink); }
+.log[hidden] { display: none; }
+.log-body { flex: 1; min-height: 0; overflow: auto; padding: 12px max(8px, calc((100% - 820px) / 2)) 24px; scrollbar-color: var(--line) transparent; user-select: text; }
+#log-btn[hidden] { display: none; }
+.log-compose { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px max(8px, calc((100% - 820px) / 2)) 12px; border-top: 1px solid var(--line); }
+.log-compose textarea { flex: 1; min-width: 0; resize: none; max-height: 200px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; line-height: 1.5; }
+.log-compose textarea:focus { outline: none; border-color: var(--st-running); }
+.log-compose button:disabled { opacity: 0.45; }
+.lg-user { display: flex; justify-content: flex-end; margin: 10px 12px 6px 36px; }
+.lg-user-text { padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: var(--raise-2); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.lg-command { margin: 8px 12px; color: var(--muted); font: 12px var(--mono); }
+.lg-assistant.md-preview { padding: 4px 14px; font-size: 13px; line-height: 1.7; }
+.lg-tool { margin: 2px 12px; border-left: 2px solid var(--line); font: 12px/1.5 var(--mono); }
+.lg-tool summary { display: flex; gap: 8px; padding: 2px 8px; cursor: default; list-style: none; color: var(--muted); white-space: nowrap; }
+.lg-tool summary::-webkit-details-marker { display: none; }
+.lg-tool summary:hover { background: var(--raise); }
+.lg-tool-name { flex: none; color: var(--st-running); font-weight: 600; }
+.lg-tool-arg { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.lg-tool.lg-error { border-left-color: var(--danger); }
+.lg-tool.lg-error .lg-tool-name { color: var(--danger); }
+.lg-result { margin: 2px 0 6px 8px; padding: 6px 8px; max-height: 240px; overflow: auto; background: var(--ink); color: var(--muted); font: 11.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+pre.lg-result.lg-error { color: var(--danger); }
+
 /* Markdown のプレビュー */
 .md-preview { padding: 14px 20px 28px; max-width: 860px; font-size: 13.5px; line-height: 1.75; color: var(--text); user-select: text; overflow-wrap: anywhere; }
 .md-preview > :first-child { margin-top: 0; }
