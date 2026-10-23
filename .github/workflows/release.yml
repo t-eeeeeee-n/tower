@@ -1,7 +1,8 @@
 name: Release
 
-# v0.2.0 のようなタグを push すると、インストーラを作って下書きのリリースに載せる。
-# 下書きなので、中身を確かめてから GitHub の画面で公開する
+# v0.2.0 のようなタグを push すると、テストしてからインストーラを作り、リリースとして公開する。
+# 下書きにしないのは、自動更新が無く使う人もまだ少ないうちは、出来の悪い版を出しても消すか次の版で直せば済むため。
+# 自動更新を入れたり広く配り始めたりしたら、プレリリースで出して試してから正式版に上げる形に戻す
 on:
   push:
     tags: ["v*"]
@@ -53,5 +54,5 @@ jobs:
             Windows 用のインストーラです。`Tower_*_x64-setup.exe`（NSIS）か `Tower_*_x64_en-US.msi` を使ってください。
             コード署名はしていないので、初回は Windows の SmartScreen に警告されます（「詳細情報」→「実行」で起動できます）。
           generateReleaseNotes: true
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false

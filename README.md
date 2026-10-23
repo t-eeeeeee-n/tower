@@ -40,7 +40,7 @@ npm run tauri build
 
 ### リリース（GitHub Actions）
 
-`package.json`・`src-tauri/tauri.conf.json`・`src-tauri/Cargo.toml` の version を揃えて上げ、同じ番号のタグを push すると、GitHub Actions がテストしてからインストーラを作り、下書きのリリースに載せます（`.github/workflows/release.yml`）。タグと version が違うときは止まります。下書きの中身を確かめてから、GitHub の画面で公開してください。
+`package.json`・`src-tauri/tauri.conf.json`・`src-tauri/Cargo.toml` の version を揃えて上げ、同じ番号のタグを push すると、GitHub Actions がテストしてからインストーラを作り、リリースとして公開します（`.github/workflows/release.yml`）。タグと version が違うときや、テストが通らないときは止まります。
 
 ```bash
 git tag v0.2.0
