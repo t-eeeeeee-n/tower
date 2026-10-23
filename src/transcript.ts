@@ -162,6 +162,13 @@ export function createTranscriptPanel(
     }
   }
 
+  // リンクを開くと Tower の画面そのものが移ってしまうので、ファイルのプレビューと同じく開かない
+  for (const type of ["click", "auxclick"]) {
+    body.addEventListener(type, (ev) => {
+      if ((ev.target as HTMLElement).closest("a")) ev.preventDefault();
+    });
+  }
+
   input.addEventListener("input", () => {
     fitInput();
     applyStatus();
