@@ -153,6 +153,8 @@ term.onData((data) => {
 // Claude Code・Codex・Antigravity CLI はこれを入力欄の改行として扱い、bash では何も起きない。
 // ConPTY の win32-input-mode で Shift+Enter のキーイベントを送る方法は、Claude Code が Enter として扱い送信してしまう。
 term.attachCustomKeyEventHandler((e) => {
+  // xterm.js は Ctrl+V を ^V として送り、既定の動作を止めるので paste イベントが起きない
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "v") return false;
   if (e.key !== "Enter" || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return true;
   if (e.type === "keydown" && attachedId) {
     invoke("write_session", { id: attachedId, data: "\x1b\r" }).catch(showError);
