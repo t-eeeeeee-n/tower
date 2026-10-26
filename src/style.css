@@ -388,6 +388,8 @@ pre.lg-result.lg-error { color: var(--danger); }
   align-items: start;
   gap: 10px;
   scrollbar-color: var(--line) transparent;
+  /* カードの高さを、この欄の高さ（cqh）から決めるため */
+  container-type: size;
 }
 .card {
   display: flex; flex-direction: column;
@@ -398,8 +400,9 @@ pre.lg-result.lg-error { color: var(--danger); }
   cursor: pointer;
   position: relative;
 }
-/* 高さを固定して、中身が伸び縮みしてもカードの並びが動かないようにする（動くとスクロールしたい場所がずれる） */
-.card { height: 540px; }
+/* 高さを固定して、中身が伸び縮みしてもカードの並びが動かないようにする（動くとスクロールしたい場所がずれる）。
+   2 段がちょうど一覧に収まる高さにする。窓が低いときは、読める高さを保ってスクロールさせる */
+.card { height: max(260px, calc((100cqh - 10px) / 2)); }
 .card:hover { border-color: var(--raise-2); }
 .card[data-status="waiting"] { border-color: var(--st-waiting); }
 .card[data-status="exited"] { opacity: 0.55; }
