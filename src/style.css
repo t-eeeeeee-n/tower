@@ -281,7 +281,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
 /* 会話 */
 .log { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; background: var(--ink); }
 .log[hidden] { display: none; }
-.log-body { flex: 1; min-height: 0; overflow: auto; padding: 12px max(8px, calc((100% - 820px) / 2)) 24px; scrollbar-color: var(--line) transparent; user-select: text; }
+.log-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; padding: 12px max(8px, calc((100% - 820px) / 2)) 24px; scrollbar-color: var(--line) transparent; user-select: text; }
+/* 会話が少ないとき（/clear の直後など）は、入力欄のすぐ上に寄せる。justify-content: flex-end だと、あふれたときに上の方へスクロールできなくなる */
+.log-body > * { flex-shrink: 0; }
+.log-body > :first-child { margin-top: auto; }
 #log-btn[hidden] { display: none; }
 .log-compose { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px max(8px, calc((100% - 820px) / 2)) 12px; border-top: 1px solid var(--line); }
 .log-compose textarea { flex: 1; min-width: 0; resize: none; max-height: 200px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; line-height: 1.5; }
