@@ -18,9 +18,14 @@ use tauri::{AppHandle, Runtime};
 
 use crate::session::Manager;
 
-/// 入力待ちとして扱う通知の種類。Claude Code と Copilot CLI の notification_type に共通する名前と、
-/// Claude Code の一定時間入力が無いときの通知（idle_prompt）。種類の無い通知は入力待ちとみなす。
-const WAITING_TYPES: &[&str] = &["permission_prompt", "elicitation_dialog", "idle_prompt"];
+/// 入力待ちとして扱う通知の種類。Claude Code と Copilot CLI の notification_type に共通する名前。
+/// 種類の無い通知は入力待ちとみなす。
+const WAITING_TYPES: &[&str] = &["permission_prompt", "elicitation_dialog"];
+
+/// Claude Code が、指示待ちのまま一定時間（約 60 秒）たったときに出す通知。
+/// 答えを求めているわけではないので入力待ちにはしない（終わった作業に入力待ちの印が付いてしまう）。
+/// Stop が届かずに作業中のまま残ったセッションを、指示待ちに戻すのにだけ使う
+const IDLE_TYPE: &str = "idle_prompt";
 
 /// セッションに渡す受信口の情報
 #[derive(Clone)]
@@ -246,14 +251,20 @@ fn authorized(req: &tiny_http::Request, endpoint: &Endpoint) -> bool {
     header(req, "Authorization").is_some_and(|v| same(v, &expected))
 }
 
-/// notification の中身から、入力待ちとして扱うかとメッセージを取り出す
-fn read_notification(body: &str) -> (bool, Option<String>) {
-    let Ok(v) = serde_json::from_str::<Value>(body.trim_start_matches('\u{feff}')) else { return (true, None) };
-    let waiting = v
-        .get("notification_type")
-        .and_then(|t| t.as_str())
-        .is_none_or(|t| WAITING_TYPES.contains(&t));
-    (waiting, v.get("message").and_then(|m| m.as_str()).map(String::from))
+#[derive(Debug, PartialEq)]
+enum Notice {
+    Waiting(Option<String>),
+    Idle,
+    Other,
+}
+
+fn read_notification(body: &str) -> Notice {
+    let Ok(v) = serde_json::from_str::<Value>(body.trim_start_matches('\u{feff}')) else { return Notice::Waiting(None) };
+    match v.get("notification_type").and_then(|t| t.as_str()) {
+        Some(IDLE_TYPE) => Notice::Idle,
+        Some(t) if !WAITING_TYPES.contains(&t) => Notice::Other,
+        _ => Notice::Waiting(v.get("message").and_then(|m| m.as_str()).map(String::from)),
+    }
 }
 
 pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: AppHandle<R>, manager: Arc<Manager>) {
@@ -271,9 +282,10 @@ pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: App
             let body = String::from_utf8_lossy(&raw);
             if parts.len() == 3 && parts[0] == "hook" {
                 if parts[2] == "notification" {
-                    let (waiting, message) = read_notification(&body);
-                    if waiting {
-                        manager.apply_hook(&app, &parts[1], "notification", message);
+                    match read_notification(&body) {
+                        Notice::Waiting(message) => manager.apply_hook(&app, &parts[1], "notification", message),
+                        Notice::Idle => manager.apply_hook(&app, &parts[1], "idle_prompt", None),
+                        Notice::Other => {}
                     }
                 } else {
                     if parts[2] == "session_start" {
@@ -295,14 +307,15 @@ mod tests {
 
     #[test]
     fn notification_types() {
-        assert_eq!(read_notification(r#"{"message":"m"}"#), (true, Some("m".into())));
-        assert!(read_notification(r#"{"notification_type":"permission_prompt"}"#).0);
-        assert!(!read_notification(r#"{"notification_type":"shell_completed"}"#).0);
-        assert!(!read_notification(r#"{"notification_type":"agent_idle"}"#).0);
+        assert_eq!(read_notification(r#"{"message":"m"}"#), Notice::Waiting(Some("m".into())));
+        assert_eq!(read_notification(r#"{"notification_type":"permission_prompt"}"#), Notice::Waiting(None));
+        assert_eq!(read_notification(r#"{"notification_type":"idle_prompt","message":"m"}"#), Notice::Idle);
+        assert_eq!(read_notification(r#"{"notification_type":"shell_completed"}"#), Notice::Other);
+        assert_eq!(read_notification(r#"{"notification_type":"agent_idle"}"#), Notice::Other);
         // Codex の PermissionRequest は中身を送らない
-        assert_eq!(read_notification(""), (true, None));
+        assert_eq!(read_notification(""), Notice::Waiting(None));
         // BOM 付きでも読める
-        assert!(!read_notification("\u{feff}{\"notification_type\":\"agent_idle\"}").0);
+        assert_eq!(read_notification("\u{feff}{\"notification_type\":\"agent_idle\"}"), Notice::Other);
     }
 
     #[test]
