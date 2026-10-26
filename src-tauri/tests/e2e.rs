@@ -68,7 +68,7 @@ fn session_end_to_end() {
     // 一覧画面用の末尾取得にも同じ出力が含まれる
     let peek = manager.peek(5, &Default::default());
     assert!(
-        peek.iter().any(|p| p.id == id && p.lines.iter().flatten().any(|l| l.contains(&format!("こんにちは-{id}")))),
+        peek.iter().any(|p| p.id == id && p.lines.iter().flatten().any(|l| l.iter().map(|s| s.t.as_str()).collect::<String>().contains(&format!("こんにちは-{id}")))),
         "peek に無い"
     );
     // 画面が変わっていなければ、行は送り直さない（プロンプトの出力などが落ち着くまで待つ）
@@ -125,7 +125,7 @@ fn session_end_to_end() {
         wait_until(15000, || manager
             .peek(10, &Default::default())
             .iter()
-            .any(|p| p.id == bg && p.lines.iter().flatten().any(|l| l.contains(&format!("裏で動作-{bg}"))))),
+            .any(|p| p.id == bg && p.lines.iter().flatten().any(|l| l.iter().map(|s| s.t.as_str()).collect::<String>().contains(&format!("裏で動作-{bg}"))))),
         "表示していないセッションが動かない"
     );
     manager.kill(&bg).unwrap();
