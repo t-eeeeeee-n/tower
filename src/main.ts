@@ -745,7 +745,10 @@ const KEY_SEQ: Record<string, string> = {
 
 // 文字の入力は textarea の input / compositionend で受ける（日本語入力の変換を通すため）。ここでは文字にならないキーだけを送る
 function keyData(ev: KeyboardEvent) {
-  if (ev.altKey || ev.metaKey || ev.isComposing) return null;
+  if (ev.isComposing || ev.metaKey) return null;
+  // ターミナルと同じく ESC+CR にして、入力欄の改行にする（Shift+Enter も同じ）
+  if (ev.altKey && !ev.ctrlKey && ev.key === "Enter") return "\x1b\r";
+  if (ev.altKey) return null;
   if (ev.ctrlKey) {
     // Ctrl+V は paste イベントで受ける
     if (ev.shiftKey || !/^[a-z]$/i.test(ev.key) || ev.key.toLowerCase() === "v") return null;

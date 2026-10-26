@@ -169,12 +169,27 @@ export function createTranscriptPanel(
     });
   }
 
+  function insertText(text: string) {
+    const { selectionStart: s, selectionEnd: e, value } = input;
+    input.value = value.slice(0, s) + text + value.slice(e);
+    input.selectionStart = input.selectionEnd = s + text.length;
+    fitInput();
+    applyStatus();
+  }
+
   input.addEventListener("input", () => {
     fitInput();
     applyStatus();
   });
   input.addEventListener("keydown", (e) => {
-    if (e.isComposing || e.ctrlKey || e.altKey || e.metaKey) return;
+    if (e.isComposing || e.ctrlKey || e.metaKey) return;
+    // ターミナルと同じく Alt+Enter でも改行する（textarea は Alt+Enter では改行しない）
+    if (e.altKey && e.key === "Enter") {
+      e.preventDefault();
+      insertText("\n");
+      return;
+    }
+    if (e.altKey) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       submit();
@@ -198,11 +213,7 @@ export function createTranscriptPanel(
       input.focus();
     },
     insert(text: string) {
-      const { selectionStart: s, selectionEnd: e, value } = input;
-      input.value = value.slice(0, s) + text + value.slice(e);
-      input.selectionStart = input.selectionEnd = s + text.length;
-      fitInput();
-      applyStatus();
+      insertText(text);
       input.focus();
     },
     show(on: boolean) {
