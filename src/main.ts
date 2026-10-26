@@ -471,39 +471,60 @@ function moveSession(id: string, target: string, after: boolean) {
   render();
 }
 
+// HTML のドラッグ＆ドロップ（draggable）は使わず、マウスの動きを追って並べ替える。
+// Tauri がファイルのドロップを受け取るために WebView2 のドロップの処理を差し替えるので、Windows では
+// 画面の中のドラッグ＆ドロップが効かない（tauri-utils の dragDropEnabled の説明）。ファイルのドロップは残したい。
 // grid は一覧のカード。横に並んでいるときは左右どちらの半分に、1 列のときは上下どちらの半分に落としたかで前後を決める
+const DRAG_START_PX = 5;
+let draggedAt = 0;
+// 離したときに続けて届くクリックで、セッションを開いてしまわないようにする
+const justDragged = () => Date.now() - draggedAt < 300;
+
 function draggable(li: HTMLElement, id: string, handle = li, grid = false) {
-  handle.draggable = true;
-  handle.ondragstart = (ev) => {
-    dragId = id;
-    ev.dataTransfer!.effectAllowed = "move";
-    ev.dataTransfer!.setData("text/plain", sessions.get(id)?.name ?? "");
-    if (handle !== li) ev.dataTransfer!.setDragImage(li, ev.offsetX, ev.offsetY);
-    li.classList.add("dragging");
-  };
-  handle.ondragend = () => {
-    dragId = null;
-    li.classList.remove("dragging");
-    render();
-  };
-  li.ondragover = (ev) => {
-    if (!dragId || dragId === id) return;
-    ev.preventDefault();
-    const r = li.getBoundingClientRect();
-    const horizontal = grid && getComputedStyle(li.parentElement!).gridTemplateColumns.split(" ").length > 1;
-    const after = horizontal ? ev.clientX > r.left + r.width / 2 : ev.clientY > r.top + r.height / 2;
-    li.classList.toggle("drop-x", horizontal);
-    li.classList.toggle("drop-before", !after);
-    li.classList.toggle("drop-after", after);
-  };
-  li.ondragleave = () => li.classList.remove("drop-before", "drop-after");
-  li.ondrop = (ev) => {
-    ev.preventDefault();
-    const from = dragId;
-    dragId = null;
-    const after = li.classList.contains("drop-after");
-    li.classList.remove("drop-before", "drop-after");
-    if (from) moveSession(from, id, after);
+  li.dataset.id = id;
+  const selector = grid ? ".card" : ".session";
+  handle.onpointerdown = (down) => {
+    if (down.button !== 0 || (down.target as HTMLElement).closest("button, input, textarea")) return;
+    // つかんだまま動かすと文字が選ばれてしまうので、選択の始まりを止める（クリックとダブルクリックは届く）
+    down.preventDefault();
+    let target: HTMLElement | null = null;
+    const clear = () => target?.classList.remove("drop-before", "drop-after", "drop-x");
+    const move = (ev: PointerEvent) => {
+      if (!dragId) {
+        if (Math.hypot(ev.clientX - down.clientX, ev.clientY - down.clientY) < DRAG_START_PX) return;
+        dragId = id;
+        li.classList.add("dragging");
+        document.body.classList.add("reordering");
+      }
+      const over = document.elementFromPoint(ev.clientX, ev.clientY)?.closest<HTMLElement>(selector) ?? null;
+      if (over !== target) clear();
+      target = over && over.dataset.id !== id ? over : null;
+      if (!target) return;
+      const r = target.getBoundingClientRect();
+      const horizontal = grid && getComputedStyle(target.parentElement!).gridTemplateColumns.split(" ").length > 1;
+      const after = horizontal ? ev.clientX > r.left + r.width / 2 : ev.clientY > r.top + r.height / 2;
+      target.classList.toggle("drop-x", horizontal);
+      target.classList.toggle("drop-before", !after);
+      target.classList.toggle("drop-after", after);
+    };
+    const end = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      if (!dragId) return;
+      const to = ev.type === "pointerup" ? target : null;
+      const after = !!to?.classList.contains("drop-after");
+      clear();
+      dragId = null;
+      li.classList.remove("dragging");
+      document.body.classList.remove("reordering");
+      draggedAt = Date.now();
+      if (to?.dataset.id) moveSession(id, to.dataset.id, after);
+      else render();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
   };
 }
 
@@ -630,7 +651,7 @@ function render() {
         closeSession(id);
       };
       li.append(close);
-      li.onclick = () => activate(id);
+      li.onclick = () => !justDragged() && activate(id);
       return li;
     }),
   );
@@ -824,7 +845,7 @@ function makeCard(id: string) {
   card.onclick = (ev) => {
     const target = ev.target as HTMLElement;
     // 文章を選んでいるときは、選び終わりのクリックで切り替えない
-    if (target.closest("button") || getSelection()?.toString()) return;
+    if (justDragged() || target.closest("button") || getSelection()?.toString()) return;
     if (target.closest(".c-tail")) {
       if (!kbd.disabled) kbd.focus({ preventScroll: true });
       return;

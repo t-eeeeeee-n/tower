@@ -592,6 +592,7 @@ input:not([type]):focus, input[type="number"]:focus { border-color: var(--st-run
 
 /* 並べ替え */
 .session.dragging { opacity: 0.45; }
+body.reordering, body.reordering * { cursor: grabbing !important; user-select: none; }
 .session.drop-before { box-shadow: inset 0 2px 0 var(--st-running); }
 .session.drop-after { box-shadow: inset 0 -2px 0 var(--st-running); }
 
