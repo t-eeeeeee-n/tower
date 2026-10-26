@@ -62,9 +62,30 @@ struct StatusEvent {
 pub struct Peek {
     pub id: String,
     /// 呼び出し側が知っている seq から画面が変わっていなければ None（毎秒送り直さないため）
-    pub lines: Option<Vec<String>>,
+    pub lines: Option<Vec<Vec<Span>>>,
+    /// エージェントがカーソルを隠しているか（隠していても、日本語入力の変換中の文字を出す位置には使う）
+    pub cursor_hidden: bool,
     pub seq: u64,
 }
+
+/// 画面の 1 行のうち、同じ色と飾りが続く文字のまとまり。
+/// 色は 0 が既定、1〜256 が 256 色の番号 + 1、`RGB_FLAG` 付きが 24 ビット色
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Span {
+    pub t: String,
+    pub fg: u32,
+    pub bg: u32,
+    /// BOLD などの組み合わせ
+    pub f: u8,
+}
+
+pub const RGB_FLAG: u32 = 1 << 24;
+pub const BOLD: u8 = 1;
+pub const DIM: u8 = 2;
+pub const ITALIC: u8 = 4;
+pub const UNDERLINE: u8 = 8;
+pub const INVERSE: u8 = 16;
+pub const CURSOR: u8 = 32;
 
 /// 仮想端末に残すスクロール履歴の行数。設定で変えられ、変えた値は新しく作るセッションから使う
 /// （vt100 の履歴の大きさは作るときに決まる）。フロントは xterm.js の scrollback をこれより大きくする
@@ -456,7 +477,7 @@ impl Manager {
                 let mut t = s.term.lock().unwrap();
                 let seq = t.seq;
                 let lines = (known.get(&s.id) != Some(&seq)).then(|| tail_lines(&mut t.parser, max_lines));
-                Peek { id: s.id.clone(), lines, seq }
+                Peek { id: s.id.clone(), lines, cursor_hidden: t.parser.screen().hide_cursor(), seq }
             })
             .collect()
     }
@@ -546,22 +567,66 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// スクロール履歴と画面を続けた、最後の max 行（文字だけ）。最後の空行は除く
-fn tail_lines(parser: &mut vt100::Parser, max: usize) -> Vec<String> {
+fn color_code(c: vt100::Color) -> u32 {
+    match c {
+        vt100::Color::Default => 0,
+        vt100::Color::Idx(i) => u32::from(i) + 1,
+        vt100::Color::Rgb(r, g, b) => RGB_FLAG | u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b),
+    }
+}
+
+/// 表示中の画面（スクロール位置を含む）の 1 行。cursor_col はカーソルのある列
+fn row_spans(screen: &vt100::Screen, row: u16, cols: u16, cursor_col: Option<u16>) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::new();
+    for col in 0..cols {
+        let Some(cell) = screen.cell(row, col) else { break };
+        if cell.is_wide_continuation() {
+            continue;
+        }
+        let flags = [(cell.bold(), BOLD), (cell.dim(), DIM), (cell.italic(), ITALIC), (cell.underline(), UNDERLINE), (cell.inverse(), INVERSE), (cursor_col == Some(col), CURSOR)]
+            .iter()
+            .fold(0, |f, &(on, bit)| if on { f | bit } else { f });
+        let (fg, bg) = (color_code(cell.fgcolor()), color_code(cell.bgcolor()));
+        let text = if cell.has_contents() { cell.contents() } else { " " };
+        match out.last_mut() {
+            Some(s) if s.fg == fg && s.bg == bg && s.f == flags && flags & CURSOR == 0 => s.t.push_str(text),
+            _ => out.push(Span { t: text.to_string(), fg, bg, f: flags }),
+        }
+    }
+    // 行末の空白は、背景色や反転・カーソルが無ければ見えないので送らない
+    while let Some(last) = out.last_mut() {
+        if last.bg != 0 || last.f & (INVERSE | UNDERLINE | CURSOR) != 0 {
+            break;
+        }
+        let kept = last.t.trim_end().len();
+        if kept > 0 {
+            last.t.truncate(kept);
+            break;
+        }
+        out.pop();
+    }
+    out
+}
+
+/// スクロール履歴と画面を続けた、最後の max 行。最後の空行は除く（カーソルのある行までは残す）
+fn tail_lines(parser: &mut vt100::Parser, max: usize) -> Vec<Vec<Span>> {
     let screen = parser.screen_mut();
     let (rows, cols) = screen.size();
+    let (rows, cols) = (rows.get(), cols.get());
     let mut out = Vec::new();
     // 必要な分だけ履歴を画面の高さずつめくる（history と同じ取り出し方）
     let mut offset = screen.scrollback_len().min(max);
     while offset > 0 {
         screen.set_scrollback(offset);
-        let take = offset.min(usize::from(rows.get()));
-        out.extend(screen.rows(0, cols.get()).take(take).map(|r| r.trim_end().to_string()));
+        let take = offset.min(usize::from(rows));
+        out.extend((0..take as u16).map(|r| row_spans(screen, r, cols, None)));
         offset -= take;
     }
     screen.set_scrollback(0);
-    out.extend(screen.rows(0, cols.get()).map(|r| r.trim_end().to_string()));
-    while out.last().is_some_and(|r| r.is_empty()) {
+    let (cursor_row, cursor_col) = screen.cursor_position();
+    let cursor_line = out.len() + usize::from(cursor_row);
+    out.extend((0..rows).map(|r| row_spans(screen, r, cols, (r == cursor_row).then_some(cursor_col))));
+    while out.len() > cursor_line + 1 && out.last().is_some_and(|r| r.is_empty()) {
         out.pop();
     }
     let start = out.len().saturating_sub(max);
@@ -605,7 +670,7 @@ fn resize_locked(session: &Session, t: &mut Term, cols: u16, rows: u16) {
 
 #[cfg(test)]
 mod tests {
-    use super::{history, tail_lines, Term};
+    use super::{history, tail_lines, Span, Term, CURSOR, DIM};
     use std::num::NonZero;
 
     #[test]
@@ -621,15 +686,35 @@ mod tests {
         assert_eq!(p.screen().scrollback(), 0);
     }
 
+    fn text(lines: Vec<Vec<Span>>) -> Vec<String> {
+        lines.into_iter().map(|l| l.into_iter().map(|s| s.t).collect()).collect()
+    }
+
     #[test]
     fn tail_includes_scrollback() {
         let mut p = vt100::Parser::new(NonZero::new(3).unwrap(), NonZero::new(20).unwrap(), 100);
         for i in 1..=7 {
             p.process(format!("line{i}\r\n").as_bytes());
         }
-        assert_eq!(tail_lines(&mut p, 100), ["line1", "line2", "line3", "line4", "line5", "line6", "line7"]);
-        assert_eq!(tail_lines(&mut p, 4), ["line4", "line5", "line6", "line7"]);
+        // 最後の行はカーソルだけの行
+        assert_eq!(text(tail_lines(&mut p, 100)), ["line1", "line2", "line3", "line4", "line5", "line6", "line7", " "]);
+        assert_eq!(text(tail_lines(&mut p, 4)), ["line5", "line6", "line7", " "]);
         assert_eq!(p.screen().scrollback(), 0);
+    }
+
+    #[test]
+    fn tail_keeps_colors_and_marks_the_cursor() {
+        let mut p = vt100::Parser::new(NonZero::new(3).unwrap(), NonZero::new(20).unwrap(), 0);
+        p.process("\x1b[31mred\x1b[m \x1b[2mhint\x1b[m\r\n> 日本".as_bytes());
+        let lines = tail_lines(&mut p, 10);
+        assert_eq!(lines[0], [
+            Span { t: "red".into(), fg: 2, bg: 0, f: 0 },
+            Span { t: " ".into(), fg: 0, bg: 0, f: 0 },
+            Span { t: "hint".into(), fg: 0, bg: 0, f: DIM },
+        ]);
+        // 全角文字の 2 マス目は飛ばし、カーソルはその次のマスに付く
+        assert_eq!(lines[1], [Span { t: "> 日本".into(), fg: 0, bg: 0, f: 0 }, Span { t: " ".into(), fg: 0, bg: 0, f: CURSOR }]);
+        assert_eq!(lines.len(), 2);
     }
 
 

@@ -49,10 +49,19 @@ interface WorktreeState {
 interface Session extends SessionInfo {
   bytes?: number;
 }
+/** 画面の 1 行のうち、同じ色と飾りが続く文字のまとまり（session.rs の Span） */
+interface Span {
+  t: string;
+  /** 0 が既定、1〜256 が 256 色の番号 + 1、RGB_FLAG 付きが 24 ビット色 */
+  fg: number;
+  bg: number;
+  f: number;
+}
 interface Peek {
   id: string;
   /** 前回から画面が変わっていなければ null */
-  lines: string[] | null;
+  lines: Span[][] | null;
+  cursor_hidden: boolean;
   seq: number;
 }
 interface Config {
@@ -730,11 +739,21 @@ function showOverview() {
   if (!peekTimer) pollPeeks();
 }
 
+let peeking = false;
+
+// 打った文字が画面に出るまでの待ちを縮めるため、次の取り込みを前倒しする
+function pokePeeks() {
+  if (view !== "overview" || peeking || !peekTimer) return;
+  clearTimeout(peekTimer);
+  peekTimer = window.setTimeout(pollPeeks, 30);
+}
+
 async function pollPeeks() {
   if (view !== "overview") {
     peekTimer = 0;
     return;
   }
+  peeking = true;
   try {
     // スクロールしてさかのぼれるよう履歴ごと取る。変わっていないセッションの分は送られてこない。
     // 設定で行数が変わったときは、画面が変わっていなくても全部取り直す
@@ -747,14 +766,57 @@ async function pollPeeks() {
   } catch (e) {
     showError(e);
   }
+  peeking = false;
   // 入力中のカードがあるときは、打った文字がすぐ見えるよう短い間隔で取る
   peekTimer = window.setTimeout(pollPeeks, document.querySelector(".card.typing") ? 150 : 1000);
 }
 
-function screenTail(lines: string[], max: number) {
-  const out = lines.map((l) => l.trimEnd());
-  while (out.length && !out[out.length - 1]) out.pop();
-  return out.slice(-max);
+const RGB_FLAG = 1 << 24;
+const [BOLD, DIM, ITALIC, UNDERLINE, INVERSE, CURSOR] = [1, 2, 4, 8, 16, 32];
+const CUBE = [0, 95, 135, 175, 215, 255];
+
+// 16 色はターミナルの配色（settings.ts の --ansi-*）、それ以外は xterm の 256 色の決まりで作る
+function spanColor(c: number): string | null {
+  if (!c) return null;
+  if (c & RGB_FLAG) return `#${(c & 0xffffff).toString(16).padStart(6, "0")}`;
+  const i = c - 1;
+  if (i < 16) return `var(--ansi-${i})`;
+  if (i < 232) {
+    const n = i - 16;
+    return `rgb(${CUBE[Math.floor(n / 36)]},${CUBE[Math.floor(n / 6) % 6]},${CUBE[n % 6]})`;
+  }
+  const v = 8 + (i - 232) * 10;
+  return `rgb(${v},${v},${v})`;
+}
+
+// 日本語入力の変換中の文字。セッションにはまだ送っていないので、画面のカーソルの位置に重ねて見せる
+const imeText = new Map<string, string>();
+
+function renderScreen(lines: Span[][], cursorHidden: boolean, ime: string) {
+  const frag = document.createDocumentFragment();
+  lines.forEach((line, n) => {
+    if (n) frag.append("\n");
+    for (const s of line) {
+      if (s.f & CURSOR && ime) frag.append(el("span", "t-ime", ime));
+      if (!s.fg && !s.bg && !(s.f & ~CURSOR)) {
+        if (s.f & CURSOR && !cursorHidden) frag.append(el("span", "t-cursor", s.t));
+        else frag.append(s.t);
+        continue;
+      }
+      const span = el("span", "", s.t);
+      let [fg, bg] = [spanColor(s.fg), spanColor(s.bg)];
+      if (s.f & INVERSE) [fg, bg] = [bg ?? "var(--term-bg)", fg ?? "var(--term-fg)"];
+      if (fg) span.style.color = fg;
+      if (bg) span.style.background = bg;
+      if (s.f & BOLD) span.style.fontWeight = "700";
+      if (s.f & DIM) span.style.opacity = "0.55";
+      if (s.f & ITALIC) span.style.fontStyle = "italic";
+      if (s.f & UNDERLINE) span.style.textDecoration = "underline";
+      if (s.f & CURSOR && !cursorHidden) span.className = "t-cursor";
+      frag.append(span);
+    }
+  });
+  return frag;
 }
 
 const KEY_SEQ: Record<string, string> = {
@@ -848,13 +910,20 @@ function makeCard(id: string) {
   kbd.setAttribute("aria-label", "セッションへの入力");
   const send = (data: string) => {
     if (!data) return;
-    invoke("write_session", { id, data }).catch(showError);
+    invoke("write_session", { id, data }).then(pokePeeks, showError);
     tail.scrollTop = tail.scrollHeight;
   };
   const flush = () => {
     send(kbd.value);
     kbd.value = "";
   };
+  const showIme = (text: string) => {
+    if (text) imeText.set(id, text);
+    else imeText.delete(id);
+    updateCard(card, sessions.get(id)!);
+  };
+  kbd.addEventListener("compositionupdate", (ev) => showIme(ev.data));
+  kbd.addEventListener("compositionend", () => showIme(""));
   kbd.onkeydown = (ev) => {
     const data = keyData(ev);
     if (data === null) return;
@@ -926,13 +995,14 @@ function updateCard(card: HTMLElement, s: Session) {
   const lines = peek?.lines ?? [];
   const tail = q(".c-tail");
   const max = settings.overviewLines();
-  const text = screenTail(lines, max).join("\n");
+  const ime = imeText.get(s.id) ?? "";
+  const key = `${peek?.seq ?? -1}|${max}|${peek?.cursor_hidden}|${ime}`;
   // さかのぼって読んでいる間は更新を止める。設定の行数を超えると古い行が上から消えて、読んでいる文字がずれるため。
   // いちばん下まで戻すと、次の更新で最新に追いつく
-  const atBottom = !tail.dataset.shown || tail.scrollHeight - tail.scrollTop - tail.clientHeight < 16;
-  if (atBottom && tail.textContent !== text) {
-    tail.textContent = text;
-    tail.dataset.shown = "1";
+  const atBottom = !tail.dataset.key || tail.scrollHeight - tail.scrollTop - tail.clientHeight < 16;
+  if (atBottom && tail.dataset.key !== key) {
+    tail.replaceChildren(renderScreen(lines.slice(-max), !!peek?.cursor_hidden, ime));
+    tail.dataset.key = key;
     tail.scrollTop = tail.scrollHeight;
   }
 

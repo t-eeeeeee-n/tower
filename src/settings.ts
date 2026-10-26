@@ -153,6 +153,10 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
     if (p !== TOWER) for (const [k, v] of Object.entries(uiTokens(p))) root.setProperty(k, v);
     const font = fontStack(settings.font);
     root.setProperty("--mono", font);
+    // 一覧のカードに出すエージェントの画面の色（ターミナルと同じ配色にする）
+    p.ansi.forEach((c, i) => root.setProperty(`--ansi-${i}`, c));
+    root.setProperty("--term-fg", p.fg);
+    root.setProperty("--term-bg", p.bg);
     term.options.theme = xtermTheme(p);
     term.options.fontFamily = font;
     term.options.fontSize = settings.fontSize;

@@ -442,6 +442,9 @@ pre.lg-result.lg-error { color: var(--danger); }
 /* 文字の入力（日本語入力を含む）を受けるためだけの欄。打った文字はセッションの画面に出るので、欄そのものは見せない */
 .c-kbd { position: absolute; left: 0; top: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; resize: none; pointer-events: none; }
 .card.typing .c-tail { outline: 1px solid var(--st-running); cursor: text; }
+/* カーソルは、カードに打ち込んでいるときだけ見せる（全部のカードで光ると目障り） */
+.card.typing .t-cursor { background: var(--term-fg); color: var(--term-bg); }
+.t-ime { color: var(--term-fg); text-decoration: underline; text-underline-offset: 2px; }
 .c-tpl[hidden] { display: none; }
 .c-tpl { flex: none; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--muted); font-size: 12px; }
 .c-tpl:hover { background: var(--raise); color: var(--text); }
