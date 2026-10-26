@@ -113,13 +113,23 @@ function interruptSession(id: string | null) {
   if (id) invoke("write_session", { id, data: "\x1b" }).catch(showError);
 }
 
-const log = createTranscriptPanel(
-  (e) => showError(e),
-  (text) => sendPrompt(attachedId, text),
-  () => interruptSession(attachedId),
-);
+const log = createTranscriptPanel({
+  onError: (e) => showError(e),
+  send: (text) => sendPrompt(attachedId, text),
+  interrupt: () => interruptSession(attachedId),
+  // コマンドの候補はターミナルにしか出ないので、作業が始まるか Ctrl+Shift+L で戻すまでターミナルで打つ
+  onSlash: () => {
+    if (!attachedId) return;
+    termUntilRunning = true;
+    applyLogView();
+    term.focus();
+    invoke("write_session", { id: attachedId, data: "/" }).catch(showError);
+  },
+});
 // 一覧のカードごとの会話の表示（Claude Code と Codex のセッションだけ）
 const cardViews = new Map<string, TranscriptView>();
+// 「/」を打って、コマンドを選ぶ間だけ画面の表示にしているカード
+const slashCards = new Set<string>();
 
 // 許可の確認や選択肢はターミナルにしか出ないので、入力待ちになったら作業が再開するまでターミナルに戻す
 let preferLog = false;
@@ -882,6 +892,18 @@ function makeCardConversation(id: string) {
     onError: showError,
     send: (text) => sendPrompt(id, text),
     interrupt: () => interruptSession(id),
+    // コマンドの候補は画面にしか出ないので、作業が始まるかカードの外へ移るまで画面の表示で打つ
+    onSlash: () => {
+      const card = cards.get(id);
+      const kbd = card?.querySelector<HTMLTextAreaElement>(".c-kbd");
+      if (!card || !kbd) return;
+      slashCards.add(id);
+      // 会話の入力欄を隠す前に移しておく。隠れてフォーカスが外れると、カードの外へ移ったとみなして戻してしまう
+      kbd.disabled = false;
+      kbd.focus({ preventScroll: true });
+      updateCard(card, sessions.get(id)!);
+      invoke("write_session", { id, data: "/" }).then(pokePeeks, showError);
+    },
   });
   tv.setSession(id, agent);
   cardViews.set(id, tv);
@@ -946,7 +968,9 @@ function makeCard(id: string) {
   };
   // 末尾の文章を選ぶとフォーカスはカードに移るので、カードの外に出るまでは入力中のままにする
   card.addEventListener("focusout", (ev) => {
-    if (!card.contains(ev.relatedTarget as Node | null)) card.classList.remove("typing");
+    if (card.contains(ev.relatedTarget as Node | null)) return;
+    card.classList.remove("typing");
+    if (slashCards.delete(id)) updateCard(card, sessions.get(id)!);
   });
   const tpl = el("button", "c-tpl", "テンプレート");
   tpl.type = "button";
@@ -1008,7 +1032,7 @@ function updateCard(card: HTMLElement, s: Session) {
 
   const exited = s.status === "exited";
   const conv = cardViews.get(s.id);
-  const conversing = !!conv && s.status !== "waiting";
+  const conversing = !!conv && s.status !== "waiting" && !slashCards.has(s.id);
   if (conv) {
     conv.setStatus(s.status);
     conv.show(conversing);
@@ -1518,7 +1542,7 @@ document.addEventListener("keydown", (e) => {
   if ((e.target as HTMLElement).closest("input, textarea, select, dialog, button")) return;
   if (e.key.length === 1) {
     e.preventDefault();
-    log.insert(e.key);
+    log.typed(e.key);
   } else if (e.key === "Process") {
     log.focus();
   }
@@ -1605,6 +1629,7 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
   Object.assign(s, { status: payload.status, since: payload.since, message: payload.message });
   // また動き出したり入力待ちになったりしたら、終わった印は外す（入力待ちは別の印で目立たせる）
   if (payload.status !== "idle") unseen.delete(s.id);
+  if (payload.status === "running") slashCards.delete(payload.id);
   if (payload.id === attachedId) {
     if (payload.status === "waiting" || payload.status === "running") termUntilRunning = payload.status === "waiting";
     applyLogView();

@@ -53,6 +53,11 @@ export interface TranscriptViewOptions {
    */
   send: (text: string) => Promise<void>;
   interrupt: () => void;
+  /**
+   * 指示待ちで入力欄が空のときに「/」を打った。コマンドの候補はエージェントの画面にしか出ないので、
+   * 呼び出し側は画面の表示に切り替えて、そこから先の入力をエージェントにそのまま渡す
+   */
+  onSlash: () => void;
 }
 
 export function createTranscriptView(o: TranscriptViewOptions) {
@@ -189,6 +194,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     fitInput();
     applyStatus();
   });
+  const startsSlash = () => status === "idle" && !input.value;
   input.addEventListener("keydown", (e) => {
     if (e.isComposing || e.ctrlKey || e.metaKey) return;
     // ターミナルと同じく Alt+Enter でも改行する（textarea は Alt+Enter では改行しない）
@@ -198,7 +204,10 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       return;
     }
     if (e.altKey) return;
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "/" && startsSlash()) {
+      e.preventDefault();
+      o.onSlash();
+    } else if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       submit();
     } else if (e.key === "Escape" && status === "running") {
@@ -219,6 +228,12 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       applyStatus();
     },
     focus() {
+      input.focus({ preventScroll: true });
+    },
+    /** 入力欄の外で打った文字を、入力欄で打ったのと同じように扱う */
+    typed(ch: string) {
+      if (ch === "/" && startsSlash()) return o.onSlash();
+      insertText(ch);
       input.focus({ preventScroll: true });
     },
     insert(text: string) {
@@ -257,9 +272,7 @@ export type TranscriptView = ReturnType<typeof createTranscriptView>;
 
 /** セッション画面で、ターミナルの代わりに出す会話の表示 */
 export function createTranscriptPanel(
-  onError: (e: unknown) => void,
-  send: (text: string) => Promise<void>,
-  interrupt: () => void,
+  o: Pick<TranscriptViewOptions, "onError" | "send" | "interrupt" | "onSlash">,
 ) {
   return createTranscriptView({
     root: $("log"),
@@ -269,8 +282,6 @@ export function createTranscriptPanel(
     maxNodes: 600,
     maxInputPx: 200,
     visible: () => !$("work").hidden,
-    onError,
-    send,
-    interrupt,
+    ...o,
   });
 }
