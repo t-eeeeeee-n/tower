@@ -1,4 +1,5 @@
-// ターミナルの代わりに出す、エージェント（Claude Code・Codex）の会話の記録を読みやすくした表示と、指示の入力欄
+// エージェント（Claude Code・Codex）の会話の記録を読みやすくした表示と、指示の入力欄。
+// セッション画面ではターミナルの代わりに、一覧では各カードに出す
 import { invoke } from "@tauri-apps/api/core";
 import { markdownHtml } from "./files";
 
@@ -19,8 +20,6 @@ interface Chunk {
 // 会話の記録の場所を SessionStart の hook で受け取れるエージェント
 export const TRANSCRIPT_AGENTS = ["claude", "codex"];
 const POLL_MS = 1500;
-// 長い会話で画面が重くならないように、古いものから捨てる
-const MAX_NODES = 600;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -36,19 +35,28 @@ const PLACEHOLDER: Record<string, string> = {
   running: "作業中です。書いておいて、終わってから送れます（Esc で中断）",
 };
 
-/**
- * send は入力欄の文字をエージェントに送る。送れるのは状態が指示待ち（idle）のときだけで、
- * それ以外のときに送ると、画面に出ている許可の確認や選択肢への答えとして扱われる恐れがある
- */
-export function createTranscriptPanel(
-  onError: (e: unknown) => void,
-  send: (text: string) => Promise<void>,
-  interrupt: () => void,
-) {
-  const panel = $("log");
-  const body = $("log-body");
-  const input = $<HTMLTextAreaElement>("log-input");
-  const sendBtn = $<HTMLButtonElement>("log-send");
+export interface TranscriptViewOptions {
+  /** 表示を切り替える要素（show で hidden を変える） */
+  root: HTMLElement;
+  body: HTMLElement;
+  input: HTMLTextAreaElement;
+  sendBtn: HTMLButtonElement;
+  /** 長い会話で画面が重くならないように、これを超えたら古いものから捨てる */
+  maxNodes: number;
+  maxInputPx: number;
+  /** root のほかに、表示されているかの条件（見えていなければ記録を読みに行かない） */
+  visible: () => boolean;
+  onError: (e: unknown) => void;
+  /**
+   * 入力欄の文字をエージェントに送る。送れるのは状態が指示待ち（idle）のときだけで、
+   * それ以外のときに送ると、画面に出ている許可の確認や選択肢への答えとして扱われる恐れがある
+   */
+  send: (text: string) => Promise<void>;
+  interrupt: () => void;
+}
+
+export function createTranscriptView(o: TranscriptViewOptions) {
+  const { root, body, input, sendBtn } = o;
   let status = "";
   let sending = false;
   let sessionId: string | null = null;
@@ -59,7 +67,7 @@ export function createTranscriptPanel(
   // 結果を待っているツールの呼び出し（並列に呼ばれることがあるので ID で引く）
   const pending = new Map<string, HTMLElement>();
 
-  const visible = () => !panel.hidden && !!sessionId && !$("work").hidden;
+  const visible = () => !root.hidden && !!sessionId && o.visible();
 
   function note(text: string) {
     body.replaceChildren(el("p", "fv-empty", text));
@@ -109,7 +117,7 @@ export function createTranscriptPanel(
     loading = true;
     const id = sessionId;
     try {
-      const chunk = await invoke<Chunk>("read_transcript", { id, path, offset });
+      const chunk = await invoke<Chunk>("read_transcript", { id, path, offset, limit: o.maxNodes });
       if (id !== sessionId) return;
       if (chunk.reset) {
         body.replaceChildren();
@@ -126,10 +134,10 @@ export function createTranscriptPanel(
         const n = render(e);
         if (n) body.append(n);
       }
-      while (body.childElementCount > MAX_NODES) body.firstElementChild!.remove();
+      while (body.childElementCount > o.maxNodes) body.firstElementChild!.remove();
       if (atBottom || chunk.reset) body.scrollTop = body.scrollHeight;
     } catch (e) {
-      onError(e);
+      o.onError(e);
     } finally {
       loading = false;
     }
@@ -137,7 +145,7 @@ export function createTranscriptPanel(
 
   function fitInput() {
     input.style.height = "auto";
-    input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+    input.style.height = `${Math.min(input.scrollHeight, o.maxInputPx)}px`;
   }
 
   function applyStatus() {
@@ -151,11 +159,11 @@ export function createTranscriptPanel(
     sending = true;
     applyStatus();
     try {
-      await send(text);
+      await o.send(text);
       input.value = "";
       fitInput();
     } catch (e) {
-      onError(e);
+      o.onError(e);
     } finally {
       sending = false;
       applyStatus();
@@ -195,31 +203,38 @@ export function createTranscriptPanel(
       submit();
     } else if (e.key === "Escape" && status === "running") {
       e.preventDefault();
-      interrupt();
+      o.interrupt();
     }
   });
   sendBtn.onclick = submit;
 
-  setInterval(() => {
+  const timer = setInterval(() => {
     if (!document.hidden) refresh();
   }, POLL_MS);
 
   return {
     setStatus(next: string) {
+      if (next === status) return;
       status = next;
       applyStatus();
     },
     focus() {
-      input.focus();
+      input.focus({ preventScroll: true });
     },
     insert(text: string) {
       insertText(text);
-      input.focus();
+      input.focus({ preventScroll: true });
+    },
+    get shown() {
+      return !root.hidden;
     },
     show(on: boolean) {
-      if (panel.hidden !== on) return;
-      panel.hidden = !on;
-      if (on) refresh();
+      if (root.hidden !== on) return;
+      root.hidden = !on;
+      if (on) {
+        fitInput();
+        refresh();
+      }
     },
     setSession(id: string | null, agent: string | null) {
       if (id === sessionId) return void refresh();
@@ -232,5 +247,30 @@ export function createTranscriptPanel(
       body.replaceChildren();
       refresh();
     },
+    dispose() {
+      clearInterval(timer);
+    },
   };
+}
+
+export type TranscriptView = ReturnType<typeof createTranscriptView>;
+
+/** セッション画面で、ターミナルの代わりに出す会話の表示 */
+export function createTranscriptPanel(
+  onError: (e: unknown) => void,
+  send: (text: string) => Promise<void>,
+  interrupt: () => void,
+) {
+  return createTranscriptView({
+    root: $("log"),
+    body: $("log-body"),
+    input: $<HTMLTextAreaElement>("log-input"),
+    sendBtn: $<HTMLButtonElement>("log-send"),
+    maxNodes: 600,
+    maxInputPx: 200,
+    visible: () => !$("work").hidden,
+    onError,
+    send,
+    interrupt,
+  });
 }

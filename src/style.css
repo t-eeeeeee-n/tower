@@ -421,11 +421,22 @@ pre.lg-result.lg-error { color: var(--danger); }
   border-radius: 4px;
   font: 11px/1.4 var(--mono);
   color: var(--term-dim);
-  white-space: pre;
+  /* カードはエージェントの画面より狭いので、横にスクロールさせずに折り返す */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   overflow: auto;
   scrollbar-color: var(--line) transparent;
   cursor: auto;
 }
+.c-tail[hidden], .c-conv[hidden] { display: none; }
+.c-conv { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; margin: 0 8px; background: var(--ink); border-radius: 4px; cursor: auto; }
+.c-log.log-body { padding: 8px 4px 10px; font-size: 12.5px; }
+.c-log .lg-user { margin: 8px 6px 4px 24px; }
+.c-log .lg-command, .c-log .lg-tool { margin-left: 6px; margin-right: 6px; }
+.c-log .lg-assistant.md-preview { padding: 2px 8px; font-size: 12.5px; line-height: 1.65; }
+.c-compose.log-compose { padding: 6px; gap: 6px; }
+.c-compose textarea { padding: 5px 8px; font-size: 12.5px; }
+.c-compose button { padding: 4px 10px; font-size: 12px; }
 .c-foot { display: flex; gap: 12px; padding: 8px 10px 9px; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
 .c-foot .c-mem { margin-left: auto; color: var(--muted); }
 /* 文字の入力（日本語入力を含む）を受けるためだけの欄。打った文字はセッションの画面に出るので、欄そのものは見せない */

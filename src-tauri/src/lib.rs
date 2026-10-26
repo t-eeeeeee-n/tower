@@ -187,8 +187,14 @@ fn peek_sessions(state: State<'_, App>, lines: usize, known: std::collections::H
 }
 
 #[tauri::command]
-fn read_transcript(state: State<'_, App>, id: String, path: Option<String>, offset: u64) -> Result<transcript::Chunk, String> {
-    transcript::read(state.manager.transcript(&id)?, path, offset)
+fn read_transcript(
+    state: State<'_, App>,
+    id: String,
+    path: Option<String>,
+    offset: u64,
+    limit: Option<usize>,
+) -> Result<transcript::Chunk, String> {
+    transcript::read(state.manager.transcript(&id)?, path, offset, limit)
 }
 
 #[tauri::command]

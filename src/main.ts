@@ -9,7 +9,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import { createFilesPanel } from "./files";
-import { createTranscriptPanel, TRANSCRIPT_AGENTS } from "./transcript";
+import { createTranscriptPanel, createTranscriptView, TRANSCRIPT_AGENTS, type TranscriptView } from "./transcript";
 import { createTemplates } from "./templates";
 import { createSettings } from "./settings";
 import { createMarks, MARK_COLORS, type MarkColor } from "./marks";
@@ -89,21 +89,28 @@ const STATUS_LABEL: Record<Status, string> = {
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const appWindow = getCurrentWindow();
 const files = createFilesPanel((e) => showError(e));
-// 入力欄の文字は貼り付けとして入れてから Enter を送る（貼り付けの中の改行では送信されない）。
+// 会話の入力欄の文字は貼り付けとして入れてから Enter を送る（貼り付けの中の改行では送信されない）。
 // 終わりの印（ESC[201~）が中に混ざると後ろが打ち込んだ文字になるので、ESC は取り除く
+async function sendPrompt(id: string | null, text: string) {
+  if (!id || sessions.get(id)?.status !== "idle") throw new Error("指示待ちのときだけ送れます");
+  const body = text.replace(/\x1b/g, "").replace(/\r?\n/g, "\r");
+  await invoke("write_session", { id, data: `\x1b[200~${body}\x1b[201~` });
+  // 貼り付けと同じ書き込みに Enter を続けると、貼り付けの一部として扱われることがある
+  await new Promise((r) => setTimeout(r, 80));
+  await invoke("write_session", { id, data: "\r" });
+}
+
+function interruptSession(id: string | null) {
+  if (id) invoke("write_session", { id, data: "\x1b" }).catch(showError);
+}
+
 const log = createTranscriptPanel(
   (e) => showError(e),
-  async (text) => {
-    const id = attachedId;
-    if (!id || sessions.get(id)?.status !== "idle") throw new Error("指示待ちのときだけ送れます");
-    const body = text.replace(/\x1b/g, "").replace(/\r?\n/g, "\r");
-    await invoke("write_session", { id, data: `\x1b[200~${body}\x1b[201~` });
-    // 貼り付けと同じ書き込みに Enter を続けると、貼り付けの一部として扱われることがある
-    await new Promise((r) => setTimeout(r, 80));
-    await invoke("write_session", { id, data: "\r" });
-  },
-  () => attachedId && invoke("write_session", { id: attachedId, data: "\x1b" }).catch(showError),
+  (text) => sendPrompt(attachedId, text),
+  () => interruptSession(attachedId),
 );
+// 一覧のカードごとの会話の表示（Claude Code と Codex のセッションだけ）
+const cardViews = new Map<string, TranscriptView>();
 
 // 許可の確認や選択肢はターミナルにしか出ないので、入力待ちになったら作業が再開するまでターミナルに戻す
 let preferLog = false;
@@ -242,6 +249,8 @@ function pasteTo(id: string, text: string) {
   if (!text) return;
   if (view === "session" && id === attachedId && $("term-wrap").hidden) {
     log.insert(text);
+  } else if (view === "overview" && cardViews.get(id)?.shown) {
+    cardViews.get(id)!.insert(text);
   } else if (view === "session" && id === attachedId) {
     term.paste(text);
     term.focus();
@@ -269,7 +278,7 @@ getCurrentWebview().onDragDropEvent(({ payload }) => {
   const id = card ? card.dataset.id : view === "session" ? attachedId : null;
   if (!id) return;
   insertPaths(id, payload.paths);
-  card?.querySelector<HTMLElement>(".c-kbd")?.focus({ preventScroll: true });
+  if (card) focusCard(id);
 });
 
 // クリップボードが画像だけなら、一時フォルダに保存してその場所を入れ、true を返す
@@ -781,6 +790,49 @@ function keyData(ev: KeyboardEvent) {
   return KEY_SEQ[ev.key] ?? null;
 }
 
+// Claude Code と Codex のカードは、画面の代わりに会話を出す。色・折り返し・入力の見え方が、
+// 文字だけにした画面より読みやすいため。入力待ちのときは許可の確認が画面にしか出ないので、画面に戻す（updateCard）
+function makeCardConversation(id: string) {
+  const agent = sessions.get(id)!.agent;
+  if (!TRANSCRIPT_AGENTS.includes(agent)) return null;
+  const root = el("section", "c-conv");
+  root.hidden = true;
+  const body = el("div", "c-log log-body");
+  const compose = el("div", "log-compose c-compose");
+  const input = el("textarea");
+  input.rows = 1;
+  input.spellcheck = false;
+  input.setAttribute("aria-label", "指示");
+  const sendBtn = el("button", "primary-btn", "送信");
+  sendBtn.type = "button";
+  compose.append(input, sendBtn);
+  root.append(body, compose);
+  input.addEventListener("paste", (ev) => pasteImage(id, ev));
+  body.ondblclick = () => activate(id);
+  const tv = createTranscriptView({
+    root,
+    body,
+    input,
+    sendBtn,
+    maxNodes: 80,
+    maxInputPx: 140,
+    visible: () => view === "overview",
+    onError: showError,
+    send: (text) => sendPrompt(id, text),
+    interrupt: () => interruptSession(id),
+  });
+  tv.setSession(id, agent);
+  cardViews.set(id, tv);
+  return root;
+}
+
+function focusCard(id: string) {
+  const conv = cardViews.get(id);
+  if (conv?.shown) return conv.focus();
+  const kbd = cards.get(id)?.querySelector<HTMLTextAreaElement>(".c-kbd");
+  if (kbd && !kbd.disabled) kbd.focus({ preventScroll: true });
+}
+
 function makeCard(id: string) {
   const card = el("article", "card");
   card.dataset.id = id;
@@ -835,19 +887,20 @@ function makeCard(id: string) {
       tpl,
       (text) => {
         pasteTo(id, text);
-        kbd.focus();
+        focusCard(id);
       },
-      () => kbd.focus(),
+      () => focusCard(id),
     );
   const foot = el("footer", "c-foot");
   foot.append(el("span", "c-age"), el("span", "c-branch"), el("span", "c-mem"), tpl);
-  card.append(head, tail, kbd, foot);
+  const conv = makeCardConversation(id);
+  card.append(head, tail, kbd, ...(conv ? [conv] : []), foot);
   card.onclick = (ev) => {
     const target = ev.target as HTMLElement;
     // 文章を選んでいるときは、選び終わりのクリックで切り替えない
-    if (justDragged() || target.closest("button") || getSelection()?.toString()) return;
-    if (target.closest(".c-tail")) {
-      if (!kbd.disabled) kbd.focus({ preventScroll: true });
+    if (justDragged() || target.closest("button, textarea, summary") || getSelection()?.toString()) return;
+    if (target.closest(".c-tail, .c-conv")) {
+      focusCard(id);
       return;
     }
     activate(id);
@@ -884,7 +937,15 @@ function updateCard(card: HTMLElement, s: Session) {
   }
 
   const exited = s.status === "exited";
-  card.querySelector<HTMLTextAreaElement>(".c-kbd")!.disabled = exited;
+  const conv = cardViews.get(s.id);
+  const conversing = !!conv && s.status !== "waiting";
+  if (conv) {
+    conv.setStatus(s.status);
+    conv.show(conversing);
+  }
+  tail.hidden = conversing;
+  // 会話の表示に切り替わったあとも画面用の欄にフォーカスが残っていると、打った文字が見えないままセッションに届く
+  card.querySelector<HTMLTextAreaElement>(".c-kbd")!.disabled = exited || conversing;
   q(".c-tpl").hidden = exited;
   q(".c-age").textContent = fmtAge(s.since);
   fillBranch(q(".c-branch"), heads.get(s.id));
@@ -904,6 +965,8 @@ function renderOverview(waitingCount: number, total: number) {
     if (!sessions.has(id)) {
       card.remove();
       cards.delete(id);
+      cardViews.get(id)?.dispose();
+      cardViews.delete(id);
     }
   }
   // 状態で並べ替えるとドラッグで決めた順番と食い違うので、サイドバーと同じ順番にする

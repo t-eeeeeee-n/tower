@@ -51,8 +51,9 @@ pub fn path_from_hook(body: &str) -> Option<PathBuf> {
     (path.is_absolute() && path.extension().is_some_and(|e| e == "jsonl")).then_some(path)
 }
 
-/// `known` は呼び出し側が読んでいたファイルで、今のファイルと違えば最初から（長ければ末尾から）読み直す
-pub fn read(current: Option<PathBuf>, known: Option<String>, offset: u64) -> Result<Chunk, String> {
+/// `known` は呼び出し側が読んでいたファイルで、今のファイルと違えば最初から（長ければ末尾から）読み直す。
+/// `limit` を渡すと、新しい方からその数だけ返す（呼び出し側が表示しきれない分を送らないため）
+pub fn read(current: Option<PathBuf>, known: Option<String>, offset: u64, limit: Option<usize>) -> Result<Chunk, String> {
     let Some(path) = current else {
         return Ok(Chunk { path: None, offset: 0, reset: true, entries: Vec::new() });
     };
@@ -81,11 +82,14 @@ pub fn read(current: Option<PathBuf>, known: Option<String>, offset: u64) -> Res
     // 書きかけの最後の行は次に回す
     let end = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     let begin = if skip_partial { buf[..end].iter().position(|&b| b == b'\n').map_or(end, |i| i + 1) } else { 0 };
-    let entries = buf[begin..end]
+    let mut entries: Vec<Entry> = buf[begin..end]
         .split(|&b| b == b'\n')
         .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
         .flat_map(|v| entries_of(&v))
         .collect();
+    if let Some(limit) = limit {
+        entries.drain(..entries.len().saturating_sub(limit));
+    }
     Ok(Chunk { path: Some(path_str), offset: start + end as u64, reset, entries })
 }
 
@@ -288,18 +292,18 @@ mod tests {
         let path = dir.join("s.jsonl");
         let line = |t: &str| format!("{}\n", json!({"type":"user","message":{"content":t}}));
         std::fs::write(&path, format!("{}{}", line("一"), r#"{"type":"user","mess"#)).unwrap();
-        let first = read(Some(path.clone()), None, 0).unwrap();
+        let first = read(Some(path.clone()), None, 0, None).unwrap();
         assert!(first.reset);
         assert_eq!(first.entries.len(), 1);
 
         std::fs::write(&path, format!("{}{}", line("一"), line("二"))).unwrap();
-        let next = read(Some(path.clone()), first.path.clone(), first.offset).unwrap();
+        let next = read(Some(path.clone()), first.path.clone(), first.offset, None).unwrap();
         assert!(!next.reset);
         assert_eq!(next.entries.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), vec!["二"]);
 
-        let other = read(Some(path.clone()), Some("other.jsonl".into()), next.offset).unwrap();
+        let other = read(Some(path.clone()), Some("other.jsonl".into()), next.offset, Some(1)).unwrap();
         assert!(other.reset);
-        assert_eq!(other.entries.len(), 2);
+        assert_eq!(other.entries.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), vec!["二"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
