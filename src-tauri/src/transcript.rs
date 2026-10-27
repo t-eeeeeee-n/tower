@@ -232,8 +232,19 @@ fn user_text(s: &str) -> Option<Entry> {
         let text = if args.is_empty() { name.to_string() } else { format!("{name} {args}") };
         return Some(entry(Kind::Command, text));
     }
+    let s = without_paste_tags(s);
     let s = s.trim();
     (!s.is_empty() && !s.starts_with('<')).then(|| entry(Kind::User, truncate(s, MAX_TEXT)))
+}
+
+/// Claude Code は、貼り付けた文章を記録では `<pasted_content id="…">` と `</pasted_content id="…">` の行で囲む。
+/// エージェントに渡す目印で、利用者が書いたものではないので、表示では囲みの行だけを取り除く
+fn without_paste_tags(s: &str) -> String {
+    let is_tag = |l: &str| {
+        let l = l.trim();
+        l.len() < 64 && (l.starts_with("<pasted_content") || l.starts_with("</pasted_content")) && l.ends_with('>')
+    };
+    s.lines().filter(|l| !is_tag(l)).collect::<Vec<_>>().join("\n")
 }
 
 fn user_block(b: &Value) -> Option<Entry> {
@@ -326,6 +337,12 @@ mod tests {
         assert_eq!(kinds(json!({"type":"user","message":{"content":"直して"}})), vec![(Kind::User, "直して".into())]);
         assert!(kinds(json!({"type":"user","message":{"content":"<local-command-stdout></local-command-stdout>"}})).is_empty());
         assert!(kinds(json!({"type":"user","isMeta":true,"message":{"content":"meta"}})).is_empty());
+
+        // 貼り付けの囲みの行は出さない。貼り付けだけの発言も、囲みで始まるからといって消さない
+        let pasted = "\n\n<pasted_content id=\"2225\">\n# 依頼\n直して\n</pasted_content id=\"2225\">\n";
+        assert_eq!(kinds(json!({"type":"user","message":{"content":pasted}})), vec![(Kind::User, "# 依頼\n直して".into())]);
+        let mixed = "これを見て\n<pasted_content id=\"ab12\">\nerror: x\n</pasted_content id=\"ab12\">";
+        assert_eq!(kinds(json!({"type":"user","message":{"content":mixed}})), vec![(Kind::User, "これを見て\nerror: x".into())]);
     }
 
     #[test]
