@@ -284,6 +284,14 @@ button { font: inherit; color: inherit; cursor: pointer; }
 /* 会話 */
 .log { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; background: var(--ink); }
 .log[hidden] { display: none; }
+.lg-agents { flex: none; display: flex; padding: 6px max(8px, calc((100% - 820px) / 2)); border-bottom: 1px solid var(--line); }
+.lg-agents[hidden] { display: none; }
+.lg-agents-sub { background: var(--raise); }
+.lg-agent-pick { min-width: 0; max-width: 100%; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 12px var(--mono); }
+.c-conv .lg-agents { padding: 4px 6px; }
+.c-conv .lg-agent-pick { font-size: 11px; }
+.lg-open-agent { flex: none; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--st-running); font-size: 11px; }
+.lg-open-agent:hover { background: var(--raise-2); }
 .log-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; padding: 12px max(8px, calc((100% - 820px) / 2)) 24px; scrollbar-color: var(--line) transparent; user-select: text; }
 /* 会話が少ないとき（/clear の直後など）は、入力欄のすぐ上に寄せる。justify-content: flex-end だと、あふれたときに上の方へスクロールできなくなる */
 .log-body > * { flex-shrink: 0; }

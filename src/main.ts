@@ -1010,7 +1010,7 @@ function makeCard(id: string) {
   card.onclick = (ev) => {
     const target = ev.target as HTMLElement;
     // 文章を選んでいるときは、選び終わりのクリックで切り替えない
-    if (justDragged() || target.closest("button, textarea, summary") || getSelection()?.toString()) return;
+    if (justDragged() || target.closest("button, textarea, summary, select") || getSelection()?.toString()) return;
     if (target.closest(".c-tail, .c-conv")) {
       focusCard(id);
       return;

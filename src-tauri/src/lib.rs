@@ -201,8 +201,19 @@ fn read_transcript(
     path: Option<String>,
     offset: u64,
     limit: Option<usize>,
+    agent: Option<String>,
 ) -> Result<transcript::Chunk, String> {
-    transcript::read(state.manager.transcript(&id)?, path, offset, limit)
+    let main = state.manager.transcript(&id)?;
+    let target = match (&agent, main) {
+        (Some(a), Some(m)) => Some(transcript::subagent_path(&m, a)?),
+        (_, main) => main,
+    };
+    transcript::read(target, path, offset, limit, agent.is_some())
+}
+
+#[tauri::command(async)]
+fn list_subagents(state: State<'_, App>, id: String) -> Result<Vec<transcript::Subagent>, String> {
+    Ok(state.manager.transcript(&id)?.map(|m| transcript::subagents(&m)).unwrap_or_default())
 }
 
 #[tauri::command]
@@ -323,6 +334,7 @@ pub fn run() {
             peek_sessions,
             read_transcript,
             session_footer,
+            list_subagents,
             write_session,
             set_scrollback,
             rename_session,

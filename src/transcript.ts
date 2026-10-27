@@ -16,6 +16,17 @@ interface Chunk {
   reset: boolean;
   entries: Entry[];
 }
+interface Subagent {
+  id: string;
+  description: string;
+  agent_type: string | null;
+  tool_use_id: string | null;
+  modified: number;
+}
+
+// サブエージェントは裏で動いていても本体の状態に出ないので、記録ファイルが書き換えられてからの時間で作業中とみなす
+const SUBAGENT_ACTIVE_MS = 15_000;
+const AGENT_TOOLS = ["Agent", "Task"];
 
 // 会話の記録の場所を SessionStart の hook で受け取れるエージェント
 export const TRANSCRIPT_AGENTS = ["claude", "codex"];
@@ -69,6 +80,15 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   let path: string | null = null;
   let offset = 0;
   let loading = false;
+  // 表示しているサブエージェント（null ならメインの会話）
+  let agent: string | null = null;
+  let agents: Subagent[] = [];
+  const bar = el("div", "lg-agents");
+  bar.hidden = true;
+  const picker = el("select", "lg-agent-pick");
+  picker.setAttribute("aria-label", "表示する会話");
+  bar.append(picker);
+  root.prepend(bar);
   // 結果を待っているツールの呼び出し（並列に呼ばれることがあるので ID で引く）
   const pending = new Map<string, HTMLElement>();
 
@@ -97,6 +117,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         const n = el("details", "lg-tool");
         const s = el("summary");
         s.append(el("span", "lg-tool-name", e.tool ?? ""), el("span", "lg-tool-arg", e.text));
+        if (e.id && AGENT_TOOLS.includes(e.tool ?? "")) s.append(openAgentButton(e.id));
         n.append(s);
         // 結果が届くまでは実行中（Bash やサブエージェントが動いているか、作業中の間はこの印で見分ける）
         if (e.id) {
@@ -122,13 +143,83 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     }
   }
 
+  function openAgentButton(toolUseId: string) {
+    const b = el("button", "lg-open-agent", "会話を見る");
+    b.type = "button";
+    b.title = "このサブエージェントの会話を表示する";
+    b.onclick = async (ev) => {
+      // summary の中のボタンなので、押しても結果の開閉はさせない
+      ev.preventDefault();
+      ev.stopPropagation();
+      const find = () => agents.find((a) => a.tool_use_id === toolUseId);
+      if (!find()) await loadAgents();
+      const a = find();
+      if (a) setAgent(a.id);
+      else o.onError("このサブエージェントの会話の記録が見つかりません");
+    };
+    return b;
+  }
+
+  const active = (a: Subagent) => Date.now() - a.modified < SUBAGENT_ACTIVE_MS;
+
+  function renderBar() {
+    bar.hidden = !agents.length && !agent;
+    const busy = agents.filter(active).length;
+    const options: [string, string][] = [["", busy ? `メイン（サブエージェント ${busy} 件が作業中）` : "メイン"]];
+    for (const a of agents) {
+      const label = a.description || a.agent_type || a.id;
+      options.push([a.id, `${active(a) ? "● " : ""}${label}${a.agent_type ? `（${a.agent_type}）` : ""}`]);
+    }
+    // 開いている選択肢が描き直しで閉じないよう、変わったときだけ作り直す
+    const key = JSON.stringify([agent, options]);
+    if (picker.dataset.key === key) return;
+    picker.dataset.key = key;
+    picker.replaceChildren(
+      ...options.map(([value, text]) => {
+        const opt = el("option", "", text);
+        opt.value = value;
+        return opt;
+      }),
+    );
+    picker.value = agent ?? "";
+    bar.classList.toggle("lg-agents-sub", !!agent);
+  }
+
+  async function loadAgents() {
+    const id = sessionId;
+    try {
+      const list = await invoke<Subagent[]>("list_subagents", { id });
+      if (id !== sessionId) return;
+      agents = list;
+      renderBar();
+    } catch {
+      /* 一覧が読めなくても、会話の表示には影響しない */
+    }
+  }
+
+  function setAgent(next: string | null) {
+    if (next === agent) return;
+    agent = next;
+    path = null;
+    offset = 0;
+    pending.clear();
+    body.replaceChildren();
+    renderBar();
+    applyStatus();
+    refresh();
+  }
+
+  picker.onchange = () => setAgent(picker.value || null);
+
   async function refresh() {
     if (!visible() || loading || !supported) return;
     loading = true;
     const id = sessionId;
+    const shownAgent = agent;
+    loadAgents();
     try {
-      const chunk = await invoke<Chunk>("read_transcript", { id, path, offset, limit: o.maxNodes });
-      if (id !== sessionId) return;
+      const chunk = await invoke<Chunk>("read_transcript", { id, path, offset, limit: o.maxNodes, agent });
+      if (id !== sessionId || shownAgent !== agent) return;
       if (chunk.reset) {
         body.replaceChildren();
         pending.clear();
@@ -158,14 +249,18 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     input.style.height = `${Math.min(input.scrollHeight, o.maxInputPx)}px`;
   }
 
+  // サブエージェントには直接指示を送れないので、見ている間は入力欄を使えなくする
   function applyStatus() {
-    input.placeholder = PLACEHOLDER[status] ?? "エージェントの起動を待っています";
-    sendBtn.disabled = status !== "idle" || sending || !input.value.trim();
+    input.disabled = !!agent;
+    input.placeholder = agent
+      ? "サブエージェントの会話を表示しています（指示は上の欄でメインに戻すと送れます）"
+      : (PLACEHOLDER[status] ?? "エージェントの起動を待っています");
+    sendBtn.disabled = !!agent || status !== "idle" || sending || !input.value.trim();
   }
 
   async function submit() {
     const text = input.value.trim();
-    if (status !== "idle" || sending || !text) return;
+    if (agent || status !== "idle" || sending || !text) return;
     sending = true;
     applyStatus();
     try {
@@ -199,7 +294,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     fitInput();
     applyStatus();
   });
-  const startsSlash = () => status === "idle" && !input.value;
+  const startsSlash = () => !agent && status === "idle" && !input.value;
   input.addEventListener("keydown", (e) => {
     if (e.isComposing || e.ctrlKey || e.metaKey) return;
     // ターミナルと同じく Alt+Enter でも改行する（textarea は Alt+Enter では改行しない）
@@ -239,11 +334,14 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     },
     /** 入力欄の外で打った文字を、入力欄で打ったのと同じように扱う */
     typed(ch: string) {
+      // サブエージェントを見ている間に打った文字は、メインへの指示として扱う
+      setAgent(null);
       if (ch === "/" && startsSlash()) return o.onSlash();
       insertText(ch);
       input.focus({ preventScroll: true });
     },
     insert(text: string) {
+      setAgent(null);
       insertText(text);
       input.focus({ preventScroll: true });
     },
@@ -258,12 +356,16 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         refresh();
       }
     },
-    setSession(id: string | null, agent: string | null) {
+    setSession(id: string | null, agentName: string | null) {
       if (id === sessionId) return void refresh();
       sessionId = id;
-      supported = TRANSCRIPT_AGENTS.includes(agent ?? "");
+      supported = TRANSCRIPT_AGENTS.includes(agentName ?? "");
       path = null;
       offset = 0;
+      agent = null;
+      agents = [];
+      renderBar();
+      applyStatus();
       if (!id) return void body.replaceChildren();
       if (!supported) return note("会話の表示は Claude Code と Codex のセッションだけに対応しています。");
       body.replaceChildren();

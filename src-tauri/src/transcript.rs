@@ -3,7 +3,8 @@
 //! 記録の形式は公開された仕様ではないので、知らない種類の行は読み飛ばし、読めない行があっても止めない。
 
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -51,9 +52,67 @@ pub fn path_from_hook(body: &str) -> Option<PathBuf> {
     (path.is_absolute() && path.extension().is_some_and(|e| e == "jsonl")).then_some(path)
 }
 
+#[derive(Serialize, Debug)]
+pub struct Subagent {
+    pub id: String,
+    /// 呼び出したときの説明（Agent ツールの description）
+    pub description: String,
+    pub agent_type: Option<String>,
+    /// 本体の会話で、このサブエージェントを呼び出した Agent ツールの呼び出しの ID
+    pub tool_use_id: Option<String>,
+    /// 記録ファイルを最後に書き換えた時刻（UNIX 時間のミリ秒）。作業中かどうかの目安に使う
+    pub modified: u64,
+}
+
+/// Claude Code は、サブエージェントの会話を本体の記録の隣の `<セッションID>/subagents/agent-<ID>.jsonl` に残し、
+/// 呼び出しの説明を `agent-<ID>.meta.json` に書く（どちらも公開された仕様ではない）
+fn subagent_dir(main: &Path) -> PathBuf {
+    main.with_extension("").join("subagents")
+}
+
+/// ID は英数字だけを受け付け、本体の記録の隣のフォルダの外を指させない
+pub fn subagent_path(main: &Path, agent: &str) -> Result<PathBuf, String> {
+    if agent.is_empty() || !agent.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(format!("サブエージェントの ID として使えません: {agent}"));
+    }
+    Ok(subagent_dir(main).join(format!("agent-{agent}.jsonl")))
+}
+
+/// 新しく書き換えられた順。Codex など、サブエージェントの記録が無ければ空
+pub fn subagents(main: &Path) -> Vec<Subagent> {
+    let Ok(dir) = std::fs::read_dir(subagent_dir(main)) else { return Vec::new() };
+    let mut out: Vec<Subagent> = dir
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let id = name.strip_prefix("agent-")?.strip_suffix(".jsonl")?;
+            if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return None;
+            }
+            let modified = e.metadata().ok()?.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
+            let meta: Value = std::fs::read(e.path().with_extension("meta.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or(Value::Null);
+            let text = |k: &str| meta.get(k).and_then(Value::as_str).map(String::from);
+            Some(Subagent {
+                id: id.to_string(),
+                description: text("description").unwrap_or_default(),
+                agent_type: text("agentType"),
+                tool_use_id: text("toolUseId"),
+                modified,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out
+}
+
 /// `known` は呼び出し側が読んでいたファイルで、今のファイルと違えば最初から（長ければ末尾から）読み直す。
-/// `limit` を渡すと、新しい方からその数だけ返す（呼び出し側が表示しきれない分を送らないため）
-pub fn read(current: Option<PathBuf>, known: Option<String>, offset: u64, limit: Option<usize>) -> Result<Chunk, String> {
+/// `limit` を渡すと、新しい方からその数だけ返す（呼び出し側が表示しきれない分を送らないため）。
+/// `sidechain` はサブエージェントの記録を読むとき。サブエージェントの行には isSidechain が付いていて、
+/// 本体の記録に混ざっている古い版のものは読み飛ばす
+pub fn read(current: Option<PathBuf>, known: Option<String>, offset: u64, limit: Option<usize>, sidechain: bool) -> Result<Chunk, String> {
     let Some(path) = current else {
         return Ok(Chunk { path: None, offset: 0, reset: true, entries: Vec::new() });
     };
@@ -85,6 +144,7 @@ pub fn read(current: Option<PathBuf>, known: Option<String>, offset: u64, limit:
     let mut entries: Vec<Entry> = buf[begin..end]
         .split(|&b| b == b'\n')
         .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .filter(|v| sidechain || !v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false))
         .flat_map(|v| entries_of(&v))
         .collect();
     if let Some(limit) = limit {
@@ -94,8 +154,7 @@ pub fn read(current: Option<PathBuf>, known: Option<String>, offset: u64, limit:
 }
 
 fn entries_of(v: &Value) -> Vec<Entry> {
-    let flag = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
-    if flag("isSidechain") || flag("isMeta") {
+    if v.get("isMeta").and_then(Value::as_bool).unwrap_or(false) {
         return Vec::new();
     }
     if v.get("type").and_then(Value::as_str) == Some("response_item") {
@@ -267,7 +326,30 @@ mod tests {
         assert_eq!(kinds(json!({"type":"user","message":{"content":"直して"}})), vec![(Kind::User, "直して".into())]);
         assert!(kinds(json!({"type":"user","message":{"content":"<local-command-stdout></local-command-stdout>"}})).is_empty());
         assert!(kinds(json!({"type":"user","isMeta":true,"message":{"content":"meta"}})).is_empty());
-        assert!(kinds(json!({"type":"user","isSidechain":true,"message":{"content":"sub"}})).is_empty());
+    }
+
+    #[test]
+    fn subagent_transcripts() {
+        let dir = std::env::temp_dir().join(format!("tower-subagents-{}", std::process::id()));
+        let sub = dir.join("s").join("subagents");
+        std::fs::create_dir_all(&sub).unwrap();
+        let main = dir.join("s.jsonl");
+        let line = |t: &str, side: bool| format!("{}\n", json!({"type":"user","isSidechain":side,"message":{"content":t}}));
+        std::fs::write(&main, format!("{}{}", line("本体", false), line("古い版のサブ", true))).unwrap();
+        std::fs::write(sub.join("agent-a1.jsonl"), line("調べて", true)).unwrap();
+        std::fs::write(sub.join("agent-a1.meta.json"), r#"{"description":"調査","agentType":"Explore","toolUseId":"toolu_1"}"#).unwrap();
+        std::fs::write(sub.join("agent-bad id.jsonl"), "").unwrap();
+
+        let texts = |c: Chunk| c.entries.into_iter().map(|e| e.text).collect::<Vec<_>>();
+        assert_eq!(texts(read(Some(main.clone()), None, 0, None, false).unwrap()), ["本体"]);
+        let list = subagents(&main);
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].id.as_str(), list[0].description.as_str(), list[0].tool_use_id.as_deref()), ("a1", "調査", Some("toolu_1")));
+        let path = subagent_path(&main, "a1").unwrap();
+        assert_eq!(texts(read(Some(path), None, 0, None, true).unwrap()), ["調べて"]);
+        assert!(subagent_path(&main, "../s").is_err());
+        assert!(subagent_path(&main, "").is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -292,16 +374,16 @@ mod tests {
         let path = dir.join("s.jsonl");
         let line = |t: &str| format!("{}\n", json!({"type":"user","message":{"content":t}}));
         std::fs::write(&path, format!("{}{}", line("一"), r#"{"type":"user","mess"#)).unwrap();
-        let first = read(Some(path.clone()), None, 0, None).unwrap();
+        let first = read(Some(path.clone()), None, 0, None, false).unwrap();
         assert!(first.reset);
         assert_eq!(first.entries.len(), 1);
 
         std::fs::write(&path, format!("{}{}", line("一"), line("二"))).unwrap();
-        let next = read(Some(path.clone()), first.path.clone(), first.offset, None).unwrap();
+        let next = read(Some(path.clone()), first.path.clone(), first.offset, None, false).unwrap();
         assert!(!next.reset);
         assert_eq!(next.entries.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), vec!["二"]);
 
-        let other = read(Some(path.clone()), Some("other.jsonl".into()), next.offset, Some(1)).unwrap();
+        let other = read(Some(path.clone()), Some("other.jsonl".into()), next.offset, Some(1), false).unwrap();
         assert!(other.reset);
         assert_eq!(other.entries.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), vec!["二"]);
         std::fs::remove_dir_all(&dir).ok();
