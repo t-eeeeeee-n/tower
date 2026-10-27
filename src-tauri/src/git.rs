@@ -91,10 +91,23 @@ pub struct Origin {
     pub branch: String,
 }
 
-// 信頼していないフォルダの .git にも従うので、ネットワークやデバイスの場所は辿らない。
-// \\server\share を読みにいくと、Windows がサインインの情報（NTLM）を相手に送ってしまう
-fn is_network(path: &str) -> bool {
-    path.starts_with("\\\\") || path.starts_with("//")
+/// 信頼していないフォルダの .git に書かれた場所にも従うので、ローカルのドライブ（`C:\…`）と相対パスだけを辿る。
+/// \\server\share を読みにいくと、Windows がサインインの情報（NTLM）を相手に送ってしまう。
+/// 文字列の頭で見分けると `\/server/share` のように区切りを混ぜた書き方をすり抜けるので、
+/// Rust が解釈した結果の部品で見る（\\?\UNC\… や \\.\… も Prefix が Disk ではないので弾かれる）
+fn local_target(text: &str) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+    let path = PathBuf::from(text);
+    let mut parts = path.components();
+    match parts.next() {
+        // C:foo はそのドライブの今のフォルダからの相対なので、C:\ の形だけを許す
+        Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_)) && matches!(parts.next(), Some(Component::RootDir)) => {}
+        Some(Component::Prefix(_)) => return None,
+        // Windows の \foo はドライブの指定が無い（\??\… の NT の名前空間もこの形になる）
+        Some(Component::RootDir) if cfg!(windows) => return None,
+        _ => {}
+    }
+    Some(path)
 }
 
 fn branch_of(head: &str) -> String {
@@ -121,12 +134,12 @@ fn lexical(path: &Path) -> PathBuf {
 }
 
 fn origin(git_dir: &Path) -> Option<Origin> {
-    let common = read_small(&git_dir.join("commondir"))?;
-    let common = common.trim();
-    if is_network(common) {
+    let common = local_target(read_small(&git_dir.join("commondir"))?.trim())?;
+    let common = lexical(&git_dir.join(common));
+    // git が作る worktree の git_dir は <元の .git>/worktrees/<名前>。それ以外を指していたら従わない
+    if !lexical(git_dir).starts_with(common.join("worktrees")) {
         return None;
     }
-    let common = lexical(&git_dir.join(common));
     // bare リポジトリから作った worktree には、元のフォルダが無い
     if common.file_name()? != ".git" {
         return None;
@@ -145,11 +158,7 @@ pub fn head(cwd: &Path) -> Option<Head> {
         dot_git
     } else {
         let text = read_small(&dot_git)?;
-        let target = text.trim().strip_prefix("gitdir:")?.trim();
-        if is_network(target) {
-            return None;
-        }
-        let target = PathBuf::from(target);
+        let target = local_target(text.trim().strip_prefix("gitdir:")?.trim())?;
         if target.is_absolute() { target } else { root.join(target) }
     };
     // サブモジュールも .git がファイルなので、worktree の印の commondir があるかで見分ける
@@ -266,6 +275,13 @@ mod tests {
         assert_eq!(head(&base), None);
         std::fs::write(base.join(".git"), "gitdir: //attacker/share/x\n").unwrap();
         assert_eq!(head(&base), None);
+        for bad in [r"\/attacker/share/x", r"/\attacker\share\x", r"\\?\UNC\attacker\share\x", r"\\.\pipe\x", r"\??\UNC\attacker\share", r"\x", "C:x"] {
+            if cfg!(windows) {
+                assert!(local_target(bad).is_none(), "{bad}");
+            }
+        }
+        assert!(local_target(r"C:\repo\.git\worktrees\a").is_some());
+        assert!(local_target("../.git/worktrees/a").is_some());
         let _ = std::fs::remove_dir_all(&base);
     }
     #[test]
