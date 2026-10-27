@@ -79,6 +79,60 @@ pub struct Head {
     pub worktree: bool,
     /// 作業フォルダのいちばん上
     pub root: String,
+    /// worktree のときの元のフォルダ
+    pub origin: Option<Origin>,
+}
+
+/// worktree の元のフォルダ（`git worktree list` の先頭）と、そのフォルダの今のブランチ。
+/// git はどのブランチから作ったかを残さないので、これは作った元ではなく、取り込むときの取り込み先
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct Origin {
+    pub root: String,
+    pub branch: String,
+}
+
+// 信頼していないフォルダの .git にも従うので、ネットワークやデバイスの場所は辿らない。
+// \\server\share を読みにいくと、Windows がサインインの情報（NTLM）を相手に送ってしまう
+fn is_network(path: &str) -> bool {
+    path.starts_with("\\\\") || path.starts_with("//")
+}
+
+fn branch_of(head: &str) -> String {
+    let head = head.trim();
+    match head.strip_prefix("ref: refs/heads/") {
+        Some(b) => b.to_string(),
+        None => head.chars().take(7).collect(),
+    }
+}
+
+/// `..` を取り除く（commondir は `../..` のような相対パスで書かれる）。ファイルには触らない
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn origin(git_dir: &Path) -> Option<Origin> {
+    let common = read_small(&git_dir.join("commondir"))?;
+    let common = common.trim();
+    if is_network(common) {
+        return None;
+    }
+    let common = lexical(&git_dir.join(common));
+    // bare リポジトリから作った worktree には、元のフォルダが無い
+    if common.file_name()? != ".git" {
+        return None;
+    }
+    let branch = branch_of(&read_small(&common.join("HEAD"))?);
+    Some(Origin { root: common.parent()?.to_string_lossy().into_owned(), branch })
 }
 
 /// `.git` を読むだけでブランチを調べる。git を動かさないので、信頼していないフォルダでも使える
@@ -92,9 +146,7 @@ pub fn head(cwd: &Path) -> Option<Head> {
     } else {
         let text = read_small(&dot_git)?;
         let target = text.trim().strip_prefix("gitdir:")?.trim();
-        // 信頼していないフォルダの .git にも従うので、ネットワークやデバイスの場所は辿らない。
-        // \\server\share を読みにいくと、Windows がサインインの情報（NTLM）を相手に送ってしまう
-        if target.starts_with("\\\\") || target.starts_with("//") {
+        if is_network(target) {
             return None;
         }
         let target = PathBuf::from(target);
@@ -102,13 +154,9 @@ pub fn head(cwd: &Path) -> Option<Head> {
     };
     // サブモジュールも .git がファイルなので、worktree の印の commondir があるかで見分ける
     let worktree = git_dir.join("commondir").is_file();
-    let head = read_small(&git_dir.join("HEAD"))?;
-    let head = head.trim();
-    let branch = match head.strip_prefix("ref: refs/heads/") {
-        Some(b) => b.to_string(),
-        None => head.chars().take(7).collect(),
-    };
-    Some(Head { branch, worktree, root: root.to_string_lossy().into_owned() })
+    let branch = branch_of(&read_small(&git_dir.join("HEAD"))?);
+    let origin = if worktree { origin(&git_dir) } else { None };
+    Some(Head { branch, worktree, root: root.to_string_lossy().into_owned(), origin })
 }
 
 /// .git や HEAD は数十バイトなので、それより大きいものや普通のファイルでないものは読まない
@@ -238,6 +286,9 @@ mod tests {
         let dir = PathBuf::from(create_worktree(&program, &repo.to_string_lossy(), "feature/y").unwrap());
         let h = head(&dir).unwrap();
         assert_eq!((h.branch.as_str(), h.worktree), ("feature/y", true));
+        let origin = h.origin.unwrap();
+        assert_eq!((Path::new(&origin.root), origin.branch.as_str()), (repo.as_path(), "main"));
+        assert_eq!(head_main.origin, None);
 
         commit(&dir, "work");
         std::fs::write(dir.join("new.txt"), "x").unwrap();

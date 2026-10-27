@@ -38,6 +38,8 @@ interface Head {
   branch: string;
   worktree: boolean;
   root: string;
+  /** worktree の元のフォルダと、そのフォルダの今のブランチ（取り込むときの取り込み先） */
+  origin: { root: string; branch: string } | null;
 }
 interface WorktreeState {
   branch: string;
@@ -658,7 +660,7 @@ function render() {
       applyMark(li, markTag, s.cwd);
       li.append(
         el("span", "s-key", i < 9 ? String(i + 1) : ""),
-        el("span", "s-name", s.name),
+        sidebarName(s.name, heads.get(id)),
         markTag,
         el("span", "s-mem", fmtBytes(s.bytes)),
       );
@@ -667,7 +669,8 @@ function render() {
         el("span", "s-status", STATUS_LABEL[s.status]),
         el("span", "s-age", fmtAge(s.since)),
         el("span", "s-agent", AGENT_LABEL[s.agent]),
-        ...(heads.has(id) ? [branchTag(heads.get(id)!, "s-branch")] : []),
+        // サイドバーは 2 行目が詰まっているので、worktree の元のフォルダは名前の行に出す
+        ...(heads.has(id) ? [branchTag(heads.get(id)!, "s-branch", "none")] : []),
         ...(unseen.has(id) ? [el("span", "s-unseen", "未確認")] : []),
       );
       li.append(line2);
@@ -726,7 +729,7 @@ function render() {
   if (active) {
     $("head-name").textContent = active.name;
     $("head-agent").textContent = AGENT_LABEL[active.agent];
-    fillBranch($("head-branch"), heads.get(active.id));
+    fillBranch($("head-branch"), heads.get(active.id), "full");
     applyMark($("head-mark"), $("head-mark"), active.cwd);
     $("head-cwd").textContent = active.cwd;
     const st = $("head-status");
@@ -922,7 +925,7 @@ function makeCard(id: string) {
   card.dataset.id = id;
   card.tabIndex = 0;
   const head = el("header", "c-head");
-  head.append(el("span", "c-name"), el("span", "c-mark mark-tag"), el("span", "c-agent"), el("span", "c-unseen", "未確認"), el("span", "c-status"));
+  head.append(el("span", "c-name"), el("span", "s-origin c-origin"), el("span", "c-mark mark-tag"), el("span", "c-agent"), el("span", "c-unseen", "未確認"), el("span", "c-status"));
   head.title = "クリックでターミナルを開く、ドラッグで並べ替え";
   // カード全体をつかめるようにすると、画面の末尾の文章を選べなくなる
   draggable(card, id, head, true);
@@ -1042,7 +1045,13 @@ function updateCard(card: HTMLElement, s: Session) {
   card.querySelector<HTMLTextAreaElement>(".c-kbd")!.disabled = exited || conversing;
   q(".c-tpl").hidden = exited;
   q(".c-age").textContent = fmtAge(s.since);
-  fillBranch(q(".c-branch"), heads.get(s.id));
+  const head = heads.get(s.id);
+  // 下の行は幅が足りないことがあるので、worktree の元のフォルダはサイドバーと同じく名前の横に出す
+  fillBranch(q(".c-branch"), head, "none");
+  const origin = q(".c-origin");
+  origin.textContent = originLabel(head, "short");
+  origin.hidden = !origin.textContent;
+  origin.title = head?.origin ? `worktree の元のフォルダ: ${head.origin.root}` : "";
   q(".c-mem").textContent = fmtBytes(s.bytes);
 }
 
@@ -1080,16 +1089,43 @@ function renderOverview(waitingCount: number, total: number) {
 
 // ---------- ブランチと worktree ----------
 
-function fillBranch(span: HTMLElement, h: Head | undefined) {
-  span.hidden = !h;
-  span.textContent = h?.branch ?? "";
-  span.classList.toggle("worktree", !!h?.worktree);
-  span.title = h ? `${h.worktree ? "worktree のブランチ" : "ブランチ"}: ${h.branch}` : "";
+/** worktree の元のフォルダの出し方。full はヘッダーのように幅があるところで、元のフォルダの今のブランチまで出す */
+type OriginShown = "none" | "short" | "full";
+
+function originLabel(h: Head | undefined, shown: OriginShown) {
+  const o = h?.origin;
+  if (!o || shown === "none") return "";
+  const name = o.root.split(/[\\/]/).filter(Boolean).pop() ?? o.root;
+  return `← ${name}${shown === "full" ? `（${o.branch}）` : ""}`;
 }
 
-function branchTag(h: Head, cls: string) {
+function fillBranch(span: HTMLElement, h: Head | undefined, shown: OriginShown = "short") {
+  span.hidden = !h;
+  span.classList.toggle("worktree", !!h?.worktree);
+  const from = originLabel(h, shown);
+  span.textContent = h ? (from ? `${h.branch} ${from}` : h.branch) : "";
+  const o = h?.origin;
+  span.title = !h
+    ? ""
+    : o
+      ? `worktree のブランチ: ${h.branch}\n元のフォルダ: ${o.root}（今のブランチ ${o.branch}。取り込むとここに入ります）`
+      : `${h.worktree ? "worktree のブランチ" : "ブランチ"}: ${h.branch}`;
+}
+
+function sidebarName(name: string, h: Head | undefined) {
+  const span = el("span", "s-name", name);
+  const from = originLabel(h, "short");
+  if (from) {
+    const o = el("span", "s-origin", ` ${from}`);
+    o.title = `worktree の元のフォルダ: ${h!.origin!.root}`;
+    span.append(o);
+  }
+  return span;
+}
+
+function branchTag(h: Head, cls: string, shown: OriginShown = "short") {
   const span = el("span", `${cls} branch-tag`);
-  fillBranch(span, h);
+  fillBranch(span, h, shown);
   return span;
 }
 
