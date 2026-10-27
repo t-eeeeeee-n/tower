@@ -1139,6 +1139,7 @@ async function offerWorktreeCleanup(name: string, root: string) {
   const run = async (action: () => Promise<unknown>) => {
     const buttons = wtDialog.querySelectorAll("button");
     buttons.forEach((b) => (b.disabled = true));
+    $("wt-error").hidden = true;
     try {
       await action();
       wtDialog.close();
