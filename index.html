@@ -11,6 +11,7 @@
         <header class="sidebar-head">
           <span class="brand"><img class="brand-mark" src="/src/assets/tower.png" width="22" height="22" alt="" /><span class="brand-text">Tower</span></span>
           <button id="new-btn" class="icon-btn" title="新しいセッション（Ctrl+Shift+N）" aria-label="新しいセッション"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.5v11M1.5 7h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+          <button id="keys-btn" class="icon-btn" title="ショートカット（F1）" aria-label="ショートカット">?</button>
           <button id="look-btn" class="icon-btn" title="設定（Ctrl+,）" aria-label="設定"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.3v1.6M7 11.1v1.6M1.3 7h1.6M11.1 7h1.6M2.97 2.97l1.13 1.13M9.9 9.9l1.13 1.13M2.97 11.03l1.13-1.13M9.9 4.1l1.13-1.13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="7" cy="7" r="2.9" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
           <button id="sidebar-toggle" class="icon-btn" title="サイドバーをたたむ（Ctrl+Shift+B）" aria-label="サイドバーをたたむ" aria-expanded="true"><span class="chev">&gt;</span></button>
         </header>
@@ -88,17 +89,7 @@
               <button id="empty-new" class="primary-btn">新しく作る</button>
               <button id="empty-browse" class="text-btn">参照…</button>
             </div>
-            <dl class="keys">
-              <dt>Ctrl+Shift+N</dt><dd>新しいセッション</dd>
-              <dt>Ctrl+0</dt><dd>一覧を表示</dd>
-              <dt>Ctrl+1〜9</dt><dd>セッションを切り替え</dd>
-              <dt>Ctrl+Shift+A</dt><dd>次の入力待ちへ移動</dd>
-              <dt>Ctrl+Shift+C / V</dt><dd>コピー / 貼り付け</dd>
-              <dt>Ctrl+Shift+W</dt><dd>セッションを閉じる</dd>
-              <dt>Ctrl+Shift+T</dt><dd>テンプレートを入れる</dd>
-              <dt>Ctrl+Shift+L</dt><dd>ターミナル / 会話の切り替え</dd>
-              <dt>Ctrl+,</dt><dd>設定</dd>
-            </dl>
+            <dl id="empty-keys" class="keys"></dl>
           </div>
           <div id="empty-recents" class="welcome-recents" hidden>
             <p class="empty-sub">最近開いたプロジェクト</p>
@@ -234,6 +225,14 @@
           <button type="submit" class="primary-btn">OK</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="keys-dialog" class="dialog keys-dialog" aria-labelledby="keys-title">
+      <h2 id="keys-title">ショートカット</h2>
+      <div id="keys-list" class="keys-list"></div>
+      <div class="dialog-actions">
+        <button type="button" id="keys-close" class="text-btn">閉じる</button>
+      </div>
     </dialog>
 
     <dialog id="wt-dialog" class="dialog wt-dialog">

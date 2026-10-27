@@ -714,6 +714,12 @@ textarea:focus { border-color: var(--st-running); outline: none; }
 .s-branch { max-width: 9em; }
 .c-branch { max-width: 14em; }
 .wt-dialog { width: min(520px, 100vw - 32px); }
+.keys-dialog { width: min(560px, 100vw - 32px); max-height: 90vh; }
+.keys-list { overflow: auto; max-height: calc(90vh - 130px); margin-bottom: 14px; }
+.keys-list h3 { margin: 16px 0 8px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.keys-list h3:first-child { margin-top: 0; }
+.keys-list .keys { grid-template-columns: minmax(150px, auto) 1fr; font-size: 12.5px; }
+#keys-btn { font-weight: 700; font-size: 13px; }
 .wt-text { margin: 0 0 8px; overflow-wrap: anywhere; }
 .wt-facts { margin: 0 0 16px; padding-left: 18px; color: var(--muted); overflow-wrap: anywhere; }
 .wt-dialog button[hidden] { display: none; }

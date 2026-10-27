@@ -1652,6 +1652,70 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---------- キーボードショートカット ----------
+
+// ショートカットの一覧（F1 のダイアログ）。first は、セッションが無いときの画面にも出すもの
+const KEY_GROUPS: { title: string; keys: { k: string; d: string; first?: boolean }[] }[] = [
+  {
+    title: "全体",
+    keys: [
+      { k: "Ctrl+Shift+N", d: "新しいセッション", first: true },
+      { k: "Ctrl+0", d: "一覧 / 直前のセッションへ切り替え", first: true },
+      { k: "Ctrl+1〜9", d: "サイドバーの番号のセッションへ切り替え", first: true },
+      { k: "Ctrl+Shift+A", d: "次の入力待ちのセッションへ移動", first: true },
+      { k: "Ctrl+Shift+W", d: "表示中のセッションを閉じる", first: true },
+      { k: "Ctrl+Shift+T", d: "指示のテンプレートを入れる", first: true },
+      { k: "Ctrl+Shift+B", d: "サイドバーをたたむ / 開く" },
+      { k: "Ctrl+,", d: "設定", first: true },
+      { k: "F1", d: "この一覧", first: true },
+    ],
+  },
+  {
+    title: "セッション画面",
+    keys: [
+      { k: "Ctrl+Shift+L", d: "ターミナル / 会話の切り替え", first: true },
+      { k: "Ctrl+Shift+E", d: "ファイルの表示 / 非表示" },
+      { k: "Ctrl+Shift+C / V", d: "コピー / 貼り付け（Ctrl+C はエージェントの中断に使う）", first: true },
+      { k: "Shift+Enter / Alt+Enter", d: "エージェントの入力欄で改行" },
+    ],
+  },
+  {
+    title: "会話の入力欄（セッション画面と一覧のカード）",
+    keys: [
+      { k: "Enter", d: "送信（指示待ちのときだけ）" },
+      { k: "Shift+Enter / Alt+Enter", d: "改行" },
+      { k: "Esc", d: "作業中なら中断" },
+      { k: "/（入力欄が空のとき）", d: "コマンドの候補を出す（画面の表示に切り替わる）" },
+    ],
+  },
+  {
+    title: "一覧画面",
+    keys: [
+      { k: "画面の末尾をクリック", d: "そのセッションにそのままキー入力" },
+      { k: "ダブルクリック", d: "そのセッションのターミナルを開く" },
+      { k: "名前の行をドラッグ", d: "並べ替え（サイドバーと同じ並び）" },
+    ],
+  },
+];
+
+function keyRows(keys: { k: string; d: string }[]) {
+  return keys.flatMap(({ k, d }) => [el("dt", "", k), el("dd", "", d)]);
+}
+
+$("empty-keys").replaceChildren(...keyRows(KEY_GROUPS.flatMap((g) => g.keys.filter((x) => x.first))));
+$("keys-list").replaceChildren(
+  ...KEY_GROUPS.flatMap((g) => {
+    const dl = el("dl", "keys");
+    dl.append(...keyRows(g.keys));
+    return [el("h3", "", g.title), dl];
+  }),
+);
+const keysDialog = $<HTMLDialogElement>("keys-dialog");
+function showKeys() {
+  if (!keysDialog.open) keysDialog.showModal();
+}
+$("keys-btn").onclick = showKeys;
+$("keys-close").onclick = () => keysDialog.close();
+
 // キャプチャ段階で拾うので、ターミナルにフォーカスがあっても先に処理される
 
 document.addEventListener(
@@ -1668,6 +1732,8 @@ document.addEventListener(
       else if (activeId) activate(activeId);
     } else if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === ",") {
       settings.open();
+    } else if (e.key === "F1" && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+      showKeys();
     } else if (e.ctrlKey && e.shiftKey && k === "t") {
       insertTemplate();
     } else if (e.ctrlKey && e.shiftKey && k === "n") {
