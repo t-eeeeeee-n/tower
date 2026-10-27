@@ -313,6 +313,13 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     renderViewer();
   }
 
+  function modeOf(v: View, rel: string): Mode {
+    const status = changes.get(rel);
+    const md = isMarkdown(rel);
+    const mode: Mode = status === "D" ? "diff" : (v.mode ?? (status ? "diff" : md ? "preview" : "file"));
+    return mode === "preview" && !md ? "file" : mode;
+  }
+
   async function renderViewer() {
     const v = view();
     const rel = v.selected;
@@ -326,8 +333,7 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     }
     const status = changes.get(rel);
     const md = isMarkdown(rel);
-    let mode: Mode = status === "D" ? "diff" : (v.mode ?? (status ? "diff" : md ? "preview" : "file"));
-    if (mode === "preview" && !md) mode = "file";
+    const mode = modeOf(v, rel);
     modes.hidden = status === "D" || (!status && !md);
     for (const b of modes.querySelectorAll<HTMLButtonElement>("button")) {
       b.hidden = (b.dataset.mode === "diff" && !status) || (b.dataset.mode === "preview" && !md);
@@ -498,9 +504,15 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     };
   };
 
+  // 一覧と Git の変更は、決まった間隔では取り直さない。git の起動はウイルス対策ソフトの検査で 1 回 1 秒ほどかかることがあり、
+  // 作業中のファイルの増減は作業が終われば状態の変化（sessionChanged）で反映されるため。
+  // 開いているファイルの中身は読むだけで軽いので、書き換えられたらすぐ見えるよう読み直す（差分は git を使うので読み直さない）
   setInterval(() => {
-    if (visible() && !document.hidden) refresh();
+    const rel = sessionId && view().selected;
+    if (!visible() || document.hidden || refreshing || !rel || modeOf(view(), rel) === "diff") return;
+    renderViewer();
   }, POLL_MS);
+  window.addEventListener("focus", () => refresh());
 
   apply();
 

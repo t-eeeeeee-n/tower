@@ -71,17 +71,19 @@ fn session_root(state: &App, id: &str) -> Result<std::path::PathBuf, String> {
     Ok(std::path::PathBuf::from(&state.manager.get(id)?.cwd))
 }
 
-#[tauri::command]
+// async にしないコマンドは画面と同じスレッドで動き、終わるまで画面が固まる。
+// git を呼ぶもの・ファイルを読むものは async にする（git.exe の起動はウイルス対策ソフトの検査で 1 秒ほどかかることがある）
+#[tauri::command(async)]
 fn list_dir(state: State<'_, App>, id: String, path: String) -> Result<Vec<files::Entry>, String> {
     files::list_dir(&session_root(&state, &id)?, &path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn read_file(state: State<'_, App>, id: String, path: String) -> Result<files::FileContent, String> {
     files::read_file(&session_root(&state, &id)?, &path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_changes(state: State<'_, App>, id: String) -> Result<files::Changes, String> {
     let root = session_root(&state, &id)?;
     if !files::in_repo(&root) {
@@ -93,7 +95,7 @@ fn git_changes(state: State<'_, App>, id: String) -> Result<files::Changes, Stri
     Ok(files::changes(&git::git_program(&state.manager.shell.program), &root))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_diff(state: State<'_, App>, id: String, path: String) -> Result<String, String> {
     let root = session_root(&state, &id)?;
     if !state.trust.contains(&root) {
@@ -112,7 +114,7 @@ fn installed_agents() -> Vec<Agent> {
     agent::installed()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn create_worktree(state: State<'_, App>, cwd: String, branch: String) -> Result<String, String> {
     let dir = git::create_worktree(&git::git_program(&state.manager.shell.program), &cwd, &branch)?;
     // 信頼したフォルダから作った worktree は、同じリポジトリなので信頼済みにする
