@@ -189,6 +189,12 @@ fn peek_sessions(state: State<'_, App>, lines: usize, known: std::collections::H
 }
 
 #[tauri::command]
+fn session_footer(state: State<'_, App>, id: String) -> Result<Vec<Vec<session::Span>>, String> {
+    state.manager.footer(&id)
+}
+
+/// `agent` を渡すと、そのサブエージェントの会話を読む
+#[tauri::command(async)]
 fn read_transcript(
     state: State<'_, App>,
     id: String,
@@ -316,6 +322,7 @@ pub fn run() {
             attach_session,
             peek_sessions,
             read_transcript,
+            session_footer,
             write_session,
             set_scrollback,
             rename_session,

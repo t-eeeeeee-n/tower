@@ -293,6 +293,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .log-compose textarea { flex: 1; min-width: 0; resize: none; max-height: 200px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; line-height: 1.5; }
 .log-compose textarea:focus { outline: none; border-color: var(--st-running); }
 .log-compose button:disabled { opacity: 0.45; }
+.log-footer { flex: none; margin: 0; padding: 0 max(8px, calc((100% - 820px) / 2)) 8px; font: 11.5px/1.45 var(--mono); color: var(--term-dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-footer[hidden] { display: none; }
 .lg-user { display: flex; justify-content: flex-end; margin: 10px 12px 6px 36px; }
 .lg-user-text { padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: var(--raise-2); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
 .lg-command { margin: 8px 12px; color: var(--muted); font: 12px var(--mono); }
@@ -303,6 +305,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .lg-tool summary:hover { background: var(--raise); }
 .lg-tool-name { flex: none; color: var(--st-running); font-weight: 600; }
 .lg-tool-arg { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+[data-status="running"] .lg-tool.lg-pending { border-left-color: var(--st-running); }
+[data-status="running"] .lg-tool.lg-pending > summary::after { content: "実行中"; flex: none; margin-left: auto; color: var(--st-running); animation: c-pulse 1.2s ease-in-out infinite; }
 .lg-tool.lg-error { border-left-color: var(--danger); }
 .lg-tool.lg-error .lg-tool-name { color: var(--danger); }
 .lg-result { margin: 2px 0 6px 8px; padding: 6px 8px; max-height: 240px; overflow: auto; background: var(--ink); color: var(--muted); font: 11.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -440,7 +444,16 @@ pre.lg-result.lg-error { color: var(--danger); }
 .c-log .lg-user { margin: 8px 6px 4px 24px; }
 .c-log .lg-command, .c-log .lg-tool { margin-left: 6px; margin-right: 6px; }
 .c-log .lg-assistant.md-preview { padding: 2px 8px; font-size: 12.5px; line-height: 1.65; }
+.c-activity { flex: none; display: flex; align-items: center; gap: 7px; padding: 4px 10px; border-top: 1px solid var(--line); color: var(--st-running); font: 11.5px var(--mono); }
+.c-activity[hidden] { display: none; }
+.c-activity::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: c-pulse 1.2s ease-in-out infinite; }
+.c-activity span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.c-activity.still { color: var(--st-waiting); }
+.c-activity.still::before { animation: none; }
+@keyframes c-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .c-activity::before, .lg-pending > summary::after { animation: none !important; } }
 .c-compose.log-compose { padding: 6px; gap: 6px; }
+.c-footer.log-footer { padding: 0 8px 6px; font-size: 10.5px; }
 .c-compose textarea { padding: 5px 8px; font-size: 12.5px; }
 .c-compose button { padding: 4px 10px; font-size: 12px; }
 .c-foot { display: flex; gap: 12px; padding: 8px 10px 9px; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }

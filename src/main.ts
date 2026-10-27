@@ -64,6 +64,8 @@ interface Peek {
   /** 前回から画面が変わっていなければ null */
   lines: Span[][] | null;
   cursor_hidden: boolean;
+  /** 入力欄の下の行（Claude Code のステータスラインなど）。lines と同じく、変わっていなければ null */
+  footer: Span[][] | null;
   seq: number;
 }
 interface Config {
@@ -747,12 +749,17 @@ let peekLines = 0;
 function showOverview() {
   if (view === "overview") return;
   view = "overview";
+  // 一覧を離れている間は取り込んでいないので、変わっていないのか見ていないだけなのか区別できない
+  screenChangedAt.clear();
   term.blur();
   render();
   if (!peekTimer) pollPeeks();
 }
 
 let peeking = false;
+// 画面が最後に変わった時刻。作業中のまま止まっているのかを、会話カードの作業中の行で見せるのに使う
+const screenChangedAt = new Map<string, number>();
+const STILL_MS = 30_000;
 
 // 打った文字が画面に出るまでの待ちを縮めるため、次の取り込みを前倒しする
 function pokePeeks() {
@@ -774,7 +781,11 @@ async function pollPeeks() {
     const known = lines === peekLines ? Object.fromEntries([...peeks].map(([id, p]) => [id, p.seq])) : {};
     peekLines = lines;
     const list = await invoke<Peek[]>("peek_sessions", { lines, known });
-    for (const p of list) peeks.set(p.id, { ...p, lines: p.lines ?? peeks.get(p.id)?.lines ?? [] });
+    for (const p of list) {
+      if (p.lines || !screenChangedAt.has(p.id)) screenChangedAt.set(p.id, Date.now());
+      const prev = peeks.get(p.id);
+      peeks.set(p.id, { ...p, lines: p.lines ?? prev?.lines ?? [], footer: p.footer ?? prev?.footer ?? [] });
+    }
     render();
   } catch (e) {
     showError(e);
@@ -881,9 +892,14 @@ function makeCardConversation(id: string) {
   const sendBtn = el("button", "primary-btn", "送信");
   sendBtn.type = "button";
   compose.append(input, sendBtn);
-  root.append(body, compose);
+  const activity = el("div", "c-activity");
+  activity.hidden = true;
+  activity.append(el("span"));
+  const footer = el("pre", "log-footer c-footer");
+  footer.hidden = true;
+  root.append(body, activity, compose, footer);
   input.addEventListener("paste", (ev) => pasteImage(id, ev));
-  body.ondblclick = () => activate(id);
+  body.ondblclick = activity.ondblclick = () => activate(id);
   const tv = createTranscriptView({
     root,
     body,
@@ -1008,6 +1024,54 @@ function makeCard(id: string) {
   return card;
 }
 
+// エージェントが作業中に出す進み具合の行。Claude Code は「✻ Thinking… (12s · esc to interrupt)」、
+// Codex は「• Working (12s • esc to interrupt)」。会話の記録には残らないので画面から拾う。
+// 括弧の中は「1m 40s」や「running Stop hooks… 1/3 · …」にもなるので、秒数の形までは見ない
+const ACTIVITY_LINE = /esc to interrupt|^\S\s+\S+…\s*\(/i;
+
+function activityLine(lines: Span[][]) {
+  for (const line of lines.slice(-15).reverse()) {
+    const text = line.map((s) => s.t).join("").trim();
+    if (ACTIVITY_LINE.test(text)) return text;
+  }
+  return null;
+}
+
+function fmtElapsed(since: number) {
+  const sec = Math.max(0, Math.floor((Date.now() - since) / 1000));
+  return sec < 60 ? `${sec}秒` : `${Math.floor(sec / 60)}分${sec % 60}秒`;
+}
+
+function showActivity(row: HTMLElement, s: Session, lines: Span[][] | null) {
+  row.hidden = !lines || s.status !== "running";
+  if (row.hidden || !lines) return;
+  const changed = screenChangedAt.get(s.id) ?? Date.now();
+  const still = Date.now() - changed >= STILL_MS;
+  const text = activityLine(lines) ?? `作業中（${fmtElapsed(s.since)}）`;
+  row.classList.toggle("still", still);
+  row.firstElementChild!.textContent = still ? `${text} — 画面の変化なし ${fmtElapsed(changed)}` : text;
+  row.title = still ? "しばらく画面が変わっていません。ダブルクリックでターミナルを開いて確かめられます" : "";
+}
+
+function showFooter(pre: HTMLElement, lines: Span[][]) {
+  const key = JSON.stringify(lines);
+  if (pre.dataset.key === key) return;
+  pre.dataset.key = key;
+  pre.hidden = !lines.length;
+  pre.replaceChildren(renderScreen(lines, true, ""));
+}
+
+// セッション画面の会話の表示でも、入力欄の下にエージェントの画面の入力欄の下の行を出す
+setInterval(() => {
+  const id = attachedId;
+  if (!id || view !== "session" || !log.shown || document.hidden) return;
+  invoke<Span[][]>("session_footer", { id })
+    .then((lines) => {
+      if (id === attachedId) showFooter($("log-footer"), lines);
+    })
+    .catch(() => {});
+}, 1000);
+
 function updateCard(card: HTMLElement, s: Session) {
   const q = (cls: string) => card.querySelector<HTMLElement>(cls)!;
   card.dataset.status = s.status;
@@ -1039,6 +1103,8 @@ function updateCard(card: HTMLElement, s: Session) {
   if (conv) {
     conv.setStatus(s.status);
     conv.show(conversing);
+    showActivity(q(".c-activity"), s, conversing ? lines : null);
+    showFooter(q(".c-footer"), conversing ? (peek?.footer ?? []) : []);
   }
   tail.hidden = conversing;
   // 会話の表示に切り替わったあとも画面用の欄にフォーカスが残っていると、打った文字が見えないままセッションに届く

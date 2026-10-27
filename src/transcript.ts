@@ -98,7 +98,11 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         const s = el("summary");
         s.append(el("span", "lg-tool-name", e.tool ?? ""), el("span", "lg-tool-arg", e.text));
         n.append(s);
-        if (e.id) pending.set(e.id, n);
+        // 結果が届くまでは実行中（Bash やサブエージェントが動いているか、作業中の間はこの印で見分ける）
+        if (e.id) {
+          pending.set(e.id, n);
+          n.classList.add("lg-pending");
+        }
         return n;
       }
       case "result": {
@@ -107,6 +111,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         const tool = e.id ? pending.get(e.id) : undefined;
         if (tool) {
           tool.append(pre);
+          tool.classList.remove("lg-pending");
           tool.classList.toggle("lg-error", e.error);
           pending.delete(e.id!);
           return null;
@@ -225,6 +230,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     setStatus(next: string) {
       if (next === status) return;
       status = next;
+      // 中断されたツールには結果が残らないことがあるので、実行中の印は作業中の間だけ見せる（style.css）
+      root.dataset.status = next;
       applyStatus();
     },
     focus() {

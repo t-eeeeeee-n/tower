@@ -65,6 +65,8 @@ pub struct Peek {
     pub lines: Option<Vec<Vec<Span>>>,
     /// エージェントがカーソルを隠しているか（隠していても、日本語入力の変換中の文字を出す位置には使う）
     pub cursor_hidden: bool,
+    /// 入力欄の下の行（`footer_lines`）。lines と同じく、画面が変わっていなければ None
+    pub footer: Option<Vec<Vec<Span>>>,
     pub seq: u64,
 }
 
@@ -476,8 +478,10 @@ impl Manager {
             .map(|s| {
                 let mut t = s.term.lock().unwrap();
                 let seq = t.seq;
-                let lines = (known.get(&s.id) != Some(&seq)).then(|| tail_lines(&mut t.parser, max_lines));
-                Peek { id: s.id.clone(), lines, cursor_hidden: t.parser.screen().hide_cursor(), seq }
+                let changed = known.get(&s.id) != Some(&seq);
+                let lines = changed.then(|| tail_lines(&mut t.parser, max_lines));
+                let footer = changed.then(|| footer_lines(t.parser.screen()));
+                Peek { id: s.id.clone(), lines, cursor_hidden: t.parser.screen().hide_cursor(), footer, seq }
             })
             .collect()
     }
@@ -523,6 +527,10 @@ impl Manager {
         if let Ok(session) = self.get(id) {
             *session.transcript.lock().unwrap() = Some(path);
         }
+    }
+
+    pub fn footer(&self, id: &str) -> Result<Vec<Vec<Span>>, String> {
+        Ok(footer_lines(self.get(id)?.term.lock().unwrap().parser.screen()))
     }
 
     pub fn transcript(&self, id: &str) -> Result<Option<PathBuf>, String> {
@@ -633,6 +641,25 @@ fn tail_lines(parser: &mut vt100::Parser, max: usize) -> Vec<Vec<Span>> {
     out.split_off(start)
 }
 
+const MAX_FOOTER: usize = 4;
+
+/// 入力欄の枠の線（`────`、古い版の Claude Code は `╰───╯`）
+fn is_rule(text: &str) -> bool {
+    let t = text.trim();
+    t.chars().filter(|&c| c == '─').count() >= 10 && t.chars().all(|c| "─╭╮╰╯".contains(c))
+}
+
+/// Claude Code が入力欄の下に出している行（ステータスライン・auto mode などのモードの表示）。
+/// 会話の記録には残らないので画面から拾う。入力欄の下の線より下の、空でない行まで。線が無ければ空
+fn footer_lines(screen: &vt100::Screen) -> Vec<Vec<Span>> {
+    let (rows, cols) = screen.size();
+    let (rows, cols) = (rows.get(), cols.get());
+    let texts: Vec<String> = (0..rows).map(|r| screen.contents_between(r, 0, r, cols)).collect();
+    let Some(rule) = texts.iter().rposition(|t| is_rule(t)) else { return Vec::new() };
+    let Some(last) = texts.iter().rposition(|t| !t.trim().is_empty()).filter(|&l| l > rule) else { return Vec::new() };
+    (rule + 1..=last).take(MAX_FOOTER).map(|r| row_spans(screen, r as u16, cols, None)).collect()
+}
+
 /// 画面より上に流れた行を古い順に返す。xterm.js のスクロール履歴に積めるよう、1 行ずつ改行で区切る
 fn history(parser: &mut vt100::Parser) -> String {
     let screen = parser.screen_mut();
@@ -670,7 +697,7 @@ fn resize_locked(session: &Session, t: &mut Term, cols: u16, rows: u16) {
 
 #[cfg(test)]
 mod tests {
-    use super::{history, tail_lines, Span, Term, CURSOR, DIM};
+    use super::{footer_lines, history, tail_lines, Span, Term, CURSOR, DIM};
     use std::num::NonZero;
 
     #[test]
@@ -717,6 +744,18 @@ mod tests {
         assert_eq!(lines.len(), 2);
     }
 
+    #[test]
+    fn footer_is_below_the_input_rule() {
+        let mut p = vt100::Parser::new(NonZero::new(8).unwrap(), NonZero::new(30).unwrap(), 0);
+        let rule = "─".repeat(30);
+        p.process(format!("● 返事\r\n{rule}\r\n> \r\n{rule}\r\n  opus | tower\r\n  ▶▶ auto mode on").as_bytes());
+        assert_eq!(text(footer_lines(p.screen())), ["  opus | tower", "  ▶▶ auto mode on"]);
+
+        // 線が無い画面（シェルや Codex）では出さない
+        let mut p = vt100::Parser::new(NonZero::new(4).unwrap(), NonZero::new(30).unwrap(), 0);
+        p.process(b"$ ls\r\nfoo");
+        assert!(footer_lines(p.screen()).is_empty());
+    }
 
     #[test]
     fn shrinking_through_a_wide_char_does_not_panic() {
