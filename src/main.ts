@@ -1601,6 +1601,7 @@ document.addEventListener(
 
 // 短い応答のたびに完了を通知するとうるさいので、この時間以上かかった作業だけ通知する
 const DONE_NOTIFY_MS = 20_000;
+const workStart = new Map<string, number>();
 
 function notify(id: string, title: string, body: string) {
   invoke("notify", { id, title, body }).catch(() => {});
@@ -1624,8 +1625,14 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
   const s = sessions.get(payload.id);
   if (!s) return;
   const becameWaiting = payload.status === "waiting" && s.status !== "waiting";
-  const finished = s.status === "running" && payload.status === "idle";
-  const ranFor = finished ? payload.since - s.since : 0;
+  // 許可の確認を挟むと、許可した操作が最後なら入力待ちから直接指示待ちになる。
+  // そのときも完了として扱い、かかった時間は入力待ちの前の作業の始まりから数える。
+  // 起動中は hook が届くまで画面の変化から作業中と推測するので、作業の始まりは指示待ちからのときだけ数える
+  if (payload.status === "running" && s.status === "idle") workStart.set(s.id, payload.since);
+  const started = workStart.get(s.id);
+  const finished = started !== undefined && payload.status === "idle" && (s.status === "running" || s.status === "waiting");
+  const ranFor = finished ? payload.since - started : 0;
+  if (payload.status !== "running" && payload.status !== "waiting") workStart.delete(s.id);
   Object.assign(s, { status: payload.status, since: payload.since, message: payload.message });
   // また動き出したり入力待ちになったりしたら、終わった印は外す（入力待ちは別の印で目立たせる）
   if (payload.status !== "idle") unseen.delete(s.id);
