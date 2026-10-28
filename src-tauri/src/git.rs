@@ -303,7 +303,9 @@ mod tests {
         let h = head(&dir).unwrap();
         assert_eq!((h.branch.as_str(), h.worktree), ("feature/y", true));
         let origin = h.origin.unwrap();
-        assert_eq!((Path::new(&origin.root), origin.branch.as_str()), (repo.as_path(), "main"));
+        // 一時フォルダは 8.3 形式の短い名前（RUNNER~1 など）になることがあり、git は長い名前で書くので、実際の場所で比べる
+        let real = |p: &Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!((real(Path::new(&origin.root)), origin.branch.as_str()), (real(&repo), "main"));
         assert_eq!(head_main.origin, None);
 
         commit(&dir, "work");
