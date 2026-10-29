@@ -52,6 +52,11 @@ export function createMascot(px: number, state: MascotState = "ok") {
   const svg = pixels(GRID, px, "mascot", (c, x, y) =>
     PART[c] && (c === "E" && GRID[y + 1]?.[x] === "E" ? `${PART[c]} m-eye-top` : PART[c]),
   );
+  // 目を動かしても元の場所に穴が開かず、隣の窓の点に隠れないよう、窓の色を下に敷いて目を最後に描く
+  const under = document.createElementNS(NS, "rect");
+  for (const [k, v] of Object.entries({ x: 2, y: 4, width: 9, height: 4, class: "m-window" })) under.setAttribute(k, String(v));
+  svg.prepend(under);
+  svg.append(...svg.querySelectorAll(".m-eye"));
   svg.setAttribute("role", "img");
   setMascot(svg, state);
   return svg;
@@ -61,6 +66,11 @@ export function createMascot(px: number, state: MascotState = "ok") {
 const PLANE = ["T.......", "TT.PP...", "PPPPPPPL", "...PP..."];
 const PLANE_PART: Record<string, string> = { P: "p-body", T: "p-tail", L: "p-light" };
 const TAKEOFF_MS = 3200;
+const LAND_MS = 900;
+/** 離陸の動き（style.css の ws-takeoff）で、滑走路を離れて上りはじめるところ */
+const LIFTOFF_MS = TAKEOFF_MS * 0.45;
+const HOP_MS = 500;
+const GLANCE_MS = 1200;
 
 /**
  * セッションが無いときの画面の下に置く、管制塔と滑走路の小さな場面。
@@ -76,6 +86,42 @@ export function createWelcomeScene(root: HTMLElement) {
   const mascot = createMascot(6, "ok");
   mascot.classList.add("alive");
   tower.append(mascot);
+  const still = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // 動きを付け直すと、CSS のアニメーションを最初から流し直す
+  const flash = (cls: string, ms: number) => {
+    mascot.classList.remove(cls);
+    void mascot.getBoundingClientRect();
+    mascot.classList.add(cls);
+    setTimeout(() => mascot.classList.remove(cls), ms);
+  };
+  let watching = false;
+  const look = (dir: string) => {
+    if (dir) mascot.dataset.look = dir;
+    else delete mascot.dataset.look;
+  };
+  // 飛行機を見送る。アンテナで合図して跳ね、目で追う
+  const seeOff = () => {
+    watching = true;
+    flash("signal", 700);
+    flash("hop", HOP_MS);
+    look("right");
+    setTimeout(() => look("up"), LIFTOFF_MS);
+    setTimeout(() => {
+      look("");
+      watching = false;
+    }, TAKEOFF_MS);
+  };
+  // 何も飛んでいないときは、ときどき左右を見る
+  setInterval(() => {
+    if (watching || still() || !root.offsetParent || Math.random() > 0.12) return;
+    look(Math.random() < 0.5 ? "left" : "right");
+    setTimeout(() => !watching && look(""), GLANCE_MS);
+  }, 1000);
+  tower.onclick = () => {
+    if (still()) return;
+    flash("hop", HOP_MS);
+    flash("happy", 900);
+  };
   const planes = [0, 1, 2].map((i) => {
     const p = document.createElement("div");
     p.className = `ws-plane ws-plane-${i}`;
@@ -90,17 +136,24 @@ export function createWelcomeScene(root: HTMLElement) {
     return s;
   });
   root.replaceChildren(...stars, ground, runway, tower, ...planes);
+  // 滑走路の先頭（右）から順に離陸し、飛んでいった機体は戻さない。3 機とも飛び去ったら、そろって現れ直す
+  const queue = [...planes].reverse();
 
-  /** 止まっている飛行機を 1 機離陸させ、しばらくしたら元の場所に戻す */
+  /** 次の飛行機を 1 機離陸させる。最後の 1 機なら、飛び去ったあとに 3 機を元の場所に戻す */
   function takeoff() {
-    const p = planes.find((x) => !x.classList.contains("fly"));
-    if (!p || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const p = queue.find((x) => !x.classList.contains("fly") && !x.classList.contains("land"));
+    if (!p) return;
     p.classList.add("fly");
+    seeOff();
+    if (queue.some((x) => !x.classList.contains("fly"))) return;
     setTimeout(() => {
-      p.classList.remove("fly");
-      p.classList.add("land");
-      setTimeout(() => p.classList.remove("land"), 900);
-    }, TAKEOFF_MS + 2500);
+      for (const x of queue) {
+        x.classList.remove("fly");
+        x.classList.add("land");
+      }
+      setTimeout(() => queue.forEach((x) => x.classList.remove("land")), LAND_MS);
+    }, TAKEOFF_MS + 600);
   }
   return { takeoff };
 }

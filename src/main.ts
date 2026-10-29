@@ -672,11 +672,21 @@ renameDialog.onclose = () => {
 
 let trayWaiting = 0;
 
-// セッションが無いときの画面の下の場面。ときどき飛行機が 1 機離陸し、セッションを始める操作でもすぐに離陸する
+// セッションが無いときの画面の下の場面。出てすぐと、その後は一定の間隔で飛行機が 1 機離陸し、
+// セッションを始める操作でもすぐに離陸する。間隔は、3 機目が飛び去って 3 機が現れ直すまで（約 4.7 秒）より長くする
 const scene = createWelcomeScene($("welcome-scene"));
+const SCENE_FIRST_S = 1;
+const SCENE_EVERY_S = 5;
+let sceneWait = SCENE_FIRST_S;
 setInterval(() => {
-  if (!$("welcome-scene").hidden && !document.hidden) scene.takeoff();
-}, 9000);
+  if ($("welcome-scene").hidden || document.hidden) {
+    sceneWait = SCENE_FIRST_S;
+    return;
+  }
+  if (--sceneWait > 0) return;
+  scene.takeoff();
+  sceneWait = SCENE_EVERY_S;
+}, 1000);
 $("empty").addEventListener("click", (ev) => {
   if ((ev.target as HTMLElement).closest("button, li")) scene.takeoff();
 });

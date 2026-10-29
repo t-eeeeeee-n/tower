@@ -126,7 +126,17 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .welcome-scene[hidden] { display: none; }
 .ws-ground { position: absolute; inset: auto 0 0 0; height: 34px; background: color-mix(in srgb, var(--ink) 70%, #000); border-top: 1px solid var(--line); }
 .ws-runway { position: absolute; left: max(150px, 22%); right: 12%; bottom: 14px; height: 4px; background: repeating-linear-gradient(90deg, var(--line) 0 18px, transparent 18px 30px); }
-.ws-tower { position: absolute; left: max(24px, 10%); bottom: 33px; }
+.ws-tower { position: absolute; left: max(24px, 10%); bottom: 33px; pointer-events: auto; cursor: pointer; }
+/* 目の向き（1 点ずつ動かす）。飛行機を見送るときと、ときどき見回すとき */
+.mascot[data-look="right"] .m-eye { transform: translateX(1px); }
+.mascot[data-look="left"] .m-eye { transform: translateX(-1px); }
+.mascot[data-look="up"] .m-eye { transform: translate(1px, -1px); }
+.mascot.hop { animation: m-hop 0.5s steps(1, end); }
+.mascot.signal .m-light { animation: m-signal 0.7s steps(1, end); }
+.mascot.happy .m-eye:not(.m-eye-top) { fill: #ef8a3c; }
+.mascot.happy .m-eye-top { animation: none; }
+@keyframes m-hop { 0% { transform: none; } 20% { transform: translateY(-6px); } 55% { transform: none; } 70% { transform: translateY(-3px); } 85% { transform: none; } }
+@keyframes m-signal { 0%, 30%, 60% { opacity: 1; fill: #fff; } 15%, 45%, 75% { opacity: 0.2; } }
 .ws-star { position: absolute; width: 2px; height: 2px; background: var(--line); }
 .ws-plane { position: absolute; bottom: 19px; }
 .ws-plane-0 { left: max(170px, 26%); }
@@ -139,7 +149,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .ws-plane.land { animation: ws-return 0.9s ease-out; }
 @keyframes ws-takeoff { 0% { transform: translate(0, 0); } 45% { transform: translate(120px, 0); } 100% { transform: translate(min(60vw, 720px), -140px); opacity: 0; } }
 @keyframes ws-return { from { opacity: 0; transform: translateX(-16px); } to { opacity: 1; transform: none; } }
-@media (prefers-reduced-motion: reduce) { .mascot.alive .m-light, .mascot.alive .m-eye-top, .ws-plane { animation: none !important; } }
+@media (prefers-reduced-motion: reduce) { .mascot.alive .m-light, .mascot.alive .m-eye-top, .mascot.hop, .ws-plane { animation: none !important; } }
 .icon-btn {
   width: 28px; height: 28px;
   display: grid; place-items: center;
