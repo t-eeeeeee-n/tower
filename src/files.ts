@@ -376,10 +376,6 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     const div = el("div", "md-preview");
     div.innerHTML = markdownHtml(text);
     for (const a of div.querySelectorAll("a")) a.title = a.getAttribute("href") ?? "";
-    // リンクを開くと Tower の画面そのものが別のページに移ってしまうので、開かない
-    div.onclick = (ev) => {
-      if ((ev.target as HTMLElement).closest("a")) ev.preventDefault();
-    };
     return [div];
   }
 

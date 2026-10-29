@@ -2,6 +2,7 @@
 // セッション画面ではターミナルの代わりに、一覧では各カードに出す
 import { invoke } from "@tauri-apps/api/core";
 import { markdownHtml } from "./files";
+import { linkify } from "./links";
 
 interface Entry {
   kind: "user" | "assistant" | "command" | "tool" | "result";
@@ -9,6 +10,8 @@ interface Entry {
   tool: string | null;
   id: string | null;
   error: boolean;
+  /** data URL */
+  images?: string[];
 }
 interface Chunk {
   path: string | null;
@@ -24,8 +27,54 @@ interface Subagent {
   modified: number;
 }
 
+interface Shell {
+  id: string;
+  tool_use_id: string;
+  description: string;
+  command: string;
+  status: "running" | "completed" | "failed" | "killed";
+  started: string;
+}
+interface ShellOutput {
+  text: string;
+  truncated: boolean;
+}
+
 // サブエージェントは裏で動いていても本体の状態に出ないので、記録ファイルが書き換えられてからの時間で作業中とみなす
 const SUBAGENT_ACTIVE_MS = 15_000;
+type Group = "agent" | "shell";
+const GROUP_LABEL: Record<Group, string> = { agent: "サブエージェント", shell: "シェル" };
+interface Item {
+  id: string;
+  label: string;
+  /** 種類（サブエージェント）やコマンド（シェル） */
+  sub: string;
+  /** running / quiet（サブエージェントがしばらく書き換えていない）/ completed / failed / killed */
+  state: string;
+  time: () => string;
+  title: string;
+  selected: boolean;
+  pick: () => void;
+}
+const SHELL_LABEL: Record<Shell["status"], string> = { running: "実行中", completed: "完了", failed: "失敗", killed: "停止" };
+const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]/g;
+
+// 進み具合を \r で上書きする出力は、上書きされた後の文字だけを残す
+function plainOutput(text: string) {
+  return text
+    .replace(ANSI, "")
+    .split("\n")
+    .map((line) => line.replace(/\r$/, "").split("\r").pop()!)
+    .join("\n");
+}
+
+function fmtSince(ms: number) {
+  const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (!Number.isFinite(sec)) return "";
+  if (sec < 60) return `${sec}秒`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}分${sec % 60}秒`;
+  return `${Math.floor(sec / 3600)}時間${Math.floor(sec / 60) % 60}分`;
+}
 const AGENT_TOOLS = ["Agent", "Task"];
 
 // 会話の記録の場所を SessionStart の hook で受け取れるエージェント
@@ -33,6 +82,37 @@ export const TRANSCRIPT_AGENTS = ["claude", "codex"];
 const POLL_MS = 1500;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+let imageDialog: HTMLDialogElement | null = null;
+
+// 縮小した画像を押すと、ウィンドウいっぱいの大きさで見せる（どこかを押すか Esc で閉じる）
+function showImage(src: string) {
+  if (!imageDialog) {
+    imageDialog = el("dialog", "img-view");
+    imageDialog.append(el("img"));
+    imageDialog.onclick = () => imageDialog!.close();
+    document.body.append(imageDialog);
+  }
+  imageDialog.querySelector("img")!.src = src;
+  imageDialog.showModal();
+}
+
+function imageStrip(images: string[]) {
+  const box = el("div", "lg-images");
+  for (const src of images) {
+    const img = el("img", "lg-img");
+    img.src = src;
+    img.alt = "画像";
+    img.title = "クリックで大きく表示";
+    img.onclick = (ev) => {
+      // カードのクリック（入力欄に移る）にさせない
+      ev.stopPropagation();
+      showImage(src);
+    };
+    box.append(img);
+  }
+  return box;
+}
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string) {
   const e = document.createElement(tag);
@@ -83,12 +163,18 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   // 表示しているサブエージェント（null ならメインの会話）
   let agent: string | null = null;
   let agents: Subagent[] = [];
+  // 出力を表示している、裏で動くシェル（agent と同時には選ばない）
+  let shell: string | null = null;
+  let shells: Shell[] = [];
+  // 数が増えても幅が変わらないよう、列には種類ごとのボタンだけを置き、中身は押して開く一覧で選ぶ
   const bar = el("div", "lg-agents");
   bar.hidden = true;
-  const picker = el("select", "lg-agent-pick");
-  picker.setAttribute("aria-label", "表示する会話");
-  bar.append(picker);
-  root.prepend(bar);
+  bar.setAttribute("aria-label", "表示する会話");
+  const menu = el("div", "lg-menu");
+  menu.hidden = true;
+  menu.setAttribute("role", "menu");
+  root.prepend(bar, menu);
+  let openGroup: Group | null = null;
   // 結果を待っているツールの呼び出し（並列に呼ばれることがあるので ID で引く）
   const pending = new Map<string, HTMLElement>();
 
@@ -103,7 +189,9 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     switch (e.kind) {
       case "user": {
         const n = el("div", "lg-user");
-        n.append(el("div", "lg-user-text", e.text));
+        const bubble = el("div", "lg-user-text", e.text);
+        if (e.images?.length) bubble.append(imageStrip(e.images));
+        n.append(bubble);
         return n;
       }
       case "command":
@@ -127,18 +215,26 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         return n;
       }
       case "result": {
-        const pre = el("pre", "lg-result", e.text || "（出力なし）");
-        // 結果は呼び出したツールの中にしまう。呼び出しが表示の範囲外なら単独で出す
+        const images = e.images?.length ? imageStrip(e.images) : null;
+        if (images) images.classList.add("lg-result-images");
+        const pre = el("pre", "lg-result", e.text || (images ? "" : "（出力なし）"));
+        // 結果は呼び出したツールの中にしまう。呼び出しが表示の範囲外なら単独で出す。
+        // 画像は開かなくても見えるよう、ツールの行のすぐ下に出す
         const tool = e.id ? pending.get(e.id) : undefined;
         if (tool) {
-          tool.append(pre);
+          if (e.text || !images) tool.append(pre);
+          if (images) tool.after(images);
           tool.classList.remove("lg-pending");
           tool.classList.toggle("lg-error", e.error);
           pending.delete(e.id!);
           return null;
         }
         pre.classList.toggle("lg-error", e.error);
-        return pre;
+        if (!images) return pre;
+        const n = el("div");
+        if (e.text) n.append(pre);
+        n.append(images);
+        return n;
       }
     }
   }
@@ -162,44 +258,176 @@ export function createTranscriptView(o: TranscriptViewOptions) {
 
   const active = (a: Subagent) => Date.now() - a.modified < SUBAGENT_ACTIVE_MS;
 
-  function renderBar() {
-    bar.hidden = !agents.length && !agent;
-    const busy = agents.filter(active).length;
-    const options: [string, string][] = [["", busy ? `メイン（サブエージェント ${busy} 件が作業中）` : "メイン"]];
-    for (const a of agents) {
-      const label = a.description || a.agent_type || a.id;
-      options.push([a.id, `${active(a) ? "● " : ""}${label}${a.agent_type ? `（${a.agent_type}）` : ""}`]);
+  // エージェントが終わると、終わった知らせの届かなかったシェルも一緒に止まる
+  const shellStatus = (s: Shell): Shell["status"] => (s.status === "running" && status === "exited" ? "killed" : s.status);
+
+  function items(group: Group): Item[] {
+    if (group === "agent") {
+      return agents.map((a) => ({
+        id: a.id,
+        label: a.description || a.agent_type || a.id,
+        sub: a.agent_type ?? "",
+        state: active(a) ? "running" : "quiet",
+        // サブエージェントは始まった時刻が分からないので、止まっているものは最後に書き換えた時刻を出す
+        time: active(a) ? () => "作業中" : () => `${fmtSince(a.modified)}前`,
+        title: a.description,
+        selected: a.id === agent,
+        pick: () => setAgent(a.id),
+      }));
     }
-    // 開いている選択肢が描き直しで閉じないよう、変わったときだけ作り直す
-    const key = JSON.stringify([agent, options]);
-    if (picker.dataset.key === key) return;
-    picker.dataset.key = key;
-    picker.replaceChildren(
-      ...options.map(([value, text]) => {
-        const opt = el("option", "", text);
-        opt.value = value;
-        return opt;
-      }),
-    );
-    picker.value = agent ?? "";
-    bar.classList.toggle("lg-agents-sub", !!agent);
+    return shells.map((s) => {
+      const st = shellStatus(s);
+      return {
+        id: s.id,
+        label: s.description || s.command,
+        sub: s.description ? s.command : "",
+        state: st,
+        time: st === "running" ? () => fmtSince(Date.parse(s.started)) : () => SHELL_LABEL[st],
+        title: `$ ${s.command}`,
+        selected: s.id === shell,
+        pick: () => setShell(s.id),
+      };
+    });
   }
+
+  function segment(label: string, selected: boolean) {
+    const b = el("button", "lg-seg");
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(selected));
+    b.append(el("span", "lg-seg-label", label));
+    return b;
+  }
+
+  function renderBar() {
+    const groups = (["agent", "shell"] as Group[]).map((g) => ({ g, list: items(g) })).filter((x) => x.list.length);
+    bar.hidden = !groups.length && !agent && !shell;
+    // 描き直しでフォーカスやホバーが外れないよう、変わったときだけ作り直す
+    const key = JSON.stringify([agent, shell, openGroup, groups.map(({ g, list }) => [g, list.map((i) => [i.id, i.state])])]);
+    if (bar.dataset.key !== key) {
+      bar.dataset.key = key;
+      const main = segment("メイン", !agent && !shell);
+      main.onclick = () => {
+        closeMenu();
+        setAgent(null);
+      };
+      const parts: HTMLElement[] = [main];
+      let tail: HTMLElement | null = null;
+      for (const { g, list } of groups) {
+        const picked = list.find((i) => i.selected);
+        const live = list.filter((i) => i.state === "running").length;
+        // 選んでも幅が変わらないよう、ボタンの文字は種類だけにし、選んだものの名前は列の右端に出す
+        const b = segment(GROUP_LABEL[g], !!picked);
+        if (picked) {
+          const current = el("span", "lg-current", picked.label);
+          current.dataset.state = picked.state;
+          current.title = picked.title;
+          current.prepend(el("span", "lg-item-mark"));
+          tail = current;
+        }
+        b.dataset.group = g;
+        b.classList.toggle("lg-live", live > 0);
+        b.setAttribute("aria-haspopup", "menu");
+        b.setAttribute("aria-expanded", String(openGroup === g));
+        // 動いている数 / 全部の数
+        b.append(el("span", "lg-seg-count", live ? `${live}/${list.length}` : String(list.length)), el("span", "lg-seg-caret"));
+        b.title = `${GROUP_LABEL[g]}: 動いているもの ${live} 件 / 全部で ${list.length} 件`;
+        b.onclick = () => (openGroup === g ? closeMenu() : openMenu(g));
+        parts.push(el("span", "lg-seg-sep"), b);
+      }
+      if (tail) parts.push(tail);
+      bar.replaceChildren(...parts);
+      renderMenu();
+    }
+    for (const t of menu.querySelectorAll<HTMLElement & { tick?: () => string }>(".lg-item-time")) t.textContent = t.tick?.() ?? "";
+  }
+
+  function renderMenu() {
+    const list = openGroup ? items(openGroup) : [];
+    menu.hidden = !list.length;
+    if (!list.length) {
+      openGroup = null;
+      return;
+    }
+    const row = (i: Item) => {
+      const b = el("button", "lg-item");
+      b.type = "button";
+      b.setAttribute("role", "menuitemradio");
+      b.setAttribute("aria-checked", String(i.selected));
+      b.dataset.state = i.state;
+      b.title = i.title;
+      const time = Object.assign(el("span", "lg-item-time", i.time()), { tick: i.time });
+      b.append(el("span", "lg-item-mark"), el("span", "lg-item-label", i.label), time);
+      if (i.sub) b.append(el("span", "lg-item-sub", i.sub));
+      b.onclick = () => {
+        closeMenu();
+        i.pick();
+      };
+      return b;
+    };
+    const live = list.filter((i) => i.state === "running");
+    const rest = list.filter((i) => i.state !== "running");
+    const rows: HTMLElement[] = [];
+    if (live.length) rows.push(el("div", "lg-menu-head", `動いている ${live.length}`), ...live.map(row));
+    if (rest.length) rows.push(el("div", "lg-menu-head", openGroup === "shell" ? `終わった ${rest.length}` : `止まっている ${rest.length}`), ...rest.map(row));
+    menu.replaceChildren(...rows);
+    // 押したボタンの下に出す。右端からはみ出すときは左へずらす
+    const btn = bar.querySelector<HTMLElement>(`[data-group="${openGroup}"]`);
+    if (!btn) return;
+    const rootBox = root.getBoundingClientRect();
+    const box = btn.getBoundingClientRect();
+    menu.style.top = `${box.bottom - rootBox.top + 2}px`;
+    menu.style.left = `${Math.max(4, Math.min(box.left - rootBox.left, rootBox.width - menu.offsetWidth - 4))}px`;
+  }
+
+  function openMenu(g: Group) {
+    openGroup = g;
+    renderBar();
+    menu.querySelector<HTMLElement>("[aria-checked=true], .lg-item")?.focus({ preventScroll: true });
+  }
+
+  function closeMenu() {
+    if (!openGroup) return;
+    openGroup = null;
+    renderBar();
+  }
+
+  document.addEventListener("pointerdown", (ev) => {
+    if (openGroup && !bar.contains(ev.target as Node) && !menu.contains(ev.target as Node)) closeMenu();
+  });
+  menu.addEventListener("keydown", (ev) => {
+    const rows = [...menu.querySelectorAll<HTMLElement>(".lg-item")];
+    const at = rows.indexOf(document.activeElement as HTMLElement);
+    if (ev.key === "Escape") {
+      ev.stopPropagation();
+      const g = openGroup;
+      closeMenu();
+      bar.querySelector<HTMLElement>(`[data-group="${g}"]`)?.focus();
+    } else if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      rows[(at + (ev.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length]?.focus();
+    }
+  });
 
   async function loadAgents() {
     const id = sessionId;
     try {
-      const list = await invoke<Subagent[]>("list_subagents", { id });
+      const [a, s] = await Promise.all([
+        invoke<Subagent[]>("list_subagents", { id }),
+        invoke<Shell[]>("list_shells", { id }).catch(() => [] as Shell[]),
+      ]);
       if (id !== sessionId) return;
-      agents = list;
+      agents = a;
+      shells = s;
       renderBar();
     } catch {
       /* 一覧が読めなくても、会話の表示には影響しない */
     }
   }
 
-  function setAgent(next: string | null) {
-    if (next === agent) return;
-    agent = next;
+  function switchTo(nextAgent: string | null, nextShell: string | null) {
+    if (nextAgent === agent && nextShell === shell) return;
+    agent = nextAgent;
+    shell = nextShell;
     path = null;
     offset = 0;
     pending.clear();
@@ -208,8 +436,33 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     applyStatus();
     refresh();
   }
+  const setAgent = (next: string | null) => switchTo(next, null);
+  const setShell = (next: string) => switchTo(null, next);
 
-  picker.onchange = () => setAgent(picker.value || null);
+  async function showShell(id: string | null, task: string) {
+    const s = shells.find((x) => x.id === task);
+    const out = await invoke<ShellOutput>("read_shell_output", { id, task });
+    if (id !== sessionId || shell !== task) return;
+    let head = body.querySelector<HTMLElement>(":scope > .lg-shell-head");
+    let pre = body.querySelector<HTMLElement>(":scope > .lg-shell-out");
+    if (!head || !pre) {
+      head = el("div", "lg-shell-head");
+      pre = el("pre", "lg-shell-out");
+      body.replaceChildren(head, pre);
+    }
+    const st = s ? shellStatus(s) : "running";
+    head.dataset.state = st;
+    head.replaceChildren(
+      el("div", "lg-shell-cmd", `$ ${s?.command ?? task}`),
+      el("div", "lg-shell-state", `${SHELL_LABEL[st]}${s?.description ? ` — ${s.description}` : ""}${out.truncated ? "（長いので末尾だけを表示）" : ""}`),
+    );
+    const text = plainOutput(out.text) || "（まだ出力がありません）";
+    if (pre.textContent === text) return;
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    pre.textContent = text;
+    linkify(pre);
+    if (atBottom) body.scrollTop = body.scrollHeight;
+  }
 
   async function refresh() {
     if (!visible() || loading || !supported) return;
@@ -217,9 +470,19 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     const id = sessionId;
     const shownAgent = agent;
     loadAgents();
+    if (shell) {
+      try {
+        await showShell(id, shell);
+      } catch (e) {
+        if (id === sessionId) note(String(e));
+      } finally {
+        loading = false;
+      }
+      return;
+    }
     try {
       const chunk = await invoke<Chunk>("read_transcript", { id, path, offset, limit: o.maxNodes, agent });
-      if (id !== sessionId || shownAgent !== agent) return;
+      if (id !== sessionId || shownAgent !== agent || shell) return;
       if (chunk.reset) {
         body.replaceChildren();
         pending.clear();
@@ -249,18 +512,21 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     input.style.height = `${Math.min(input.scrollHeight, o.maxInputPx)}px`;
   }
 
-  // サブエージェントには直接指示を送れないので、見ている間は入力欄を使えなくする
+  // サブエージェントやシェルには直接指示を送れないので、見ている間は入力欄を使えなくする
   function applyStatus() {
-    input.disabled = !!agent;
+    const away = !!agent || !!shell;
+    input.disabled = away;
     input.placeholder = agent
-      ? "サブエージェントの会話を表示しています（指示は上の欄でメインに戻すと送れます）"
-      : (PLACEHOLDER[status] ?? "エージェントの起動を待っています");
-    sendBtn.disabled = !!agent || status !== "idle" || sending || !input.value.trim();
+      ? "サブエージェントの会話を表示しています（上の「メイン」に戻すと指示を送れます）"
+      : shell
+        ? "シェルの出力を表示しています（上の「メイン」に戻すと指示を送れます）"
+        : (PLACEHOLDER[status] ?? "エージェントの起動を待っています");
+    sendBtn.disabled = away || status !== "idle" || sending || !input.value.trim();
   }
 
   async function submit() {
     const text = input.value.trim();
-    if (agent || status !== "idle" || sending || !text) return;
+    if (agent || shell || status !== "idle" || sending || !text) return;
     sending = true;
     applyStatus();
     try {
@@ -275,13 +541,6 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     }
   }
 
-  // リンクを開くと Tower の画面そのものが移ってしまうので、ファイルのプレビューと同じく開かない
-  for (const type of ["click", "auxclick"]) {
-    body.addEventListener(type, (ev) => {
-      if ((ev.target as HTMLElement).closest("a")) ev.preventDefault();
-    });
-  }
-
   function insertText(text: string) {
     const { selectionStart: s, selectionEnd: e, value } = input;
     input.value = value.slice(0, s) + text + value.slice(e);
@@ -294,7 +553,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     fitInput();
     applyStatus();
   });
-  const startsSlash = () => !agent && status === "idle" && !input.value;
+  const startsSlash = () => !agent && !shell && status === "idle" && !input.value;
   input.addEventListener("keydown", (e) => {
     if (e.isComposing || e.ctrlKey || e.metaKey) return;
     // ターミナルと同じく Alt+Enter でも改行する（textarea は Alt+Enter では改行しない）
@@ -328,6 +587,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       // 中断されたツールには結果が残らないことがあるので、実行中の印は作業中の間だけ見せる（style.css）
       root.dataset.status = next;
       applyStatus();
+      renderBar();
     },
     focus() {
       input.focus({ preventScroll: true });
@@ -364,6 +624,9 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       offset = 0;
       agent = null;
       agents = [];
+      shell = null;
+      shells = [];
+      openGroup = null;
       renderBar();
       applyStatus();
       if (!id) return void body.replaceChildren();

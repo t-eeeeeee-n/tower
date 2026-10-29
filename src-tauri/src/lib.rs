@@ -216,6 +216,28 @@ fn list_subagents(state: State<'_, App>, id: String) -> Result<Vec<transcript::S
     Ok(state.manager.transcript(&id)?.map(|m| transcript::subagents(&m)).unwrap_or_default())
 }
 
+/// 画面に出た文章の中のリンクなので、エージェントやコマンドの出力が書いたものでもある。
+/// file: や独自のスキームでほかのアプリを起動させないよう、Web のページだけを既定のブラウザで開く
+#[tauri::command(async)]
+fn open_link(url: String) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) || url.chars().any(char::is_control) {
+        return Err(format!("Web のページ以外のリンクは開きません: {url}"));
+    }
+    tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| format!("ブラウザで開けませんでした: {e}"))
+}
+
+#[tauri::command(async)]
+fn list_shells(state: State<'_, App>, id: String) -> Result<Vec<transcript::Shell>, String> {
+    Ok(state.manager.transcript(&id)?.map(|m| transcript::shells(&m)).unwrap_or_default())
+}
+
+#[tauri::command(async)]
+fn read_shell_output(state: State<'_, App>, id: String, task: String) -> Result<transcript::ShellOutput, String> {
+    let main = state.manager.transcript(&id)?.ok_or("会話の記録がまだありません")?;
+    transcript::shell_output(&main, &task)
+}
+
 #[tauri::command]
 fn rename_session(state: State<'_, App>, id: String, name: String) -> Result<(), String> {
     state.manager.rename(&id, &name)
@@ -335,6 +357,9 @@ pub fn run() {
             read_transcript,
             session_footer,
             list_subagents,
+            list_shells,
+            read_shell_output,
+            open_link,
             write_session,
             set_scrollback,
             rename_session,

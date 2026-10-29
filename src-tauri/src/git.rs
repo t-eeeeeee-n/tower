@@ -95,7 +95,7 @@ pub struct Origin {
 /// \\server\share を読みにいくと、Windows がサインインの情報（NTLM）を相手に送ってしまう。
 /// 文字列の頭で見分けると `\/server/share` のように区切りを混ぜた書き方をすり抜けるので、
 /// Rust が解釈した結果の部品で見る（\\?\UNC\… や \\.\… も Prefix が Disk ではないので弾かれる）
-fn local_target(text: &str) -> Option<PathBuf> {
+pub(crate) fn local_target(text: &str) -> Option<PathBuf> {
     use std::path::{Component, Prefix};
     let path = PathBuf::from(text);
     let mut parts = path.components();

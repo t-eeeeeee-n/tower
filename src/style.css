@@ -284,12 +284,66 @@ button { font: inherit; color: inherit; cursor: pointer; }
 /* 会話 */
 .log { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; background: var(--ink); }
 .log[hidden] { display: none; }
-.lg-agents { flex: none; display: flex; padding: 6px max(8px, calc((100% - 820px) / 2)); border-bottom: 1px solid var(--line); }
+/* 表示する会話の切り替え。数が増えても幅が変わらないよう、列には種類ごとのボタンだけを置き、中身は開いた一覧で選ぶ */
+.log, .c-conv { position: relative; }
+.lg-agents { flex: none; display: flex; align-items: stretch; padding: 0 max(8px, calc((100% - 820px) / 2)); border-bottom: 1px solid var(--line); }
 .lg-agents[hidden] { display: none; }
-.lg-agents-sub { background: var(--raise); }
-.lg-agent-pick { min-width: 0; max-width: 100%; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 12px var(--mono); }
-.c-conv .lg-agents { padding: 4px 6px; }
-.c-conv .lg-agent-pick { font-size: 11px; }
+.lg-seg { flex: none; position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px 6px; border: 0; background: transparent; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.lg-seg:hover, .lg-seg[aria-expanded="true"] { color: var(--text); background: var(--raise); }
+.lg-seg:focus-visible { outline: 1px solid var(--st-running); outline-offset: -1px; }
+/* 選んでいるものは、下の線を区切りの線の上に重ねて示す */
+.lg-seg[aria-pressed="true"] { color: var(--text); }
+.lg-seg[aria-pressed="true"]::after { content: ""; position: absolute; left: 6px; right: 6px; bottom: -1px; height: 2px; border-radius: 2px 2px 0 0; background: var(--st-running); }
+.lg-seg-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.lg-seg-count { flex: none; padding: 0 5px; border-radius: 8px; background: var(--raise-2); color: var(--muted); font: 10.5px/16px var(--mono); font-variant-numeric: tabular-nums; }
+.lg-seg.lg-live .lg-seg-count { background: color-mix(in srgb, var(--st-running) 22%, transparent); color: var(--st-running); }
+.lg-seg.lg-live .lg-seg-count::before { content: ""; display: inline-block; width: 5px; height: 5px; margin-right: 4px; border-radius: 50%; background: currentColor; vertical-align: 1px; animation: c-pulse 1.2s ease-in-out infinite; }
+.lg-seg-caret { flex: none; width: 0; height: 0; border: 3.5px solid transparent; border-top: 4px solid currentColor; border-bottom: 0; opacity: 0.7; }
+.lg-seg-sep { flex: none; align-self: center; width: 1px; height: 14px; margin: 0 2px; background: var(--line); }
+.lg-current { flex: 0 1 auto; min-width: 0; display: inline-flex; align-items: center; gap: 6px; margin-left: auto; padding: 0 4px 0 12px; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lg-current .lg-item-mark { flex: none; }
+.lg-current[data-state="running"] .lg-item-mark { border-color: var(--st-running); background: var(--st-running); animation: c-pulse 1.2s ease-in-out infinite; }
+.lg-current[data-state="completed"] .lg-item-mark { border-color: var(--st-idle); background: var(--st-idle); }
+.lg-current[data-state="failed"] .lg-item-mark { border-color: var(--danger); background: var(--danger); }
+.c-conv .lg-agents { padding: 0 4px; }
+.c-conv .lg-current { font-size: 11px; }
+.c-conv .lg-seg { padding: 5px 8px 4px; font-size: 11px; }
+.lg-menu { position: absolute; z-index: 20; width: min(360px, calc(100% - 8px)); max-height: min(320px, 60%); overflow-y: auto; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); box-shadow: 0 8px 24px rgb(0 0 0 / 0.35); scrollbar-color: var(--line) transparent; }
+.lg-menu[hidden] { display: none; }
+.lg-menu-head { padding: 6px 8px 3px; color: var(--faint); font-size: 11px; }
+.lg-item { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; column-gap: 8px; align-items: center; width: 100%; padding: 5px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--text); font-size: 12px; text-align: left; }
+.lg-item:hover, .lg-item:focus-visible { background: var(--raise); outline: none; }
+.lg-item[aria-checked="true"] { background: var(--raise-2); }
+.lg-item-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-item-time { color: var(--faint); font: 10.5px var(--mono); font-variant-numeric: tabular-nums; }
+.lg-item-sub { grid-column: 2 / 4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 10.5px var(--mono); }
+.lg-item-mark { justify-self: center; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--faint); }
+.lg-item[data-state="running"] .lg-item-mark { border-color: var(--st-running); background: var(--st-running); animation: c-pulse 1.2s ease-in-out infinite; }
+.lg-item[data-state="running"] .lg-item-time { color: var(--st-running); }
+.lg-item[data-state="completed"] .lg-item-mark { border-color: var(--st-idle); background: var(--st-idle); }
+.lg-item[data-state="failed"] .lg-item-mark { border-color: var(--danger); background: var(--danger); }
+.lg-item[data-state="failed"] .lg-item-time { color: var(--danger); }
+.lg-item[data-state="killed"] .lg-item-label { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--faint); }
+.lg-shell-head { flex: none; margin: 0 12px 8px; padding: 8px 10px; border-left: 2px solid var(--st-running); background: var(--panel); font-size: 12px; }
+.log-body > .lg-shell-head:first-child { margin-top: 0; }
+.lg-shell-head[data-state="completed"] { border-left-color: var(--st-idle); }
+.lg-shell-head[data-state="failed"] { border-left-color: var(--danger); }
+.lg-shell-head[data-state="killed"] { border-left-color: var(--faint); }
+.lg-shell-cmd { font: 12px/1.5 var(--mono); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.lg-shell-state { margin-top: 2px; color: var(--muted); }
+.lg-shell-out { flex: 1 0 auto; margin: 0 12px; color: var(--term-dim); font: 11.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.lg-images { display: flex; flex-wrap: wrap; gap: 6px; }
+.lg-user-text .lg-images { margin-top: 6px; }
+.lg-user-text:empty, .lg-user-text > .lg-images:first-child { margin-top: 0; }
+.lg-result-images { margin: 2px 12px 8px 22px; }
+.lg-img { display: block; max-width: min(320px, 100%); max-height: 220px; object-fit: contain; border: 1px solid var(--line); border-radius: 4px; background: var(--ink); cursor: zoom-in; }
+.c-log .lg-img { max-width: min(200px, 100%); max-height: 130px; }
+.img-view { max-width: 100vw; max-height: 100vh; width: 100vw; height: 100vh; margin: 0; padding: 24px; border: 0; background: transparent; display: grid; place-items: center; cursor: zoom-out; }
+.img-view:not([open]) { display: none; }
+.img-view::backdrop { background: rgb(0 0 0 / 0.78); }
+.img-view img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; box-shadow: 0 12px 40px rgb(0 0 0 / 0.5); }
+.t-link { color: inherit; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); text-underline-offset: 2px; cursor: pointer; }
+.t-link:hover { color: var(--st-running); text-decoration-color: currentColor; }
 .lg-open-agent { flex: none; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--st-running); font-size: 11px; }
 .lg-open-agent:hover { background: var(--raise-2); }
 .log-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; padding: 12px max(8px, calc((100% - 820px) / 2)) 24px; scrollbar-color: var(--line) transparent; user-select: text; }
@@ -459,7 +513,7 @@ pre.lg-result.lg-error { color: var(--danger); }
 .c-activity.still { color: var(--st-waiting); }
 .c-activity.still::before { animation: none; }
 @keyframes c-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .c-activity::before, .lg-pending > summary::after { animation: none !important; } }
+@media (prefers-reduced-motion: reduce) { .c-activity::before, .lg-pending > summary::after, .lg-seg-count::before, .lg-item-mark { animation: none !important; } }
 .c-compose.log-compose { padding: 6px; gap: 6px; }
 .c-footer.log-footer { padding: 0 8px 6px; font-size: 10.5px; }
 .c-compose textarea { padding: 5px 8px; font-size: 12.5px; }

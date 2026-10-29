@@ -9,6 +9,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import { createFilesPanel } from "./files";
+import { handleLinks, linkify, openLink, terminalLinks } from "./links";
 import { createTranscriptPanel, createTranscriptView, TRANSCRIPT_AGENTS, type TranscriptView } from "./transcript";
 import { createTemplates } from "./templates";
 import { createSettings } from "./settings";
@@ -222,9 +223,13 @@ const term = new Terminal({
   lineHeight: 1.1,
   scrollback: 3000,
   allowProposedApi: false,
+  // OSC 8 のリンク（Claude Code はファイルや PR へのリンクをこれで出す）
+  linkHandler: { activate: (_ev, uri) => openLink(uri, showError), allowNonHttpProtocols: false },
 });
 const fit = new FitAddon();
 term.loadAddon(fit);
+term.registerLinkProvider(terminalLinks(term, (uri) => openLink(uri, showError)));
+handleLinks(showError);
 term.open($("term"));
 // 隠れているターミナルを測ると PTY が極端に小さくされて、エージェントの画面が崩れる
 function fitTerm() {
@@ -329,8 +334,11 @@ async function activate(id: string) {
   unseen.delete(id);
   activeId = id;
   render();
+  // 一覧でカードの幅にしていたので、ターミナルの大きさに戻す（付け直すときは attach_session が戻す）
+  cardCols.delete(id);
   if (!reattach) {
     fitTerm();
+    invoke("resize_session", { id, cols: term.cols, rows: term.rows }).catch(() => {});
     term.focus();
     return;
   }
@@ -787,12 +795,42 @@ async function pollPeeks() {
       peeks.set(p.id, { ...p, lines: p.lines ?? prev?.lines ?? [], footer: p.footer ?? prev?.footer ?? [] });
     }
     render();
+    fitCards();
   } catch (e) {
     showError(e);
   }
   peeking = false;
   // 入力中のカードがあるときは、打った文字がすぐ見えるよう短い間隔で取る
   peekTimer = window.setTimeout(pollPeeks, document.querySelector(".card.typing") ? 150 : 1000);
+}
+
+// カードはセッション画面のターミナルより狭く、エージェントの画面を折り返すと表や選択肢の並びが崩れる。
+// そこで一覧を開いている間は各セッションの幅をカードに合わせ、エージェントにその幅で描き直させる。
+// 高さはターミナルのままにする（変えると描き直しが増え、カードは末尾をスクロールして見せるので要らない）
+const cardCols = new Map<string, number>();
+let charWidth = 0;
+
+function cardColumns(card: HTMLElement) {
+  const tail = card.querySelector<HTMLElement>(".c-tail")!;
+  if (!charWidth) {
+    const ctx = document.createElement("canvas").getContext("2d")!;
+    ctx.font = getComputedStyle(tail).font;
+    charWidth = ctx.measureText("0".repeat(100)).width / 100;
+  }
+  // 画面の欄の左右のパディングは 8px ずつ。会話の表示に切り替わっていると画面の欄は隠れて幅が測れないので、
+  // カードの幅から余白（左右 8px ずつ）とスクロールバー（14px）も引く
+  const width = tail.hidden ? card.clientWidth - 16 - 16 - 14 : tail.clientWidth - 16;
+  return width > 0 && charWidth ? Math.max(20, Math.floor(width / charWidth)) : 0;
+}
+
+function fitCards() {
+  if (view !== "overview") return;
+  for (const [id, card] of cards) {
+    const cols = cardColumns(card);
+    if (!cols || cardCols.get(id) === cols) continue;
+    cardCols.set(id, cols);
+    invoke("resize_session", { id, cols, rows: term.rows }).catch(() => {});
+  }
 }
 
 const RGB_FLAG = 1 << 24;
@@ -840,6 +878,7 @@ function renderScreen(lines: Span[][], cursorHidden: boolean, ime: string) {
       frag.append(span);
     }
   });
+  linkify(frag);
   return frag;
 }
 

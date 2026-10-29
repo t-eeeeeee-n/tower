@@ -106,7 +106,11 @@ struct Term {
     carry: Vec<u8>,
     /// 出力やサイズの変更のたびに増やす
     seq: u64,
+    /// 最後にサイズを変えた時刻。エージェントはサイズが変わると画面を描き直すので、状態の推測ではその変化を作業とみなさない
+    resized_at: u64,
 }
+
+const RESIZE_REDRAW_MS: u64 = 2000;
 
 impl Term {
     fn decode(&mut self, bytes: &[u8]) -> String {
@@ -329,6 +333,7 @@ impl Manager {
             sink: None,
             carry: Vec::new(),
             seq: 0,
+            resized_at: 0,
         }));
 
         // 出力の読み取り：常に仮想端末へ流し、表示中のときだけフロントへ送る
@@ -402,10 +407,15 @@ impl Manager {
                     {
                         break;
                     }
-                    let screen = term.lock().unwrap().parser.screen().contents();
+                    let (screen, resized_at) = {
+                        let t = term.lock().unwrap();
+                        (t.parser.screen().contents(), t.resized_at)
+                    };
                     if screen != last {
                         last = screen;
-                        changed_at = now_ms();
+                        if now_ms().saturating_sub(resized_at) >= RESIZE_REDRAW_MS {
+                            changed_at = now_ms();
+                        }
                     }
                     let next = infer_status(&last, now_ms().saturating_sub(changed_at));
                     if !agent.infers_status() && hooks_seen.load(Ordering::Relaxed) {
@@ -688,6 +698,7 @@ fn resize_locked(session: &Session, t: &mut Term, cols: u16, rows: u16) {
     }
     t.parser.screen_mut().set_size(NonZero::new(rows).unwrap(), NonZero::new(cols).unwrap());
     t.seq += 1;
+    t.resized_at = now_ms();
     let _ = session
         .master
         .lock()
@@ -769,7 +780,7 @@ mod tests {
 
     #[test]
     fn utf8_split_across_reads() {
-        let mut t = Term { parser: vt100::Parser::new(NonZero::new(24).unwrap(), NonZero::new(80).unwrap(), 0), sink: None, carry: Vec::new(), seq: 0 };
+        let mut t = Term { parser: vt100::Parser::new(NonZero::new(24).unwrap(), NonZero::new(80).unwrap(), 0), sink: None, carry: Vec::new(), seq: 0, resized_at: 0 };
         let bytes = "日本語テキスト".as_bytes();
         let mut out = String::new();
         // 1バイトずつ届いても文字化けしない

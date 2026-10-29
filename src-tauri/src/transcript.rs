@@ -2,8 +2,10 @@
 //! ~/.codex/sessions/…/rollout-*.jsonl）を読んで、画面に出す形に縮める。
 //! 記録の形式は公開された仕様ではないので、知らない種類の行は読み飛ばし、読めない行があっても止めない。
 
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
 use serde::Serialize;
@@ -14,6 +16,9 @@ const INITIAL_TAIL: u64 = 2 << 20;
 const MAX_TEXT: usize = 4000;
 const MAX_RESULT: usize = 400;
 const MAX_TOOL_INPUT: usize = 200;
+/// base64 の文字数。これより大きい画像は、表示が重くなるので出さない（スクリーンショットは数百 KB ほど）
+const MAX_IMAGE: usize = 4 << 20;
+const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +38,9 @@ pub struct Entry {
     /// ツールの呼び出しと結果を結び付ける ID
     pub id: Option<String>,
     pub error: bool,
+    /// 貼り付けた画像や、ツールが読んだ画像（data URL）
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -108,6 +116,168 @@ pub fn subagents(main: &Path) -> Vec<Subagent> {
     out
 }
 
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct Shell {
+    /// Claude Code が付けるタスクの ID（出力ファイルの名前にもなる）
+    pub id: String,
+    pub tool_use_id: String,
+    pub description: String,
+    pub command: String,
+    /// running / completed / failed / killed。終わった知らせが記録に無いあいだは running
+    pub status: String,
+    /// 呼び出しの記録の時刻（ISO 8601）
+    pub started: String,
+    #[serde(skip)]
+    output: Option<String>,
+}
+
+#[derive(Default)]
+struct ShellScan {
+    offset: u64,
+    /// まだ結果の届いていない、裏で動かす Bash の呼び出し（ID → 説明・コマンド・時刻）
+    calls: HashMap<String, (String, String, String)>,
+    shells: Vec<Shell>,
+}
+
+/// 記録は長いと数十 MB になるので、前回読んだところから先だけを読む
+static SHELL_SCANS: OnceLock<Mutex<HashMap<PathBuf, ShellScan>>> = OnceLock::new();
+/// 初めて読むときに見る末尾の大きさ。これより前に始めたシェルは、もう終わっているとみなす
+const SHELL_INITIAL_TAIL: u64 = 16 << 20;
+const SHELL_OUTPUT_TAIL: u64 = 64 << 10;
+
+/// Claude Code が裏で動かすシェル（Bash の run_in_background）。新しく始めた順。
+/// 呼び出し（tool_use）・始まった知らせ（toolUseResult.backgroundTaskId）・終わった知らせ（<task-notification>）を
+/// 本体の記録から拾う（どれも公開された仕様ではない）。サブエージェントが動かしたものは数えない
+pub fn shells(main: &Path) -> Vec<Shell> {
+    let scans = SHELL_SCANS.get_or_init(Default::default);
+    let mut scans = scans.lock().unwrap_or_else(|e| e.into_inner());
+    let scan = scans.entry(main.to_path_buf()).or_default();
+    scan_shells(main, scan);
+    scan.shells.iter().rev().cloned().collect()
+}
+
+fn scan_shells(main: &Path, scan: &mut ShellScan) {
+    let Ok(mut file) = std::fs::File::open(main) else { return };
+    let Ok(len) = file.metadata().map(|m| m.len()) else { return };
+    if len < scan.offset {
+        *scan = ShellScan::default();
+    }
+    let fresh = scan.offset == 0;
+    let start = if fresh { len.saturating_sub(SHELL_INITIAL_TAIL) } else { scan.offset };
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return;
+    }
+    let mut buf = Vec::new();
+    if file.take(len - start).read_to_end(&mut buf).is_err() {
+        return;
+    }
+    let end = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let begin = if fresh && start > 0 { buf[..end].iter().position(|&b| b == b'\n').map_or(end, |i| i + 1) } else { 0 };
+    for line in buf[begin..end].split(|&b| b == b'\n') {
+        shell_line(line, scan);
+    }
+    scan.offset = start + end as u64;
+}
+
+fn shell_line(line: &[u8], scan: &mut ShellScan) {
+    let has = |s: &str| line.windows(s.len()).any(|w| w == s.as_bytes());
+    let (call, started, notice) = (has("\"run_in_background\":true"), has("\"backgroundTaskId\""), has("<task-notification>"));
+    if !(call || started || notice) {
+        return;
+    }
+    let Ok(v) = serde_json::from_slice::<Value>(line) else { return };
+    if v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false) {
+        return;
+    }
+    let str_at = |p: &str| v.pointer(p).and_then(Value::as_str).unwrap_or("").to_string();
+    if call && v.get("type").and_then(Value::as_str) == Some("assistant") {
+        for b in v.pointer("/message/content").and_then(Value::as_array).into_iter().flatten() {
+            let input = b.get("input");
+            let background = input.and_then(|i| i.get("run_in_background")).and_then(Value::as_bool).unwrap_or(false);
+            if b.get("type").and_then(Value::as_str) != Some("tool_use") || b.get("name").and_then(Value::as_str) != Some("Bash") || !background {
+                continue;
+            }
+            let field = |k: &str| input.and_then(|i| i.get(k)).and_then(Value::as_str).unwrap_or("").to_string();
+            let id = b.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+            scan.calls.insert(id, (field("description"), field("command"), str_at("/timestamp")));
+        }
+    }
+    if started {
+        let Some(task) = v.pointer("/toolUseResult/backgroundTaskId").and_then(Value::as_str) else { return };
+        let block = v.pointer("/message/content/0");
+        let tool_use_id = block.and_then(|b| b.get("tool_use_id")).and_then(Value::as_str).unwrap_or("").to_string();
+        let text = block.and_then(|b| b.get("content")).and_then(Value::as_str).unwrap_or("");
+        let output = text
+            .split_once("Output is being written to: ")
+            .and_then(|(_, rest)| rest.find(".output").map(|i| rest[..i + ".output".len()].to_string()));
+        let (description, command, started) = scan.calls.remove(&tool_use_id).unwrap_or_default();
+        if !scan.shells.iter().any(|s| s.id == task) {
+            scan.shells.push(Shell {
+                id: task.to_string(),
+                tool_use_id,
+                description,
+                command,
+                status: "running".into(),
+                started: if started.is_empty() { str_at("/timestamp") } else { started },
+                output,
+            });
+        }
+    }
+    if notice {
+        // 知らせは待ち行列への出し入れ（queue-operation）と、会話への差し込み（queued_command）の両方に残る。
+        // ツールの結果の文章に紛れた同じ文字列（記録を grep した結果など）は拾わない
+        let text = match v.get("type").and_then(Value::as_str) {
+            Some("queue-operation") => str_at("/content"),
+            Some("attachment") => str_at("/attachment/prompt"),
+            _ => return,
+        };
+        if !text.starts_with("<task-notification>") {
+            return;
+        }
+        let tag = |name: &str| {
+            let open = format!("<{name}>");
+            let close = format!("</{name}>");
+            let (_, rest) = text.split_once(&open)?;
+            rest.split_once(&close).map(|(inner, _)| inner.trim().to_string())
+        };
+        if let (Some(task), Some(status)) = (tag("task-id"), tag("status")) {
+            if let Some(s) = scan.shells.iter_mut().find(|s| s.id == task) {
+                s.status = status;
+            }
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct ShellOutput {
+    pub text: String,
+    /// 長いので末尾だけを返した
+    pub truncated: bool,
+}
+
+pub fn shell_output(main: &Path, task: &str) -> Result<ShellOutput, String> {
+    let shell = shells(main).into_iter().find(|s| s.id == task).ok_or("このシェルの記録が見つかりません")?;
+    // 記録に書かれた場所なので、ローカルのドライブにある、このタスクの出力ファイルだけを開く
+    let path = shell
+        .output
+        .as_deref()
+        .and_then(crate::git::local_target)
+        .filter(|p| p.is_absolute() && p.file_name().is_some_and(|n| n.to_string_lossy() == format!("{task}.output")))
+        .ok_or("このシェルの出力の場所が分かりません")?;
+    let mut file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ShellOutput { text: String::new(), truncated: false }),
+        Err(e) => return Err(format!("シェルの出力を開けませんでした: {e}")),
+    };
+    let len = file.metadata().map_err(|e| e.to_string())?.len();
+    let start = len.saturating_sub(SHELL_OUTPUT_TAIL);
+    file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let begin = if start > 0 { buf.iter().position(|&b| b == b'\n').map_or(0, |i| i + 1) } else { 0 };
+    Ok(ShellOutput { text: String::from_utf8_lossy(&buf[begin..]).into_owned(), truncated: start > 0 })
+}
+
 /// `known` は呼び出し側が読んでいたファイルで、今のファイルと違えば最初から（長ければ末尾から）読み直す。
 /// `limit` を渡すと、新しい方からその数だけ返す（呼び出し側が表示しきれない分を送らないため）。
 /// `sidechain` はサブエージェントの記録を読むとき。サブエージェントの行には isSidechain が付いていて、
@@ -163,7 +333,7 @@ fn entries_of(v: &Value) -> Vec<Entry> {
     let content = v.pointer("/message/content");
     match (v.get("type").and_then(Value::as_str), content) {
         (Some("user"), Some(Value::String(s))) => user_text(s).into_iter().collect(),
-        (Some("user"), Some(Value::Array(blocks))) => blocks.iter().filter_map(user_block).collect(),
+        (Some("user"), Some(Value::Array(blocks))) => merge_user_images(blocks.iter().filter_map(user_block).collect()),
         (Some("assistant"), Some(Value::Array(blocks))) => blocks.iter().filter_map(assistant_block).collect(),
         _ => Vec::new(),
     }
@@ -203,7 +373,7 @@ fn codex_entries(p: &Value) -> Vec<Entry> {
                 Ok(v @ Value::Object(_)) => tool_summary(&v),
                 _ => truncate(raw.trim(), MAX_TOOL_INPUT),
             };
-            vec![Entry { kind: Kind::Tool, text, tool: Some(name), id: call_id(p), error: false }]
+            vec![Entry { kind: Kind::Tool, text, tool: Some(name), id: call_id(p), error: false, images: Vec::new() }]
         }
         Some("function_call_output" | "custom_tool_call_output") => {
             let text = match p.get("output") {
@@ -215,14 +385,14 @@ fn codex_entries(p: &Value) -> Vec<Entry> {
                 Some(v) => v.get("content").and_then(Value::as_str).map(String::from).unwrap_or_else(|| v.to_string()),
                 None => String::new(),
             };
-            vec![Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id: call_id(p), error: false }]
+            vec![Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id: call_id(p), error: false, images: Vec::new() }]
         }
         _ => Vec::new(),
     }
 }
 
 fn entry(kind: Kind, text: String) -> Entry {
-    Entry { kind, text, tool: None, id: None, error: false }
+    Entry { kind, text, tool: None, id: None, error: false, images: Vec::new() }
 }
 
 /// 人が打った発言。スラッシュコマンドは名前だけにし、Claude Code が差し込むタグ付きの文は出さない
@@ -247,26 +417,68 @@ fn without_paste_tags(s: &str) -> String {
     s.lines().filter(|l| !is_tag(l)).collect::<Vec<_>>().join("\n")
 }
 
+/// 画像のブロック（`{"type":"image","source":{"type":"base64",…}}`）を、表示にそのまま使える data URL にする。
+/// 表示に使うのは img 要素だけだが、SVG は避けて写真・スクリーンショットの形式に限る
+fn image_url(b: &Value) -> Result<String, &'static str> {
+    let source = b.get("source").ok_or("[画像]")?;
+    let media = source.get("media_type").and_then(Value::as_str).unwrap_or("");
+    let data = source.get("data").and_then(Value::as_str).filter(|_| source.get("type").and_then(Value::as_str) == Some("base64"));
+    match data {
+        Some(_) if !IMAGE_TYPES.contains(&media) => Err("[画像]"),
+        Some(d) if d.len() > MAX_IMAGE => Err("[画像（大きいので表示しません）]"),
+        Some(d) if d.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=')) => Ok(format!("data:{media};base64,{d}")),
+        _ => Err("[画像]"),
+    }
+}
+
 fn user_block(b: &Value) -> Option<Entry> {
     match b.get("type")?.as_str()? {
         "text" => user_text(b.get("text")?.as_str()?),
-        "image" => Some(entry(Kind::User, "[画像]".into())),
+        "image" => Some(match image_url(b) {
+            Ok(url) => Entry { images: vec![url], ..entry(Kind::User, String::new()) },
+            Err(text) => entry(Kind::User, text.into()),
+        }),
         "tool_result" => {
+            let mut images = Vec::new();
             let text = match b.get("content") {
                 Some(Value::String(s)) => s.clone(),
                 Some(Value::Array(parts)) => parts
                     .iter()
-                    .filter_map(|p| p.get("text").and_then(Value::as_str))
+                    .filter_map(|p| match p.get("type").and_then(Value::as_str) {
+                        Some("image") => match image_url(p) {
+                            Ok(url) => {
+                                images.push(url);
+                                None
+                            }
+                            Err(text) => Some(text),
+                        },
+                        _ => p.get("text").and_then(Value::as_str),
+                    })
                     .collect::<Vec<_>>()
                     .join("\n"),
                 _ => String::new(),
             };
             let error = b.get("is_error").and_then(Value::as_bool).unwrap_or(false);
             let id = b.get("tool_use_id").and_then(Value::as_str).map(String::from);
-            Some(Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id, error })
+            Some(Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id, error, images })
         }
         _ => None,
     }
+}
+
+/// 貼り付けた画像は、発言の文と別のブロックで記録されるので、同じ発言の吹き出しにまとめる
+fn merge_user_images(entries: Vec<Entry>) -> Vec<Entry> {
+    let mut out: Vec<Entry> = Vec::with_capacity(entries.len());
+    for e in entries {
+        if let (Kind::User, true, Some(prev)) = (&e.kind, e.text.is_empty(), out.last_mut()) {
+            if prev.kind == Kind::User {
+                prev.images.extend(e.images);
+                continue;
+            }
+        }
+        out.push(e);
+    }
+    out
 }
 
 fn assistant_block(b: &Value) -> Option<Entry> {
@@ -279,7 +491,7 @@ fn assistant_block(b: &Value) -> Option<Entry> {
             let name = b.get("name")?.as_str()?.to_string();
             let text = tool_summary(b.get("input").unwrap_or(&Value::Null));
             let id = b.get("id").and_then(Value::as_str).map(String::from);
-            Some(Entry { kind: Kind::Tool, text, tool: Some(name), id, error: false })
+            Some(Entry { kind: Kind::Tool, text, tool: Some(name), id, error: false, images: Vec::new() })
         }
         _ => None,
     }
@@ -317,6 +529,7 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write;
 
     fn kinds(v: Value) -> Vec<(Kind, String)> {
         entries_of(&v).into_iter().map(|e| (e.kind, e.text)).collect()
@@ -328,6 +541,21 @@ mod tests {
         assert!(path_from_hook(r#"{"transcript_path":"relative.jsonl"}"#).is_none());
         assert!(path_from_hook(r#"{"transcript_path":"C:\\Windows\\win.ini"}"#).is_none());
         assert!(path_from_hook("not json").is_none());
+    }
+
+    #[test]
+    fn images_in_messages_and_results() {
+        let img = |media: &str, data: &str| json!({"type":"image","source":{"type":"base64","media_type":media,"data":data}});
+        let v = json!({"type":"user","message":{"content":[{"type":"text","text":"スクショ\n[Image #1]"}, img("image/png", "iVBORw0K"), img("image/svg+xml", "PHN2Zz4=")]}});
+        let e = entries_of(&v);
+        assert_eq!(e.len(), 2);
+        assert_eq!((e[0].text.as_str(), e[0].images.as_slice()), ("スクショ\n[Image #1]", &["data:image/png;base64,iVBORw0K".to_string()][..]));
+        // SVG は出さず、文字で置き換える
+        assert_eq!((e[1].text.as_str(), e[1].images.len()), ("[画像]", 0));
+
+        let r = json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[img("image/jpeg", "/9j/4AAQ"), img("image/png", "bad\"data")]}]}});
+        let e = entries_of(&r);
+        assert_eq!((e[0].text.as_str(), e[0].images.as_slice()), ("[画像]", &["data:image/jpeg;base64,/9j/4AAQ".to_string()][..]));
     }
 
     #[test]
@@ -366,6 +594,36 @@ mod tests {
         assert_eq!(texts(read(Some(path), None, 0, None, true).unwrap()), ["調べて"]);
         assert!(subagent_path(&main, "../s").is_err());
         assert!(subagent_path(&main, "").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn background_shells() {
+        let dir = std::env::temp_dir().join(format!("tower-shells-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("tasks")).unwrap();
+        let main = dir.join("s.jsonl");
+        let out = |id: &str| dir.join("tasks").join(format!("{id}.output"));
+        std::fs::write(out("b1"), "building\n[exited with code 0]\n").unwrap();
+        let call = |id: &str, desc: &str| json!({"type":"assistant","timestamp":"2026-10-28T01:00:00Z","message":{"content":[
+            {"type":"tool_use","id":id,"name":"Bash","input":{"command":"npm run build","description":desc,"run_in_background":true}}]}});
+        let began = |tool: &str, task: &str| json!({"type":"user","timestamp":"2026-10-28T01:00:01Z","message":{"content":[
+            {"type":"tool_result","tool_use_id":tool,"content":format!("Command running in background with ID: {task}. Output is being written to: {}. You will be notified.", out(task).display())}]},
+            "toolUseResult":{"backgroundTaskId":task}});
+        let done = |task: &str, status: &str| json!({"type":"attachment","attachment":{"type":"queued_command",
+            "prompt":format!("<task-notification>\n<task-id>{task}</task-id>\n<status>{status}</status>\n</task-notification>")}});
+        let lines = |vs: &[Value]| vs.iter().map(|v| format!("{v}\n")).collect::<String>();
+        // ツールの結果に紛れた知らせの文字列は拾わない
+        let grep = json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"x","content":"<task-notification><task-id>b2</task-id><status>failed</status>"}]}});
+        std::fs::write(&main, lines(&[call("t1", "ビルド"), began("t1", "b1"), call("t2", "サーバー"), began("t2", "b2"), grep])).unwrap();
+
+        let list = shells(&main);
+        assert_eq!(list.iter().map(|s| (s.id.as_str(), s.status.as_str())).collect::<Vec<_>>(), [("b2", "running"), ("b1", "running")]);
+        assert_eq!((list[1].description.as_str(), list[1].command.as_str()), ("ビルド", "npm run build"));
+
+        std::fs::OpenOptions::new().append(true).open(&main).unwrap().write_all(lines(&[done("b1", "completed")]).as_bytes()).unwrap();
+        assert_eq!(shells(&main)[1].status, "completed");
+        assert_eq!(shell_output(&main, "b1").unwrap().text, "building\n[exited with code 0]\n");
+        assert!(shell_output(&main, "zz").is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 
