@@ -58,6 +58,10 @@ pub fn create_worktree(program: &Path, cwd: &str, branch: &str) -> Result<String
     let repo = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let suffix: String = branch.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' }).collect();
     let dir = root.parent().unwrap_or(&root).join(format!("{repo}-{suffix}"));
+    // 同じブランチの worktree が既にあれば、作り直さずにそれを開く（閉じたセッションを開き直すとき）
+    if let Some(found) = worktree_of(program, &root, branch) {
+        return Ok(if cfg!(windows) { found.replace('/', "\\") } else { found });
+    }
     if dir.exists() {
         return Err(format!("フォルダが既にあります: {}", dir.display()));
     }
@@ -69,6 +73,21 @@ pub fn create_worktree(program: &Path, cwd: &str, branch: &str) -> Result<String
         git(program, &root, &["worktree", "add", "-b", branch, &dir_str])?;
     }
     Ok(if cfg!(windows) { dir_str.replace('/', "\\") } else { dir_str })
+}
+
+/// branch を開いている worktree の場所（元のフォルダは除く）。
+/// Windows ではブランチの名前を大文字と小文字で区別しない（ブランチはファイルとして置かれ、別のものとして作れないため）
+fn worktree_of(program: &Path, root: &Path, branch: &str) -> Option<String> {
+    let list = git(program, root, &["worktree", "list", "--porcelain"]).ok()?;
+    let want = format!("refs/heads/{branch}");
+    let same = |b: &str| if cfg!(windows) { b.eq_ignore_ascii_case(&want) } else { b == want };
+    list.split("\n\n")
+        .skip(1)
+        .find_map(|entry| {
+            let path = entry.lines().find_map(|l| l.strip_prefix("worktree "))?;
+            let b = entry.lines().find_map(|l| l.strip_prefix("branch "))?;
+            (same(b) && Path::new(path).is_dir()).then(|| path.to_string())
+        })
 }
 
 #[derive(serde::Serialize, Debug, PartialEq)]
@@ -259,8 +278,13 @@ mod tests {
         assert!(Path::new(&dir).join(".git").exists());
         assert_eq!(git(&program, Path::new(&dir), &["branch", "--show-current"]).unwrap(), "feature/x");
 
-        // 同じ名前はフォルダが衝突するのでエラー
-        assert!(create_worktree(&program, &repo.to_string_lossy(), "feature/x").is_err());
+        // 同じブランチなら、作り直さずに既にある worktree を返す（Windows では大文字と小文字を区別しない）
+        assert_eq!(create_worktree(&program, &repo.to_string_lossy(), "feature/x").unwrap(), dir);
+        if cfg!(windows) {
+            assert_eq!(create_worktree(&program, &repo.to_string_lossy(), "feature/X").unwrap(), dir);
+        }
+        // 別のブランチでフォルダの名前がぶつかるときはエラー
+        assert!(create_worktree(&program, &repo.to_string_lossy(), "feature-x").is_err());
         assert!(create_worktree(&program, &repo.to_string_lossy(), "bad..name").is_err());
 
         let _ = std::fs::remove_dir_all(&base);

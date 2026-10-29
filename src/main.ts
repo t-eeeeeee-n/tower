@@ -1357,6 +1357,9 @@ async function offerWorktreeCleanup(name: string, root: string) {
     $("wt-error").hidden = true;
     try {
       await action();
+      // どの操作も worktree のフォルダを消すので、開き直す候補からも外す
+      forgetRecent(root);
+      render();
       wtDialog.close();
     } catch (e) {
       $("wt-error").textContent = String(e);
@@ -1704,6 +1707,8 @@ $<HTMLFormElement>("new-form").onsubmit = async (ev) => {
   try {
     const dir = fWorktree.checked ? await invoke<string>("create_worktree", { cwd, branch }) : cwd;
     rememberRecent(cwd, agent);
+    // worktree も最近開いたものに入れ、セッションを閉じたあとに開き直せるようにする
+    if (dir !== cwd) rememberRecent(dir, agent);
     const name = fName.value.trim() || dir.split(/[\\/]/).pop() || dir;
     try {
       localStorage.setItem("lastAgent", agent);
