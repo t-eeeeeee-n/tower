@@ -103,7 +103,16 @@ const STATUS_LABEL: Record<Status, string> = {
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const appWindow = getCurrentWindow();
-const files = createFilesPanel((e) => showError(e));
+const files = createFilesPanel({
+  showError: (e) => showError(e),
+  root: () => (attachedId ? (sessions.get(attachedId)?.cwd ?? null) : null),
+  insert: (path) => {
+    if (attachedId) insertPaths(attachedId, [path]);
+  },
+  copy: (text) => {
+    writeText(text).catch(showError);
+  },
+});
 // 会話の入力欄の文字は貼り付けとして入れてから Enter を送る（貼り付けの中の改行では送信されない）。
 // 終わりの印（ESC[201~）が中に混ざると後ろが打ち込んだ文字になるので、ESC は取り除く
 async function sendPrompt(id: string | null, text: string) {

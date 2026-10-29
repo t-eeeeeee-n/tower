@@ -326,15 +326,25 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .f-tree[hidden], .hsplit[hidden] { display: none; }
 .hsplit { flex: none; height: 5px; cursor: row-resize; background: var(--line); border-top: 2px solid var(--panel); border-bottom: 2px solid var(--panel); }
 .hsplit:hover { background: var(--st-running); }
-.f-toggle { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; color: var(--muted); font-size: 12px; }
-.f-toggle input { accent-color: var(--st-running); }
+/* 「変更」と「すべて」の切り替え。変更の数を添えて、変わったファイルがあるかを開かなくても分かるようにする */
+.f-scope { display: flex; margin-left: auto; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; flex: none; }
+.f-scope button { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--muted); padding: 2px 10px; font-size: 12px; }
+.f-scope button:hover { color: var(--text); }
+.f-scope button[aria-pressed="true"] { background: var(--raise-2); color: var(--text); font-weight: 600; }
+.f-count { min-width: 16px; padding: 0 5px; border-radius: 8px; background: color-mix(in srgb, var(--st-waiting) 22%, transparent); color: var(--st-waiting); font: 600 10.5px/15px var(--mono); text-align: center; }
+.f-count:empty { display: none; }
+.f-search-row { padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.f-search-row[hidden] { display: none; }
+.f-search { width: 100%; padding: 4px 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--ink); color: var(--text); font: inherit; font-size: 12.5px; }
+.f-search:focus { outline: none; border-color: var(--st-running); }
+.f-search::placeholder { color: var(--faint); }
 .f-icon { border: 0; border-radius: 4px; background: transparent; color: var(--muted); padding: 0 6px; font-size: 15px; }
 .f-icon:hover { background: var(--raise); color: var(--text); }
 .f-tree { flex: 0 0 38%; overflow: auto; padding: 4px 0; scrollbar-color: var(--line) transparent; }
 .f-row {
-  display: flex; align-items: center; gap: 4px;
+  display: flex; align-items: center; gap: 5px;
   width: 100%;
-  padding: 2px 10px 2px 8px;
+  padding: 2px 10px 2px 6px;
   border: 0;
   background: transparent;
   color: var(--text);
@@ -344,8 +354,44 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .f-row:hover { background: var(--raise); }
 .f-row.selected { background: var(--raise-2); }
 .f-row.f-ignored .f-name { color: var(--faint); }
-.f-chev { display: inline-block; width: 12px; flex: none; color: var(--faint); font: 11px/1 var(--mono); text-align: center; }
-.f-row[aria-expanded="true"] .f-chev, #f-collapse[aria-expanded="true"] .f-chev { transform: rotate(90deg); }
+.f-row.f-ignored .f-ico { opacity: 0.4; }
+/* 階層の線。1 階層ごとに 1 本で、行が続くと縦につながって見える */
+.f-guide { flex: none; align-self: stretch; width: 12px; margin: -2px -5px -2px 0; background: linear-gradient(var(--f-guide), var(--f-guide)) 5px 0 / 1px 100% no-repeat; --f-guide: color-mix(in srgb, var(--faint) 85%, transparent); }
+.f-row:hover .f-guide, .f-row.selected .f-guide { --f-guide: var(--faint); }
+/* 種類の印。フォルダは折り目のある形、ファイルは種類ごとの色の小さな札 */
+.f-ico { flex: none; width: 9px; height: 11px; border-radius: 1.5px; background: var(--kind, var(--faint)); opacity: 0.85; }
+.f-ico[data-kind="script"] { --kind: var(--hl-number); }
+.f-ico[data-kind="code"] { --kind: var(--hl-attr); }
+.f-ico[data-kind="doc"] { --kind: var(--hl-title); }
+.f-ico[data-kind="config"] { --kind: var(--hl-string); }
+.f-ico[data-kind="web"] { --kind: var(--hl-type); }
+.f-ico[data-kind="image"] { --kind: var(--danger); }
+.f-ico.f-folder { position: relative; width: 13px; height: 10px; margin-top: 1px; border-radius: 1px 2px 2px 2px; background: color-mix(in srgb, var(--hl-number) 75%, var(--muted)); }
+.f-ico.f-folder::before { content: ""; position: absolute; left: 0; top: -2px; width: 6px; height: 3px; border-radius: 1px 1px 0 0; background: inherit; }
+.f-row[aria-expanded="true"] .f-ico.f-folder { background: transparent; box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--hl-number) 75%, var(--muted)); }
+.f-row[aria-expanded="true"] .f-ico.f-folder::before { background: color-mix(in srgb, var(--hl-number) 75%, var(--muted)); }
+.f-name { min-width: 0; }
+.f-name mark { background: color-mix(in srgb, var(--st-running) 30%, transparent); color: inherit; border-radius: 2px; }
+.f-sub { margin-left: 8px; color: var(--faint); font-size: 11.5px; }
+.f-lines { display: inline-flex; gap: 4px; margin-left: auto; padding-left: 8px; font: 11px/1 var(--mono); font-variant-numeric: tabular-nums; }
+.f-lines + .f-badge { margin-left: 6px; padding-left: 0; }
+.f-add { color: var(--st-idle); }
+.f-del { color: var(--danger); }
+.f-group { margin: 8px 10px 2px; color: var(--faint); font: 11px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.f-group:first-child { margin-top: 2px; }
+/* 右クリックのメニュー */
+.f-menu { position: fixed; z-index: 50; min-width: 200px; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); box-shadow: 0 8px 24px rgb(0 0 0 / 0.35); }
+.f-menu[hidden] { display: none; }
+.f-menu-item { display: flex; align-items: baseline; gap: 12px; width: 100%; padding: 5px 10px; border: 0; border-radius: 4px; background: transparent; color: var(--text); font-size: 12.5px; text-align: left; }
+.f-menu-item:hover, .f-menu-item:focus-visible { background: var(--raise); outline: none; }
+.f-menu-hint { margin-left: auto; color: var(--faint); font-size: 11px; }
+.f-menu-sep { height: 1px; margin: 4px 6px; background: var(--line); }
+.fv-act { flex: none; padding: 1px 8px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--muted); font-size: 11.5px; }
+.fv-act:hover { background: var(--raise); color: var(--text); }
+.fv-act[hidden] { display: none; }
+.f-chev { display: inline-grid; place-items: center; width: 12px; height: 12px; flex: none; color: var(--faint); }
+.f-row:hover .f-chev, .f-title:hover .f-chev { color: var(--muted); }
+.f-row[aria-expanded="true"] .f-chev-on::before, #f-collapse[aria-expanded="true"] .f-chev-on::before { transform: translateY(-1px) rotate(45deg); }
 
 /* 会話 */
 .log { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; background: var(--ink); }
@@ -480,6 +526,7 @@ pre.lg-result.lg-error { color: var(--danger); }
 .md-preview hr { border: 0; border-top: 1px solid var(--line); }
 .md-img { color: var(--faint); font-style: italic; }
 .f-name { overflow: hidden; text-overflow: ellipsis; }
+.f-name:has(+ .f-lines), .f-name:has(+ .f-badge), .f-name:has(+ .f-dot) { margin-right: auto; }
 .f-badge { margin-left: auto; padding-left: 8px; font: 600 11px/1 var(--mono); }
 .f-M { color: var(--st-waiting); }
 .f-A, .f-u { color: var(--st-idle); }

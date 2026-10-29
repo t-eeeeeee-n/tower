@@ -61,6 +61,9 @@ pub struct Change {
     pub path: String,
     /// M（変更）・A（追加）・D（削除）・R（名前の変更）・?（Git 管理外）
     pub status: String,
+    /// コミット済みの状態から増えた行・減った行。Git 管理外やバイナリのファイルは None
+    pub added: Option<u32>,
+    pub removed: Option<u32>,
 }
 
 /// `rel` を `root` の中のパスに解決する。`..` や絶対パスで外に出るものは拒否する
@@ -165,7 +168,95 @@ pub fn changes(program: &Path, root: &Path) -> Changes {
     // サブモジュールの中は設定が別なので、上の確認が効かない。中までは調べない
     let args = ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all", "--", "."];
     let Ok(out) = git_raw(program, root, &args) else { return none(None) };
-    Changes { changes: parse_status(&out, &prefix), blocked: None, trusted: true }
+    let mut changes = parse_status(&out, &prefix);
+    // まだコミットが無いリポジトリでは HEAD が無く失敗するので、そのときは行数を出さない
+    let numstat = ["diff", "--numstat", "-z", "--relative", "--no-ext-diff", "--no-textconv", "HEAD", "--", "."];
+    if let Ok(out) = git_raw(program, root, &numstat) {
+        let counts = parse_numstat(&out);
+        for c in &mut changes {
+            if let Some(&(a, r)) = counts.get(c.path.as_str()) {
+                (c.added, c.removed) = (Some(a), Some(r));
+            }
+        }
+    }
+    Changes { changes, blocked: None, trusted: true }
+}
+
+/// `git diff --numstat -z` の出力。名前の変更は「増 減 (空)」の後に元の名前と新しい名前が続く。
+/// バイナリのファイルは増減が - なので数えない
+fn parse_numstat(out: &str) -> std::collections::HashMap<&str, (u32, u32)> {
+    let mut result = std::collections::HashMap::new();
+    let mut records = out.split('\0');
+    while let Some(rec) = records.next() {
+        let mut parts = rec.splitn(3, '\t');
+        let (Some(a), Some(r), Some(path)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        let path = if path.is_empty() {
+            records.next();
+            records.next().unwrap_or("")
+        } else {
+            path
+        };
+        if let (Ok(a), Ok(r)) = (a.parse(), r.parse()) {
+            result.insert(path, (a, r));
+        }
+    }
+    result
+}
+
+/// 名前で探すときに見る項目の上限（大きなフォルダで固まらないように）
+const MAX_SCAN: usize = 50_000;
+const MAX_FOUND: usize = 200;
+
+/// フォルダの中から、相対パスに `query` を含むファイルを探す（大文字と小文字は区別しない）。
+/// .gitignore などで外れているもの（node_modules など）は探さない。名前に含むものを先に、浅いものを先に並べる
+pub fn find_files(root: &Path, query: &str) -> Result<Vec<String>, String> {
+    let q = query.trim().to_lowercase().replace('\\', "/");
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let base = root.canonicalize().map_err(|e| format!("フォルダを開けません: {e}"))?;
+    let mut found: Vec<(bool, usize, String)> = ignore::WalkBuilder::new(&base)
+        .hidden(false)
+        .filter_entry(|e| e.file_name() != ".git")
+        .build()
+        .take(MAX_SCAN)
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+        .filter_map(|e| {
+            let rel = e.path().strip_prefix(&base).ok()?.to_string_lossy().replace('\\', "/");
+            let lower = rel.to_lowercase();
+            if !lower.contains(&q) {
+                return None;
+            }
+            let name_hit = lower.rsplit('/').next().is_some_and(|n| n.contains(&q));
+            Some((!name_hit, rel.matches('/').count(), rel))
+        })
+        .collect();
+    found.sort();
+    Ok(found.into_iter().take(MAX_FOUND).map(|(_, _, rel)| rel).collect())
+}
+
+/// エクスプローラーで開く。ファイルなら入っているフォルダを開いてそのファイルを選び、フォルダならそのフォルダを開く
+pub fn reveal(root: &Path, rel: &str) -> Result<(), String> {
+    let path = resolve(root, rel)?;
+    // canonicalize は \\?\C:\… の形を返すが、エクスプローラーはこの形を開けない
+    let full = path.to_string_lossy();
+    let shown = full.strip_prefix(r"\\?\").unwrap_or(&full);
+    let mut cmd = std::process::Command::new("explorer.exe");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // /select, の後ろは引用符ごと 1 つの引数として渡す（std の引用の付け方だとエクスプローラーが読めない）
+        if path.is_dir() {
+            cmd.raw_arg(format!("\"{shown}\""));
+        } else {
+            cmd.raw_arg(format!("/select,\"{shown}\""));
+        }
+    }
+    #[cfg(not(windows))]
+    cmd.arg(&shown);
+    // エクスプローラーは開けても終了コード 1 を返すことがあるので、起動できたかだけを見る
+    cmd.spawn().map(drop).map_err(|e| format!("エクスプローラーを開けませんでした: {e}"))
 }
 
 fn parse_status(out: &str, prefix: &str) -> Vec<Change> {
@@ -186,7 +277,7 @@ fn parse_status(out: &str, prefix: &str) -> Vec<Change> {
             _ => "M",
         };
         let path = path.strip_prefix(prefix).unwrap_or(path);
-        result.push(Change { path: path.to_string(), status: status.into() });
+        result.push(Change { path: path.to_string(), status: status.into(), added: None, removed: None });
     }
     result
 }
@@ -248,6 +339,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_numstat() {
+        // 名前の変更は「増 減 (空)」の後に元の名前と新しい名前。バイナリは「- -」
+        let out = "3\t1\tsrc/a.rs\0002\t0\t\0old.rs\0new.rs\0-\t-\timg.png\0";
+        let got = parse_numstat(out);
+        assert_eq!(got.get("src/a.rs"), Some(&(3, 1)));
+        assert_eq!(got.get("new.rs"), Some(&(2, 0)));
+        assert_eq!(got.get("img.png"), None);
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn finds_files_by_name() {
+        let base = std::env::temp_dir().join(format!("tower-find-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("src/deep")).unwrap();
+        std::fs::create_dir_all(base.join("build")).unwrap();
+        for f in ["src/main.ts", "src/deep/main_test.ts", "mainly.md", "build/main.js", "other.txt"] {
+            std::fs::write(base.join(f), "").unwrap();
+        }
+        // ignore は .git が無いと .gitignore を読まないので、.ignore で外す
+        std::fs::write(base.join(".ignore"), "build/\n").unwrap();
+        let got = find_files(&base, "MAIN").unwrap();
+        // 名前に含むものを先に、浅いものを先に。外したフォルダの中は探さない
+        assert_eq!(got, ["mainly.md", "src/main.ts", "src/deep/main_test.ts"]);
+        assert_eq!(find_files(&base, "deep/").unwrap(), ["src/deep/main_test.ts"]);
+        assert!(find_files(&base, "  ").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn marks_gitignored_entries() {
         let base = std::env::temp_dir().join(format!("tower-ignored-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -305,12 +426,12 @@ mod tests {
         let mut ch = changes(&program, &base).changes;
         ch.sort_by(|a, b| a.path.cmp(&b.path));
         assert_eq!(ch, vec![
-            Change { path: "bin.dat".into(), status: "?".into() },
-            Change { path: "src/a.txt".into(), status: "M".into() },
-            Change { path: "新規.txt".into(), status: "?".into() },
+            Change { path: "bin.dat".into(), status: "?".into(), added: None, removed: None },
+            Change { path: "src/a.txt".into(), status: "M".into(), added: Some(1), removed: Some(0) },
+            Change { path: "新規.txt".into(), status: "?".into(), added: None, removed: None },
         ]);
         // サブフォルダをセッションのフォルダにしたときは、そこからの相対パスになる
-        assert_eq!(changes(&program, &base.join("src")).changes, vec![Change { path: "a.txt".into(), status: "M".into() }]);
+        assert_eq!(changes(&program, &base.join("src")).changes, vec![Change { path: "a.txt".into(), status: "M".into(), added: Some(1), removed: Some(0) }]);
 
         let d = diff(&program, &base, "src/a.txt").unwrap();
         assert!(d.lines().any(|l| l == "+two"), "{d}");

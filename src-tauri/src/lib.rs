@@ -84,6 +84,16 @@ fn read_file(state: State<'_, App>, id: String, path: String) -> Result<files::F
 }
 
 #[tauri::command(async)]
+fn find_files(state: State<'_, App>, id: String, query: String) -> Result<Vec<String>, String> {
+    files::find_files(&session_root(&state, &id)?, &query)
+}
+
+#[tauri::command(async)]
+fn reveal_path(state: State<'_, App>, id: String, path: String) -> Result<(), String> {
+    files::reveal(&session_root(&state, &id)?, &path)
+}
+
+#[tauri::command(async)]
 fn git_changes(state: State<'_, App>, id: String) -> Result<files::Changes, String> {
     let root = session_root(&state, &id)?;
     if !files::in_repo(&root) {
@@ -354,6 +364,8 @@ pub fn run() {
             list_dir,
             read_file,
             git_changes,
+            find_files,
+            reveal_path,
             git_diff,
             trust_folder,
             notify,

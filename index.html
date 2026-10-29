@@ -53,14 +53,22 @@
           <div id="files-splitter" class="splitter" role="separator" aria-orientation="vertical" aria-label="ファイルの幅" hidden></div>
           <aside id="files" class="files" aria-label="ファイル" hidden>
             <div class="f-head">
-              <button id="f-collapse" class="f-title" aria-expanded="true" aria-controls="f-tree" title="一覧をたたむ / 開く"><span class="f-chev">&gt;</span>ファイル</button>
-              <label class="f-toggle"><input id="f-changed-only" type="checkbox" />変更のみ</label>
+              <button id="f-collapse" class="f-title" aria-expanded="true" aria-controls="f-tree" title="一覧をたたむ / 開く"><span class="f-chev f-chev-on" aria-hidden="true"></span>ファイル</button>
+              <div id="f-scope" class="f-scope" role="group" aria-label="表示するファイル">
+                <button type="button" data-scope="changed">変更<span id="f-count" class="f-count"></span></button>
+                <button type="button" data-scope="all">すべて</button>
+              </div>
               <button id="f-refresh" class="f-icon" title="更新" aria-label="更新">↻</button>
+            </div>
+            <div id="f-search-row" class="f-search-row">
+              <input id="f-search" class="f-search" type="search" placeholder="ファイル名で探す" aria-label="ファイル名で探す" spellcheck="false" autocomplete="off" />
             </div>
             <div id="f-tree" class="f-tree" role="tree"></div>
             <div id="f-hsplit" class="hsplit" role="separator" aria-orientation="horizontal" aria-label="一覧の高さ"></div>
             <div class="f-head">
               <span id="fv-path" class="fv-path"></span>
+              <button id="fv-insert" class="fv-act" type="button" title="このファイルの場所を、エージェントの入力欄に入れる（送信はしません）" hidden>入力へ</button>
+              <button id="fv-copy" class="fv-act" type="button" title="このファイルの場所をコピー" hidden>コピー</button>
               <div id="fv-modes" class="fv-modes" hidden>
                 <button data-mode="diff">差分</button>
                 <button data-mode="preview">プレビュー</button>

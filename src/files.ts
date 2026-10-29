@@ -18,7 +18,30 @@ interface FileContent {
 interface Change {
   path: string;
   status: string;
+  added: number | null;
+  removed: number | null;
 }
+
+export interface FilesPanelOptions {
+  showError: (e: unknown) => void;
+  /** 表示中のセッションのフォルダ（絶対パス） */
+  root: () => string | null;
+  /** 絶対パスを、表示中のセッションの入力欄に入れる（送信はしない） */
+  insert: (path: string) => void;
+  copy: (text: string) => void;
+}
+
+// 拡張子ごとの種類。一覧の印の色に使う（色は配色のコードの色分けに合わせる）
+const KIND_BY_EXT: Record<string, string> = {
+  ts: "script", tsx: "script", js: "script", jsx: "script", mjs: "script", cjs: "script",
+  rs: "code", go: "code", py: "code", java: "code", c: "code", h: "code", cpp: "code", cs: "code", rb: "code", php: "code", swift: "code", kt: "code", sh: "code", ps1: "code",
+  md: "doc", mdx: "doc", txt: "doc", rst: "doc",
+  json: "config", yaml: "config", yml: "config", toml: "config", ini: "config", lock: "config", env: "config", xml: "config",
+  css: "web", scss: "web", html: "web", htm: "web", vue: "web", svelte: "web",
+  png: "image", jpg: "image", jpeg: "image", gif: "image", svg: "image", webp: "image", ico: "image",
+};
+const kindOf = (name: string) => KIND_BY_EXT[name.toLowerCase().split(".").pop() ?? ""] ?? "other";
+const SEARCH_DELAY_MS = 180;
 type Mode = "diff" | "file" | "preview";
 
 /** セッションごとに覚えておく表示の状態 */
@@ -122,16 +145,22 @@ function save(key: string, value: string) {
   }
 }
 
-export function createFilesPanel(showError: (e: unknown) => void) {
+export function createFilesPanel(o: FilesPanelOptions) {
+  const { showError } = o;
   const panel = $("files");
   const splitter = $("files-splitter");
   const tree = $("f-tree");
   const body = $("fv-body");
-  const changedOnly = $<HTMLInputElement>("f-changed-only");
+  const search = $<HTMLInputElement>("f-search");
+  // 「変更」は Git で変わったファイルだけを、フォルダごとにまとめて出す
+  let changedOnly = load("filesChangedOnly") === "1";
+  let query = "";
+  let found: string[] = [];
+  let searchTimer = 0;
   const views = new Map<string, View>();
   // 表示中のセッションのぶんだけ持つ（セッションを切り替えたら捨てる）
   const listings = new Map<string, Entry[]>();
-  let changes = new Map<string, string>();
+  let changes = new Map<string, Change>();
   // 安全のため Git を呼ばなかったときの理由（一覧の上に出す）
   let blocked: string | null = null;
   // 利用者がこのフォルダで Git の表示を許可しているか（許可していなければ Rust 側で Git を呼ばない）
@@ -142,7 +171,6 @@ export function createFilesPanel(showError: (e: unknown) => void) {
   let refreshing = false;
   let refreshAgain = false;
 
-  changedOnly.checked = load("filesChangedOnly") === "1";
   const width = Number(load("filesWidth"));
   if (width > 0) panel.style.width = `${width}px`;
   let treeCollapsed = load("filesTreeCollapsed") === "1";
@@ -151,6 +179,7 @@ export function createFilesPanel(showError: (e: unknown) => void) {
 
   function applyTree() {
     tree.hidden = treeCollapsed;
+    $("f-search-row").hidden = treeCollapsed;
     $("f-hsplit").hidden = treeCollapsed;
     $("f-collapse").setAttribute("aria-expanded", String(!treeCollapsed));
   }
@@ -188,7 +217,7 @@ export function createFilesPanel(showError: (e: unknown) => void) {
         await listing(dir).catch(() => v.expanded.delete(dir));
       }
       if (id !== sessionId) return;
-      changes = new Map(res.changes.map((c) => [c.path, c.status]));
+      changes = new Map(res.changes.map((c) => [c.path, c]));
       blocked = res.blocked;
       trusted = res.trusted;
       renderTree();
@@ -211,36 +240,94 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     return b;
   }
 
-  function row(label: string, depth: number, opts: { dir?: boolean; expanded?: boolean; status?: string; changedInside?: boolean; ignored?: boolean; rel: string }) {
+  function lineCounts(c: Change | undefined) {
+    if (!c || c.added === null || c.removed === null) return null;
+    const box = el("span", "f-lines");
+    box.append(el("span", "f-add", `+${c.added}`), el("span", "f-del", `−${c.removed}`));
+    return box;
+  }
+
+  // 字下げの代わりに階層の数だけ縦の線を引き、どの階層にいるかを見えるようにする
+  function row(label: string | Node, depth: number, opts: { dir?: boolean; expanded?: boolean; change?: Change; changedInside?: boolean; ignored?: boolean; rel: string; sub?: string }) {
     const r = el("button", "f-row");
     r.classList.toggle("f-ignored", !!opts.ignored);
     r.type = "button";
     r.setAttribute("role", "treeitem");
-    r.style.paddingLeft = `${8 + depth * 12}px`;
-    r.title = opts.rel;
+    r.title = opts.rel || "（このフォルダ）";
+    r.dataset.rel = opts.rel;
+    if (opts.dir) r.dataset.dir = "1";
     r.classList.toggle("selected", !opts.dir && view().selected === opts.rel);
     if (opts.dir) r.setAttribute("aria-expanded", String(!!opts.expanded));
-    r.append(el("span", "f-chev", opts.dir ? ">" : ""), el("span", "f-name", label));
-    const b = opts.dir ? (opts.changedInside ? el("span", "f-dot", "●") : null) : badge(opts.status);
-    if (b) r.append(b);
+    for (let i = 0; i < depth; i++) r.append(el("span", "f-guide"));
+    const name = typeof label === "string" ? label : "";
+    const icon = el("span", opts.dir ? "f-ico f-folder" : "f-ico");
+    if (!opts.dir) icon.dataset.kind = kindOf(name || opts.rel);
+    r.append(el("span", opts.dir ? "f-chev f-chev-on" : "f-chev"), icon);
+    const nameEl = el("span", "f-name");
+    nameEl.append(label);
+    if (opts.sub) nameEl.append(el("span", "f-sub", opts.sub));
+    r.append(nameEl);
+    const tail = opts.dir ? (opts.changedInside ? el("span", "f-dot", "●") : null) : badge(opts.change?.status);
+    const lines = opts.dir ? null : lineCounts(opts.change);
+    if (lines) r.append(lines);
+    if (tail) r.append(tail);
     return r;
+  }
+
+  // 探している文字に当たった部分を目立たせる
+  function marked(text: string, q: string) {
+    const frag = document.createDocumentFragment();
+    const i = q ? text.toLowerCase().indexOf(q.toLowerCase()) : -1;
+    if (i < 0) {
+      frag.append(text);
+      return frag;
+    }
+    frag.append(text.slice(0, i), el("mark", "", text.slice(i, i + q.length)), text.slice(i + q.length));
+    return frag;
+  }
+
+  const dirOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+  const baseOf = (p: string) => p.slice(p.lastIndexOf("/") + 1);
+
+  function applyScope() {
+    for (const b of $("f-scope").querySelectorAll<HTMLButtonElement>("button")) {
+      b.setAttribute("aria-pressed", String((b.dataset.scope === "changed") === changedOnly));
+    }
+    $("f-count").textContent = changes.size ? String(changes.size) : "";
   }
 
   function renderTree() {
     const v = view();
+    applyScope();
     const notice = trusted ? (blocked ? [el("p", "f-note f-warn", blocked)] : []) : [trustPrompt()];
-    if (changedOnly.checked) {
-      const paths = [...changes.keys()].sort();
-      tree.replaceChildren(
-        ...notice,
-        ...(paths.length
-          ? paths.map((p) => {
-              const r = row(p, 0, { rel: p, status: changes.get(p) });
-              r.onclick = () => select(p);
-              return r;
-            })
-          : [el("p", "f-note", "変更されたファイルはありません")]),
-      );
+    if (query) {
+      const q = query.split("\\").join("/");
+      const rows = found.map((p) => {
+        const r = row(marked(baseOf(p), q.split("/").pop() ?? q), 0, { rel: p, change: changes.get(p), sub: dirOf(p) });
+        r.querySelector(".f-ico")!.setAttribute("data-kind", kindOf(baseOf(p)));
+        r.onclick = () => select(p, true);
+        return r;
+      });
+      tree.replaceChildren(...(rows.length ? rows : [el("p", "f-note", `「${query}」を含むファイルはありません`)]));
+      return;
+    }
+    if (changedOnly) {
+      // フォルダごとにまとめ、フォルダの名前を見出しにする
+      const byDir = new Map<string, Change[]>();
+      for (const c of [...changes.values()].sort((x, y) => x.path.localeCompare(y.path))) {
+        const d = dirOf(c.path);
+        byDir.set(d, [...(byDir.get(d) ?? []), c]);
+      }
+      const rows: HTMLElement[] = [];
+      for (const [d, list] of byDir) {
+        rows.push(el("div", "f-group", d || "（このフォルダの直下）"));
+        for (const c of list) {
+          const r = row(baseOf(c.path), 0, { rel: c.path, change: c });
+          r.onclick = () => select(c.path);
+          rows.push(r);
+        }
+      }
+      tree.replaceChildren(...notice, ...(rows.length ? rows : [el("p", "f-note", "変更されたファイルはありません")]));
       return;
     }
     const rows: HTMLElement[] = [];
@@ -257,7 +344,7 @@ export function createFilesPanel(showError: (e: unknown) => void) {
           rows.push(r);
           if (expanded) walk(rel, depth + 1, ignored);
         } else {
-          const r = row(e.name, depth, { rel, status: changes.get(rel), ignored });
+          const r = row(e.name, depth, { rel, change: changes.get(rel), ignored });
           r.onclick = () => select(rel);
           rows.push(r);
         }
@@ -265,6 +352,20 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     };
     walk("", 0, false);
     tree.replaceChildren(...notice, ...(rows.length ? rows : [el("p", "f-note", "ファイルがありません")]));
+  }
+
+  async function runSearch() {
+    const id = sessionId;
+    const q = query;
+    if (!q || !id) return renderTree();
+    try {
+      const list = await invoke<string[]>("find_files", { id, query: q });
+      if (id !== sessionId || q !== query) return;
+      found = list;
+      renderTree();
+    } catch (e) {
+      showError(e);
+    }
   }
 
   function trustPrompt() {
@@ -305,16 +406,26 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     renderTree();
   }
 
-  function select(rel: string) {
+  /** reveal は、探した結果から選んだとき。検索を消したあとに一覧で見つけられるよう、入っているフォルダを開いておく */
+  async function select(rel: string, reveal = false) {
     const v = view();
     v.selected = rel;
     v.mode = null;
+    if (reveal) {
+      const parts = rel.split("/").slice(0, -1);
+      for (let i = 1; i <= parts.length; i++) {
+        const dir = parts.slice(0, i).join("/");
+        if (v.expanded.has(dir)) continue;
+        v.expanded.add(dir);
+        await listing(dir).catch(() => v.expanded.delete(dir));
+      }
+    }
     renderTree();
     renderViewer();
   }
 
   function modeOf(v: View, rel: string): Mode {
-    const status = changes.get(rel);
+    const status = changes.get(rel)?.status;
     const md = isMarkdown(rel);
     const mode: Mode = status === "D" ? "diff" : (v.mode ?? (status ? "diff" : md ? "preview" : "file"));
     return mode === "preview" && !md ? "file" : mode;
@@ -325,13 +436,14 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     const rel = v.selected;
     const modes = $("fv-modes");
     $("fv-path").textContent = rel ?? "";
+    $("fv-insert").hidden = $("fv-copy").hidden = !rel;
     if (!rel) {
       modes.hidden = true;
       body.replaceChildren(el("p", "fv-empty", "ファイルを選ぶと中身を表示します。"));
       shownKey = "";
       return;
     }
-    const status = changes.get(rel);
+    const status = changes.get(rel)?.status;
     const md = isMarkdown(rel);
     const mode = modeOf(v, rel);
     modes.hidden = status === "D" || (!status && !md);
@@ -452,9 +564,127 @@ export function createFilesPanel(showError: (e: unknown) => void) {
     view().mode = mode;
     renderViewer();
   };
-  changedOnly.onchange = () => {
-    save("filesChangedOnly", changedOnly.checked ? "1" : "0");
+  $("f-scope").onclick = (ev) => {
+    const scope = (ev.target as HTMLElement).closest("button")?.dataset.scope;
+    if (!scope) return;
+    changedOnly = scope === "changed";
+    save("filesChangedOnly", changedOnly ? "1" : "0");
     if (sessionId) renderTree();
+    else applyScope();
+  };
+  search.addEventListener("input", () => {
+    query = search.value.trim();
+    clearTimeout(searchTimer);
+    if (!query) {
+      found = [];
+      if (sessionId) renderTree();
+      return;
+    }
+    searchTimer = window.setTimeout(runSearch, SEARCH_DELAY_MS);
+  });
+  search.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && search.value) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      search.value = "";
+      search.dispatchEvent(new Event("input"));
+    } else if (ev.key === "Enter" && found.length) {
+      ev.preventDefault();
+      select(found[0], true);
+    }
+  });
+
+  // ---------- 場所を渡す（入力欄・コピー・エクスプローラー） ----------
+
+  /** セッションのフォルダからの相対パス（区切りは /）を、Windows の絶対パスにする */
+  function absolute(rel: string) {
+    const root = o.root();
+    if (!root) return null;
+    // セッションのフォルダは / 区切りで覚えていることもあるので、Windows の \ にそろえる
+    const base = root.split("/").join("\\").replace(/\\+$/, "");
+    return rel ? `${base}\\${rel.split("/").join("\\")}` : base;
+  }
+
+  function reveal(rel: string) {
+    invoke("reveal_path", { id: sessionId, path: rel }).catch(showError);
+  }
+
+  const menu = el("div", "f-menu");
+  menu.setAttribute("role", "menu");
+  menu.hidden = true;
+  document.body.append(menu);
+  const closeMenu = () => {
+    menu.hidden = true;
+  };
+
+  function openMenu(x: number, y: number, rel: string, dir: boolean) {
+    const abs = absolute(rel);
+    const item = (label: string, run: () => void, hint?: string) => {
+      const b = el("button", "f-menu-item");
+      b.type = "button";
+      b.setAttribute("role", "menuitem");
+      b.append(el("span", "", label));
+      if (hint) b.append(el("span", "f-menu-hint", hint));
+      b.onclick = () => {
+        closeMenu();
+        run();
+      };
+      return b;
+    };
+    const items = [
+      item("入力欄に入れる", () => abs && o.insert(abs), "送信はしません"),
+      item("パスをコピー", () => abs && o.copy(abs)),
+      ...(rel ? [item("相対パスをコピー", () => o.copy(rel))] : []),
+      el("div", "f-menu-sep"),
+      item(dir ? "エクスプローラーで開く" : "エクスプローラーで表示", () => reveal(rel)),
+    ];
+    menu.replaceChildren(...items);
+    menu.hidden = false;
+    // 画面の端からはみ出さないよう、入りきらない向きには反対側に出す
+    const w = menu.offsetWidth;
+    const h = menu.offsetHeight;
+    menu.style.left = `${Math.min(x, innerWidth - w - 6)}px`;
+    menu.style.top = `${y + h > innerHeight - 6 ? Math.max(6, y - h) : y}px`;
+    menu.querySelector<HTMLElement>(".f-menu-item")?.focus({ preventScroll: true });
+  }
+
+  tree.addEventListener("contextmenu", (ev) => {
+    if (!sessionId) return;
+    ev.preventDefault();
+    const r = (ev.target as HTMLElement).closest<HTMLElement>(".f-row");
+    // 行の外（何も無いところ）を右クリックしたときは、セッションのフォルダそのもの
+    openMenu(ev.clientX, ev.clientY, r?.dataset.rel ?? "", r ? r.dataset.dir === "1" : true);
+  });
+  $("fv-path").addEventListener("contextmenu", (ev) => {
+    const rel = sessionId && view().selected;
+    if (!rel) return;
+    ev.preventDefault();
+    openMenu(ev.clientX, ev.clientY, rel, false);
+  });
+  document.addEventListener("pointerdown", (ev) => {
+    if (!menu.hidden && !menu.contains(ev.target as Node)) closeMenu();
+  });
+  window.addEventListener("blur", closeMenu);
+  menu.addEventListener("keydown", (ev) => {
+    const items = [...menu.querySelectorAll<HTMLElement>(".f-menu-item")];
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    if (ev.key === "Escape") {
+      ev.stopPropagation();
+      closeMenu();
+    } else if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      items[(at + (ev.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
+    }
+  });
+  $("fv-insert").onclick = () => {
+    const rel = sessionId && view().selected;
+    const abs = rel && absolute(rel);
+    if (abs) o.insert(abs);
+  };
+  $("fv-copy").onclick = () => {
+    const rel = sessionId && view().selected;
+    const abs = rel && absolute(rel);
+    if (abs) o.copy(abs);
   };
   $("f-refresh").onclick = () => refresh();
   $("f-collapse").onclick = () => {
@@ -526,6 +756,10 @@ export function createFilesPanel(showError: (e: unknown) => void) {
       }
       sessionId = id;
       listings.clear();
+      query = "";
+      found = [];
+      search.value = "";
+      closeMenu();
       changes = new Map();
       blocked = null;
       trusted = true;
