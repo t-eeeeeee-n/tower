@@ -105,9 +105,8 @@ const STATUS_LABEL: Record<Status, string> = {
 
 // 裏のシェルを待って再開するのか（デプロイなど）、置いたままなのか（サーバーなど）は記録から分からないので、
 // 「完了」は変えずに、動いているという事実だけを添える
-const backgroundShells = (s: Session) => (s.status === "idle" ? (s.background ?? 0) : 0);
 function statusLabel(s: Session) {
-  const n = backgroundShells(s);
+  const n = s.status === "idle" ? (s.background ?? 0) : 0;
   return n ? `${STATUS_LABEL.idle}・裏で ${n} 件実行中` : STATUS_LABEL[s.status];
 }
 
@@ -715,15 +714,12 @@ function render() {
       );
       const line2 = el("div", "s-line2");
       line2.append(
-        // サイドバーは 2 行目が詰まっているので短くする
-        Object.assign(el("span", "s-status", backgroundShells(s) ? `${STATUS_LABEL.idle}・シェル ${backgroundShells(s)}` : STATUS_LABEL[s.status]), {
-          title: backgroundShells(s) ? statusLabel(s) : "",
-        }),
+        // サイドバーは 2 行目が詰まっているので、裏のシェルの数はヘッダーとカードにだけ出す
+        el("span", "s-status", STATUS_LABEL[s.status]),
         el("span", "s-age", fmtAge(s.since)),
-        agentTag(s.agent),
-        // サイドバーは 2 行目が詰まっているので、worktree の元のフォルダは名前の行に出す
-        ...(heads.has(id) ? [branchTag(heads.get(id)!, "s-branch", "none")] : []),
+        // 右寄せのものより前に置き、幅が足りなくても見切れないようにする
         ...(unseen.has(id) ? [el("span", "s-unseen", "未確認")] : []),
+        agentTag(s.agent),
       );
       li.append(line2);
       if (s.status === "waiting" && s.message) li.append(el("div", "s-msg", s.message));
@@ -1281,8 +1277,11 @@ function fillBranch(span: HTMLElement, h: Head | undefined, shown: OriginShown =
       : `${h.worktree ? "worktree のブランチ" : "ブランチ"}: ${h.branch}`;
 }
 
+// サイドバーは 2 行目が詰まっているので、ブランチと worktree の元のフォルダは名前の行に出す。
+// 入りきらないときは後ろから省略されるので、名前が先に残る
 function sidebarName(name: string, h: Head | undefined) {
   const span = el("span", "s-name", name);
+  if (h) span.append(branchTag(h, "s-branch", "none"));
   const from = originLabel(h, "short");
   if (from) {
     const o = el("span", "s-origin", ` ${from}`);
