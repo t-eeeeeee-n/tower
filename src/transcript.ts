@@ -673,6 +673,9 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     fitInput();
     applyStatus();
   });
+  // textarea の変換中の文字には細い下線しか付かず、確定したかどうかが見分けにくいので、欄の縁で知らせる
+  input.addEventListener("compositionstart", () => input.classList.add("ime"));
+  input.addEventListener("compositionend", () => input.classList.remove("ime"));
   const startsSlash = () => !agent && !shell && status === "idle" && !input.value;
   input.addEventListener("keydown", (e) => {
     if (e.isComposing || e.ctrlKey || e.metaKey) return;

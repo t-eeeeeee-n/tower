@@ -1183,7 +1183,8 @@ function updateCard(card: HTMLElement, s: Session) {
   // さかのぼって読んでいる間は更新を止める。設定の行数を超えると古い行が上から消えて、読んでいる文字がずれるため。
   // いちばん下まで戻すと、次の更新で最新に追いつく
   const atBottom = !tail.dataset.key || tail.scrollHeight - tail.scrollTop - tail.clientHeight < 16;
-  if (atBottom && tail.dataset.key !== key) {
+  // 作り直すと選んでいる文字が外れるので、選んでいる間も止める
+  if (atBottom && tail.dataset.key !== key && !domSelection(tail)) {
     tail.replaceChildren(renderScreen(lines.slice(-max), !!peek?.cursor_hidden, ime));
     tail.dataset.key = key;
     tail.scrollTop = tail.scrollHeight;
@@ -1743,6 +1744,41 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// 選んでいる文字があれば、右クリックでコピーする（Windows Terminal と同じ）。
+// ターミナルでは Claude Code などがマウス操作を受け取るので、右クリックがエージェントに渡って選択が消え、
+// メニューの「コピー」では何も写せない。押した時点の選択を拾うので、あとで表示が書き換わっても写せる
+const domSelection = (area: Element) => {
+  const s = getSelection();
+  return s && !s.isCollapsed && area.contains(s.anchorNode) ? s.toString() : "";
+};
+let copiedByRightClick = false;
+document.addEventListener(
+  "mousedown",
+  (ev) => {
+    if (ev.button !== 2) return;
+    const target = ev.target as Element;
+    const inTerm = target.closest("#term");
+    const area = target.closest(".log-body, .c-tail");
+    const text = inTerm ? (term.hasSelection() ? term.getSelection() : "") : area ? domSelection(area) : "";
+    copiedByRightClick = !!text;
+    if (!text) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    writeText(text).then(() => showToast("コピーしました", 1500), showError);
+  },
+  true,
+);
+document.addEventListener(
+  "contextmenu",
+  (ev) => {
+    if (!copiedByRightClick) return;
+    copiedByRightClick = false;
+    ev.preventDefault();
+    ev.stopPropagation();
+  },
+  true,
+);
+
 // ---------- キーボードショートカット ----------
 
 // ショートカットの一覧（F1 のダイアログ）。first は、セッションが無いときの画面にも出すもの
@@ -1872,12 +1908,15 @@ function fmtDuration(ms: number) {
 }
 
 let toastTimer = 0;
-function showError(e: unknown) {
+function showToast(text: string, ms: number) {
   const t = $("toast");
-  t.textContent = String(e);
+  t.textContent = text;
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => (t.hidden = true), 5000);
+  toastTimer = window.setTimeout(() => (t.hidden = true), ms);
+}
+function showError(e: unknown) {
+  showToast(String(e), 5000);
 }
 
 listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {

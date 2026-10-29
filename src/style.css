@@ -469,6 +469,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .log-compose { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px var(--log-gutter) 12px; border-top: 1px solid var(--line); }
 .log-compose textarea { flex: 1; min-width: 0; resize: none; max-height: 200px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; line-height: 1.5; }
 .log-compose textarea:focus { outline: none; border-color: var(--st-running); }
+.log-compose textarea.ime { border-color: var(--st-waiting); box-shadow: 0 0 0 1px var(--st-waiting); background: color-mix(in srgb, var(--st-waiting) 8%, var(--panel)); }
 .log-compose button:disabled { opacity: 0.45; }
 .log-footer { flex: none; margin: 0; padding: 0 var(--log-gutter) 8px; font: 11.5px/1.45 var(--mono); color: var(--term-dim); white-space: pre-wrap; overflow-wrap: anywhere; }
 .log-footer[hidden] { display: none; }
@@ -662,7 +663,8 @@ pre.lg-result.lg-error { color: var(--danger); }
 .card.typing .c-tail { outline: 1px solid var(--st-running); cursor: text; }
 /* カーソルは、カードに打ち込んでいるときだけ見せる（全部のカードで光ると目障り） */
 .card.typing .t-cursor { background: var(--term-fg); color: var(--term-bg); }
-.t-ime { color: var(--term-fg); text-decoration: underline; text-underline-offset: 2px; }
+/* 変換中の文字。ターミナル（xterm.js の既定は黒地に白）と揃え、確定した文字と見分けがつくようにする */
+.t-ime, #term .xterm .composition-view { background: color-mix(in srgb, var(--st-waiting) 22%, var(--term-bg)); color: var(--term-fg); box-shadow: inset 0 -2px var(--st-waiting); }
 .c-tpl[hidden] { display: none; }
 .c-tpl { flex: none; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--muted); font-size: 12px; }
 .c-tpl:hover { background: var(--raise); color: var(--text); }
