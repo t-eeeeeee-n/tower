@@ -86,7 +86,47 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .sidebar-collapsed .session > :not(.s-key) { display: none; }
 .sidebar-collapsed .session::before { left: 50%; top: 10px; margin-left: -3.5px; }
 .sidebar-collapsed .s-key { left: 0; right: 0; width: auto; top: 23px; }
-.brand-mark { display: block; flex: none; }
+/* Tower のキャラ。窓はアプリのアイコンと同じオレンジ、アンテナの光は全体の状態の色 */
+.mascot { display: block; --m-light: var(--st-idle); }
+.mascot .m-body { fill: #dfe5ee; }
+.mascot .m-window { fill: #ef8a3c; }
+.mascot .m-eye { fill: #182030; }
+.mascot .m-stem { fill: #9aa6b8; }
+.mascot .m-gear { fill: #7d889a; }
+.mascot .m-light { fill: var(--m-light); }
+.mascot[data-state="run"] { --m-light: var(--st-running); }
+.mascot[data-state="run"] .m-light { animation: m-blink 1.1s steps(1, end) infinite; }
+.mascot[data-state="wait"] { --m-light: var(--st-waiting); }
+.mascot[data-state="off"] { --m-light: var(--st-exited); }
+.mascot[data-state="off"] .m-window, .mascot[data-state="off"] .m-eye-top { fill: #a8692f; }
+@keyframes m-blink { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .mascot .m-light { animation: none !important; } }
+.mascot.alive .m-light { animation: m-breathe 2.6s ease-in-out infinite; }
+.mascot.alive .m-eye-top { animation: m-wink 4.2s steps(1, end) infinite; }
+@keyframes m-breathe { 50% { opacity: 0.35; } }
+@keyframes m-wink { 0%, 93% { fill: #182030; } 94%, 98% { fill: #ef8a3c; } }
+
+/* セッションが無いときの画面の下の、管制塔と滑走路の場面（画面の下端に敷き、操作の邪魔をしない） */
+.main { position: relative; }
+.main:has(> .welcome-scene:not([hidden])) { padding-bottom: 150px; }
+.welcome-scene { position: absolute; inset: auto 0 0 0; height: 170px; overflow: hidden; pointer-events: none; }
+.welcome-scene[hidden] { display: none; }
+.ws-ground { position: absolute; inset: auto 0 0 0; height: 34px; background: color-mix(in srgb, var(--ink) 70%, #000); border-top: 1px solid var(--line); }
+.ws-runway { position: absolute; left: max(150px, 22%); right: 12%; bottom: 14px; height: 4px; background: repeating-linear-gradient(90deg, var(--line) 0 18px, transparent 18px 30px); }
+.ws-tower { position: absolute; left: max(24px, 10%); bottom: 33px; }
+.ws-star { position: absolute; width: 2px; height: 2px; background: var(--line); }
+.ws-plane { position: absolute; bottom: 19px; }
+.ws-plane-0 { left: max(170px, 26%); }
+.ws-plane-1 { left: max(240px, 36%); }
+.ws-plane-2 { left: max(310px, 46%); }
+.plane .p-body { fill: #aeb8c8; }
+.plane .p-tail { fill: #7d889a; }
+.plane .p-light { fill: var(--st-running); }
+.ws-plane.fly { animation: ws-takeoff 3.2s cubic-bezier(.5, 0, .8, .6) forwards; }
+.ws-plane.land { animation: ws-return 0.9s ease-out; }
+@keyframes ws-takeoff { 0% { transform: translate(0, 0); } 45% { transform: translate(120px, 0); } 100% { transform: translate(min(60vw, 720px), -140px); opacity: 0; } }
+@keyframes ws-return { from { opacity: 0; transform: translateX(-16px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .mascot.alive .m-light, .mascot.alive .m-eye-top, .ws-plane { animation: none !important; } }
 .icon-btn {
   width: 28px; height: 28px;
   display: grid; place-items: center;

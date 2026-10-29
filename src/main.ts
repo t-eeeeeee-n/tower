@@ -10,6 +10,7 @@ import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import { createFilesPanel } from "./files";
 import { handleLinks, linkify, openLink, terminalLinks } from "./links";
+import { createWelcomeScene } from "./mascot";
 import { createTranscriptPanel, createTranscriptView, TRANSCRIPT_AGENTS, type TranscriptView } from "./transcript";
 import { createTemplates } from "./templates";
 import { createSettings } from "./settings";
@@ -652,6 +653,15 @@ renameDialog.onclose = () => {
 
 let trayWaiting = 0;
 
+// セッションが無いときの画面の下の場面。ときどき飛行機が 1 機離陸し、セッションを始める操作でもすぐに離陸する
+const scene = createWelcomeScene($("welcome-scene"));
+setInterval(() => {
+  if (!$("welcome-scene").hidden && !document.hidden) scene.takeoff();
+}, 9000);
+$("empty").addEventListener("click", (ev) => {
+  if ((ev.target as HTMLElement).closest("button, li")) scene.takeoff();
+});
+
 function render() {
   const list = $("session-list");
   // ドラッグ中に作り直すとドラッグが途切れるので、終わるまで一覧はそのままにする
@@ -717,6 +727,7 @@ function render() {
   $("main-head").hidden = !active;
   $("work").hidden = !active;
   $("empty").hidden = !!active || overview;
+  $("welcome-scene").hidden = $("empty").hidden;
   const showRestore = order.length === 0 && restorable.length > 0;
   $("restore").hidden = !showRestore;
   $("empty").classList.toggle("has-restore", showRestore);
