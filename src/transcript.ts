@@ -87,7 +87,7 @@ interface Shell {
   tool_use_id: string;
   description: string;
   command: string;
-  status: "running" | "completed" | "failed" | "killed";
+  status: "running" | "completed" | "failed" | "killed" | "stopped";
   started: string;
 }
 interface ShellOutput {
@@ -111,7 +111,7 @@ interface Item {
   selected: boolean;
   pick: () => void;
 }
-const SHELL_LABEL: Record<Shell["status"], string> = { running: "実行中", completed: "完了", failed: "失敗", killed: "停止" };
+const SHELL_LABEL: Record<Shell["status"], string> = { running: "実行中", completed: "完了", failed: "失敗", killed: "停止", stopped: "停止" };
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]/g;
 
 // 進み具合を \r で上書きする出力は、上書きされた後の文字だけを残す

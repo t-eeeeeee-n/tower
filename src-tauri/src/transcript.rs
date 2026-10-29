@@ -139,7 +139,7 @@ pub struct Shell {
     pub tool_use_id: String,
     pub description: String,
     pub command: String,
-    /// running / completed / failed / killed。終わった知らせが記録に無いあいだは running
+    /// running / completed / failed / killed / stopped。終わった知らせが記録に無いあいだは running
     pub status: String,
     /// 呼び出しの記録の時刻（ISO 8601）
     pub started: String,
@@ -162,7 +162,8 @@ const SHELL_INITIAL_TAIL: u64 = 16 << 20;
 const SHELL_OUTPUT_TAIL: u64 = 64 << 10;
 
 /// Claude Code が裏で動かすシェル（Bash の run_in_background）。新しく始めた順。
-/// 呼び出し（tool_use）・始まった知らせ（toolUseResult.backgroundTaskId）・終わった知らせ（<task-notification>）を
+/// 呼び出し（tool_use）・始まった知らせ（toolUseResult.backgroundTaskId）・終わった知らせ（<task-notification>）・
+/// TaskStop の結果（toolUseResult.task_id）を
 /// 本体の記録から拾う（どれも公開された仕様ではない）。サブエージェントが動かしたものは数えない
 pub fn shells(main: &Path) -> Vec<Shell> {
     let scans = SHELL_SCANS.get_or_init(Default::default);
@@ -198,7 +199,8 @@ fn scan_shells(main: &Path, scan: &mut ShellScan) {
 fn shell_line(line: &[u8], scan: &mut ShellScan) {
     let has = |s: &str| line.windows(s.len()).any(|w| w == s.as_bytes());
     let (call, started, notice) = (has("\"run_in_background\":true"), has("\"backgroundTaskId\""), has("<task-notification>"));
-    if !(call || started || notice) {
+    let stop = has("Successfully stopped task");
+    if !(call || started || notice || stop) {
         return;
     }
     let Ok(v) = serde_json::from_slice::<Value>(line) else { return };
@@ -216,6 +218,13 @@ fn shell_line(line: &[u8], scan: &mut ShellScan) {
             let field = |k: &str| input.and_then(|i| i.get(k)).and_then(Value::as_str).unwrap_or("").to_string();
             let id = b.get("id").and_then(Value::as_str).unwrap_or("").to_string();
             scan.calls.insert(id, (field("description"), field("command"), str_at("/timestamp")));
+        }
+    }
+    // TaskStop で止めたシェルには、終わった知らせが記録に残らない
+    if stop && v.get("type").and_then(Value::as_str) == Some("user") && str_at("/toolUseResult/message").starts_with("Successfully stopped task") {
+        let task = str_at("/toolUseResult/task_id");
+        if let Some(s) = scan.shells.iter_mut().find(|s| s.id == task) {
+            s.status = "killed".into();
         }
     }
     if started {
@@ -712,8 +721,11 @@ mod tests {
         assert_eq!(list.iter().map(|s| (s.id.as_str(), s.status.as_str())).collect::<Vec<_>>(), [("b2", "running"), ("b1", "running")]);
         assert_eq!((list[1].description.as_str(), list[1].command.as_str()), ("ビルド", "npm run build"));
 
-        std::fs::OpenOptions::new().append(true).open(&main).unwrap().write_all(lines(&[done("b1", "completed")]).as_bytes()).unwrap();
-        assert_eq!(shells(&main)[1].status, "completed");
+        // TaskStop で止めたものは、終わった知らせが無くても止まったとみなす
+        let stop = |task: &str| json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":"{}"}]},
+            "toolUseResult":{"message":format!("Successfully stopped task: {task} (npm run dev)"),"task_id":task,"task_type":"local_bash"}});
+        std::fs::OpenOptions::new().append(true).open(&main).unwrap().write_all(lines(&[done("b1", "completed"), stop("b2")]).as_bytes()).unwrap();
+        assert_eq!(shells(&main).iter().map(|s| s.status.as_str()).collect::<Vec<_>>(), ["killed", "completed"]);
         assert_eq!(shell_output(&main, "b1").unwrap().text, "building\n[exited with code 0]\n");
         assert!(shell_output(&main, "zz").is_err());
         std::fs::remove_dir_all(&dir).ok();
