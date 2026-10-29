@@ -1,4 +1,4 @@
-//! セッションごとのメモリ使用量（bash.exe 以下のプロセスツリーの合計）を定期的に通知する。
+//! セッションごとのメモリ使用量（bash.exe 以下のプロセスツリーの合計）と、裏で動いているシェルの数を定期的に通知する。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,12 +9,15 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::session::Manager;
+use crate::transcript;
 
 #[derive(Serialize, Clone)]
 struct Usage {
     id: String,
     bytes: u64,
     processes: usize,
+    /// エージェントが裏で動かしていて、まだ終わっていないシェルの数（Claude Code のみ）
+    background: usize,
 }
 
 pub fn start<R: Runtime>(app: AppHandle<R>, manager: Arc<Manager>) {
@@ -53,7 +56,12 @@ pub fn start<R: Runtime>(app: AppHandle<R>, manager: Arc<Manager>) {
                             }
                         }
                     }
-                    Usage { id: s.id.clone(), bytes, processes: count }
+                    let background = manager
+                        .transcript(&s.id)
+                        .ok()
+                        .flatten()
+                        .map_or(0, |main| transcript::shells(&main).iter().filter(|x| x.status == "running").count());
+                    Usage { id: s.id.clone(), bytes, processes: count, background }
                 })
                 .collect();
             let _ = app.emit("session-usage", usage);

@@ -52,6 +52,8 @@ interface WorktreeState {
 }
 interface Session extends SessionInfo {
   bytes?: number;
+  /** エージェントが裏で動かしていて、まだ終わっていないシェルの数 */
+  background?: number;
 }
 /** 画面の 1 行のうち、同じ色と飾りが続く文字のまとまり（session.rs の Span） */
 interface Span {
@@ -100,6 +102,14 @@ const STATUS_LABEL: Record<Status, string> = {
   waiting: "入力待ち",
   exited: "終了",
 };
+
+// 裏のシェルを待って再開するのか（デプロイなど）、置いたままなのか（サーバーなど）は記録から分からないので、
+// 「完了」は変えずに、動いているという事実だけを添える
+const backgroundShells = (s: Session) => (s.status === "idle" ? (s.background ?? 0) : 0);
+function statusLabel(s: Session) {
+  const n = backgroundShells(s);
+  return n ? `${STATUS_LABEL.idle}・裏で ${n} 件実行中` : STATUS_LABEL[s.status];
+}
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const appWindow = getCurrentWindow();
@@ -695,7 +705,10 @@ function render() {
       );
       const line2 = el("div", "s-line2");
       line2.append(
-        el("span", "s-status", STATUS_LABEL[s.status]),
+        // サイドバーは 2 行目が詰まっているので短くする
+        Object.assign(el("span", "s-status", backgroundShells(s) ? `${STATUS_LABEL.idle}・シェル ${backgroundShells(s)}` : STATUS_LABEL[s.status]), {
+          title: backgroundShells(s) ? statusLabel(s) : "",
+        }),
         el("span", "s-age", fmtAge(s.since)),
         agentTag(s.agent),
         // サイドバーは 2 行目が詰まっているので、worktree の元のフォルダは名前の行に出す
@@ -765,7 +778,7 @@ function render() {
     $("head-cwd").textContent = active.cwd;
     const st = $("head-status");
     st.dataset.status = active.status;
-    st.textContent = STATUS_LABEL[active.status];
+    st.textContent = statusLabel(active);
   }
 }
 
@@ -1157,7 +1170,7 @@ function updateCard(card: HTMLElement, s: Session) {
   q(".c-name").textContent = s.name;
   q(".c-agent").textContent = AGENT_LABEL[s.agent];
   q(".c-agent").dataset.agent = s.agent;
-  q(".c-status").textContent = STATUS_LABEL[s.status];
+  q(".c-status").textContent = statusLabel(s);
   q(".c-unseen").hidden = !unseen.has(s.id);
   applyMark(card, q(".c-mark"), s.cwd);
 
@@ -1847,8 +1860,6 @@ document.addEventListener(
 
 // ---------- バックエンドからのイベント ----------
 
-// 短い応答のたびに完了を通知するとうるさいので、この時間以上かかった作業だけ通知する
-const DONE_NOTIFY_MS = 20_000;
 const workStart = new Map<string, number>();
 
 function notify(id: string, title: string, body: string) {
@@ -1902,8 +1913,9 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
     if (!settings.notify().waiting) return;
     appWindow.requestUserAttention(UserAttentionType.Informational).catch(() => {});
     notify(s.id, `${s.name}: 入力待ち`, s.message ?? "入力を待っています");
-  } else if (ranFor >= DONE_NOTIFY_MS && settings.notify().done) {
-    notify(s.id, `${s.name}: 完了`, `作業が終わりました（${fmtDuration(ranFor)}）`);
+  } else if (settings.notify().done) {
+    const rest = s.background ? `。裏で ${s.background} 件のシェルが実行中です` : "";
+    notify(s.id, `${s.name}: 完了`, `作業が終わりました（${fmtDuration(ranFor)}）${rest}`);
   }
 });
 
@@ -1911,10 +1923,10 @@ listen<string>("notification-open", ({ payload }) => {
   if (sessions.has(payload)) activate(payload);
 });
 
-listen<{ id: string; bytes: number }[]>("session-usage", ({ payload }) => {
+listen<{ id: string; bytes: number; background: number }[]>("session-usage", ({ payload }) => {
   for (const u of payload) {
     const s = sessions.get(u.id);
-    if (s) s.bytes = u.bytes;
+    if (s) Object.assign(s, { bytes: u.bytes, background: u.background });
   }
   render();
 });
