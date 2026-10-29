@@ -71,8 +71,21 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 /* アプリの名前とアイコンはウィンドウのタイトルに出ているので、上の行は「一覧」と操作のボタンだけにする */
 .sidebar-head .nav-btn { flex: 1; min-width: 0; margin: 0; }
-.chev { display: inline-block; font-family: var(--mono); line-height: 1; }
-#sidebar-toggle[aria-expanded="true"] .chev { transform: rotate(180deg); }
+/* 開閉の山形。文字の「>」はフォントで太さや位置がばらつくので、細い 2 本の線で描く（右向き。開くと回す） */
+.chev, .f-chev-on::before { content: ""; display: block; width: 5px; height: 5px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; border-radius: 0 0 1px 0; transform: translateX(-1px) rotate(-45deg); }
+/* 開閉のボタンは、サイドバーの右の縁の上下中央に、縁にかかるつまみとして置く */
+.sidebar { position: relative; }
+.edge-toggle {
+  position: absolute; top: 50%; right: -11px; z-index: 5;
+  width: 22px; height: 44px; margin-top: -22px;
+  display: grid; place-items: center;
+  border: 1px solid var(--line); border-radius: 11px;
+  background: var(--panel); color: var(--muted);
+  font-size: 12px;
+}
+.edge-toggle:hover { background: var(--raise); color: var(--text); border-color: var(--faint); }
+.edge-toggle:focus-visible { outline: 1px solid var(--st-running); outline-offset: 1px; }
+#sidebar-toggle[aria-expanded="true"] .chev { transform: translateX(1px) rotate(135deg); }
 
 /* たたんだサイドバー：番号と状態のランプだけの細い帯 */
 .app.sidebar-collapsed { grid-template-columns: 56px 1fr; }
@@ -828,7 +841,7 @@ textarea:focus { border-color: var(--st-running); outline: none; }
 
 @media (prefers-reduced-motion: no-preference) {
   .app { transition: grid-template-columns 0.15s ease; }
-  .f-chev, .chev { transition: transform 0.12s ease; }
+  .f-chev-on::before, .chev { transition: transform 0.12s ease; }
   .session[data-status="waiting"]::before,
   .card[data-status="waiting"] .c-status::before { animation: blink 1.6s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0.25; } }
