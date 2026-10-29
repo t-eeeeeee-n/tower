@@ -41,6 +41,22 @@ pub struct Entry {
     /// 貼り付けた画像や、ツールが読んだ画像（data URL）
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
+    /// 記録の時刻（ISO 8601）。依頼ごとにかかった時間を出すのに使う
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// ツールの結果の要約（「42 行」「3 件」など）。結果の行だけに付く
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// ファイルを変えたツールの結果の、変えたファイルと増えた行・減った行
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change: Option<Change>,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Change {
+    pub path: String,
+    pub added: usize,
+    pub removed: usize,
 }
 
 #[derive(Serialize)]
@@ -331,12 +347,68 @@ fn entries_of(v: &Value) -> Vec<Entry> {
         return v.get("payload").map(codex_entries).unwrap_or_default();
     }
     let content = v.pointer("/message/content");
-    match (v.get("type").and_then(Value::as_str), content) {
+    let mut entries = match (v.get("type").and_then(Value::as_str), content) {
         (Some("user"), Some(Value::String(s))) => user_text(s).into_iter().collect(),
         (Some("user"), Some(Value::Array(blocks))) => merge_user_images(blocks.iter().filter_map(user_block).collect()),
         (Some("assistant"), Some(Value::Array(blocks))) => blocks.iter().filter_map(assistant_block).collect(),
         _ => Vec::new(),
+    };
+    let at = v.get("timestamp").and_then(Value::as_str);
+    // toolUseResult は行ごとに 1 つで、その行の tool_result（1 つだけ）の詳しい結果
+    let detail = v.get("toolUseResult").filter(|t| t.is_object());
+    for e in &mut entries {
+        e.at = at.map(String::from);
+        if let (Kind::Result, Some(d)) = (&e.kind, detail) {
+            (e.outcome, e.change) = outcome_of(d);
+        }
     }
+    entries
+}
+
+/// Claude Code の toolUseResult から、結果の短い要約と、ファイルの変更を作る。
+/// ツールの名前は結果の行に無いので、項目の形で見分ける（どれも公開された仕様ではない）
+fn outcome_of(d: &Value) -> (Option<String>, Option<Change>) {
+    let num = |k: &str| d.get(k).and_then(Value::as_u64);
+    let text = |k: &str| d.get(k).and_then(Value::as_str);
+    if d.get("backgroundTaskId").is_some() || d.get("isAsync").and_then(Value::as_bool) == Some(true) {
+        return (Some("裏で実行".into()), None);
+    }
+    if let Some(lines) = d.pointer("/file/numLines").and_then(Value::as_u64) {
+        return (Some(format!("{lines} 行")), None);
+    }
+    if let Some(path) = text("filePath") {
+        let (mut added, mut removed) = (0, 0);
+        for hunk in d.get("structuredPatch").and_then(Value::as_array).into_iter().flatten() {
+            for l in hunk.get("lines").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+                match l.as_bytes().first() {
+                    Some(b'+') => added += 1,
+                    Some(b'-') => removed += 1,
+                    _ => {}
+                }
+            }
+        }
+        // 新しく作ったファイルは差分が空で、中身がすべて増えた行になる
+        if text("type") == Some("create") {
+            added = text("content").map_or(0, |c| c.lines().count());
+        }
+        let change = Change { path: path.to_string(), added, removed };
+        return (Some(format!("+{added} −{removed}")), Some(change));
+    }
+    if let Some(files) = num("numFiles") {
+        let n = if text("mode") == Some("content") { num("numLines").unwrap_or(files) } else { files };
+        return (Some(format!("{n} 件")), None);
+    }
+    if let Some(ms) = num("totalDurationMs") {
+        return (Some(format!("{}秒", ms / 1000)), None);
+    }
+    if d.get("stdout").is_some() {
+        if d.get("interrupted").and_then(Value::as_bool) == Some(true) {
+            return (Some("中断".into()), None);
+        }
+        let lines = text("stdout").map_or(0, |s| s.lines().count());
+        return (Some(if lines == 0 { "完了".into() } else { format!("出力 {lines} 行") }), None);
+    }
+    (None, None)
 }
 
 /// Codex の記録（~/.codex/sessions/…/rollout-*.jsonl）の行。会話そのものは response_item に入っていて、
@@ -373,7 +445,7 @@ fn codex_entries(p: &Value) -> Vec<Entry> {
                 Ok(v @ Value::Object(_)) => tool_summary(&v),
                 _ => truncate(raw.trim(), MAX_TOOL_INPUT),
             };
-            vec![Entry { kind: Kind::Tool, text, tool: Some(name), id: call_id(p), error: false, images: Vec::new() }]
+            vec![Entry { kind: Kind::Tool, text, tool: Some(name), id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None }]
         }
         Some("function_call_output" | "custom_tool_call_output") => {
             let text = match p.get("output") {
@@ -385,14 +457,14 @@ fn codex_entries(p: &Value) -> Vec<Entry> {
                 Some(v) => v.get("content").and_then(Value::as_str).map(String::from).unwrap_or_else(|| v.to_string()),
                 None => String::new(),
             };
-            vec![Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id: call_id(p), error: false, images: Vec::new() }]
+            vec![Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None }]
         }
         _ => Vec::new(),
     }
 }
 
 fn entry(kind: Kind, text: String) -> Entry {
-    Entry { kind, text, tool: None, id: None, error: false, images: Vec::new() }
+    Entry { kind, text, tool: None, id: None, error: false, images: Vec::new(), at: None, outcome: None, change: None }
 }
 
 /// 人が打った発言。スラッシュコマンドは名前だけにし、Claude Code が差し込むタグ付きの文は出さない
@@ -460,7 +532,7 @@ fn user_block(b: &Value) -> Option<Entry> {
             };
             let error = b.get("is_error").and_then(Value::as_bool).unwrap_or(false);
             let id = b.get("tool_use_id").and_then(Value::as_str).map(String::from);
-            Some(Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id, error, images })
+            Some(Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id, error, images, at: None, outcome: None, change: None })
         }
         _ => None,
     }
@@ -491,7 +563,7 @@ fn assistant_block(b: &Value) -> Option<Entry> {
             let name = b.get("name")?.as_str()?.to_string();
             let text = tool_summary(b.get("input").unwrap_or(&Value::Null));
             let id = b.get("id").and_then(Value::as_str).map(String::from);
-            Some(Entry { kind: Kind::Tool, text, tool: Some(name), id, error: false, images: Vec::new() })
+            Some(Entry { kind: Kind::Tool, text, tool: Some(name), id, error: false, images: Vec::new(), at: None, outcome: None, change: None })
         }
         _ => None,
     }
@@ -541,6 +613,26 @@ mod tests {
         assert!(path_from_hook(r#"{"transcript_path":"relative.jsonl"}"#).is_none());
         assert!(path_from_hook(r#"{"transcript_path":"C:\\Windows\\win.ini"}"#).is_none());
         assert!(path_from_hook("not json").is_none());
+    }
+
+    #[test]
+    fn tool_outcomes() {
+        let o = |d: Value| outcome_of(&d);
+        assert_eq!(o(json!({"type":"text","file":{"filePath":"a.css","numLines":42}})).0.as_deref(), Some("42 行"));
+        let edit = o(json!({"filePath":"src/a.css","structuredPatch":[{"lines":[" x","-old","+new","+more"]}]}));
+        assert_eq!(edit, (Some("+2 −1".into()), Some(Change { path: "src/a.css".into(), added: 2, removed: 1 })));
+        let create = o(json!({"type":"create","filePath":"b.ts","content":"1\n2\n3\n","structuredPatch":[]}));
+        assert_eq!(create.1.map(|c| (c.added, c.removed)), Some((3, 0)));
+        assert_eq!(o(json!({"mode":"files_with_matches","numFiles":3,"filenames":[]})).0.as_deref(), Some("3 件"));
+        assert_eq!(o(json!({"mode":"content","numFiles":0,"numLines":7})).0.as_deref(), Some("7 件"));
+        assert_eq!(o(json!({"stdout":"ok\nok\n","stderr":"","interrupted":false})).0.as_deref(), Some("出力 2 行"));
+        assert_eq!(o(json!({"stdout":"","stderr":"","backgroundTaskId":"b1"})).0.as_deref(), Some("裏で実行"));
+        assert_eq!(o(json!({"skill":"x"})), (None, None));
+
+        let line = json!({"type":"user","timestamp":"2026-10-29T01:00:00Z","toolUseResult":{"file":{"numLines":5}},
+            "message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"…"}]}});
+        let e = entries_of(&line);
+        assert_eq!((e[0].outcome.as_deref(), e[0].at.as_deref()), (Some("5 行"), Some("2026-10-29T01:00:00Z")));
     }
 
     #[test]

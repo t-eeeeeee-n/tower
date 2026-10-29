@@ -193,6 +193,11 @@ fn session_footer(state: State<'_, App>, id: String) -> Result<Vec<Vec<session::
     state.manager.footer(&id)
 }
 
+#[tauri::command]
+fn session_tail(state: State<'_, App>, id: String, lines: usize) -> Result<Vec<Vec<session::Span>>, String> {
+    state.manager.tail(&id, lines.min(200))
+}
+
 /// `agent` を渡すと、そのサブエージェントの会話を読む
 #[tauri::command(async)]
 fn read_transcript(
@@ -356,6 +361,7 @@ pub fn run() {
             peek_sessions,
             read_transcript,
             session_footer,
+            session_tail,
             list_subagents,
             list_shells,
             read_shell_output,

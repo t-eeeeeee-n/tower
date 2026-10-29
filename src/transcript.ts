@@ -12,6 +12,61 @@ interface Entry {
   error: boolean;
   /** data URL */
   images?: string[];
+  at?: string;
+  /** ツールの結果の要約（「42 行」「3 件」など） */
+  outcome?: string;
+  change?: { path: string; added: number; removed: number };
+}
+
+interface Turn {
+  /** この依頼の返事に、誰の返事かの見出しを付けたか */
+  labeled: boolean;
+  start: string | null;
+  end: string | null;
+  tools: number;
+  files: Map<string, { added: number; removed: number }>;
+}
+
+const newTurn = (start: string | null): Turn => ({ labeled: false, start, end: start, tools: 0, files: new Map() });
+
+const AGENT_NAME: Record<string, string> = { claude: "Claude Code", codex: "Codex" };
+
+function fmtDuration(ms: number) {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (!Number.isFinite(sec)) return "";
+  if (sec < 60) return `${sec}秒`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}分${sec % 60}秒`;
+  return `${Math.floor(sec / 3600)}時間${Math.floor(sec / 60) % 60}分`;
+}
+
+// ツールの名前を、何をしたかの短い言葉にする（知らないツールは名前のまま）
+const STEP_KIND: Record<string, string> = {
+  Read: "読む",
+  Write: "作成",
+  Edit: "変更",
+  MultiEdit: "変更",
+  NotebookEdit: "変更",
+  apply_patch: "変更",
+  Grep: "探す",
+  Glob: "探す",
+  Bash: "実行",
+  PowerShell: "実行",
+  shell: "実行",
+  exec_command: "実行",
+  Agent: "調査",
+  Task: "調査",
+  WebFetch: "Web",
+  WebSearch: "Web検索",
+  TodoWrite: "予定",
+  Skill: "スキル",
+  AskUserQuestion: "質問",
+};
+const stepKind = (tool: string | null) => STEP_KIND[tool ?? ""] ?? (tool ?? "").replace(/^mcp__[^_]+__/, "");
+
+// ファイルの場所は長くなりがちなので、最後の 2 つだけにする
+function shortTarget(text: string) {
+  if (/\s/.test(text) || !/[\\/]/.test(text)) return text;
+  return text.split(/[\\/]/).filter(Boolean).slice(-2).join("/");
 }
 interface Chunk {
   path: string | null;
@@ -68,13 +123,7 @@ function plainOutput(text: string) {
     .join("\n");
 }
 
-function fmtSince(ms: number) {
-  const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (!Number.isFinite(sec)) return "";
-  if (sec < 60) return `${sec}秒`;
-  if (sec < 3600) return `${Math.floor(sec / 60)}分${sec % 60}秒`;
-  return `${Math.floor(sec / 3600)}時間${Math.floor(sec / 60) % 60}分`;
-}
+const fmtSince = (ms: number) => fmtDuration(Date.now() - ms);
 const AGENT_TOOLS = ["Agent", "Task"];
 
 // 会話の記録の場所を SessionStart の hook で受け取れるエージェント
@@ -177,17 +226,63 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   let openGroup: Group | null = null;
   // 結果を待っているツールの呼び出し（並列に呼ばれることがあるので ID で引く）
   const pending = new Map<string, HTMLElement>();
+  // 最後の依頼（人の発言）から後の集計。会話の上に要約として出す
+  let turn = newTurn(null);
+  let agentKind: string | null = null;
+  const whoName = () => {
+    if (!agent) return AGENT_NAME[agentKind ?? ""] ?? agentKind ?? "";
+    const a = agents.find((x) => x.id === agent);
+    return `サブエージェント${a?.agent_type ? `（${a.agent_type}）` : ""}`;
+  };
+  const turnBar = el("div", "lg-turn");
+  turnBar.hidden = true;
+  body.before(turnBar);
+
+  function renderTurn() {
+    // 結果を待っているツールの行に、実行中の経過時間を出す（中断されたものは結果が残らないので、作業中の間だけ）
+    for (const step of pending.values()) {
+      const out = step.querySelector<HTMLElement>(".lg-step-out");
+      if (out) out.textContent = status === "running" && step.dataset.at ? `実行中 ${fmtSince(Date.parse(step.dataset.at))}` : "";
+    }
+    turnBar.hidden = !!shell || !turn.start;
+    if (turnBar.hidden) return;
+    const live = status === "running" && !agent;
+    const until = live ? Date.now() : Date.parse(turn.end ?? turn.start!);
+    const chips: HTMLElement[] = [el("span", "lg-chip lg-chip-agent", whoName()), el("span", "lg-chip", fmtDuration(until - Date.parse(turn.start!)))];
+    if (turn.tools) chips.push(el("span", "lg-chip", `ツール ${turn.tools}`));
+    const files = [...turn.files];
+    for (const [p, f] of files.slice(0, 2)) {
+      const chip = el("span", "lg-chip lg-chip-file", `${p.split(/[\\/]/).pop()} +${f.added} −${f.removed}`);
+      chip.title = p;
+      chips.push(chip);
+    }
+    if (files.length > 2) chips.push(el("span", "lg-chip", `ほか ${files.length - 2} ファイル`));
+    const running = live ? [...pending.values()] : [];
+    if (running.length) {
+      const what = running[running.length - 1].querySelector(".lg-step-target")?.textContent ?? "";
+      chips.push(el("span", "lg-chip lg-chip-live", running.length > 1 ? `実行中 ${running.length}` : `実行中: ${what}`));
+    }
+    turnBar.replaceChildren(...chips);
+  }
 
   const visible = () => !root.hidden && !!sessionId && o.visible();
 
   function note(text: string) {
     body.replaceChildren(el("p", "fv-empty", text));
     pending.clear();
+    turn = newTurn(null);
   }
 
   function render(e: Entry): HTMLElement | null {
+    if (e.at) turn.end = e.at;
+    // どのエージェントの返事か分かるよう、依頼ごとに最初の返事か操作の前に名前を出す
+    if ((e.kind === "assistant" || e.kind === "tool") && !turn.labeled) {
+      turn.labeled = true;
+      body.append(el("div", "lg-who", whoName()));
+    }
     switch (e.kind) {
       case "user": {
+        turn = newTurn(e.at ?? null);
         const n = el("div", "lg-user");
         const bubble = el("div", "lg-user-text", e.text);
         if (e.images?.length) bubble.append(imageStrip(e.images));
@@ -202,30 +297,49 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         return n;
       }
       case "tool": {
-        const n = el("details", "lg-tool");
+        // ツールの呼び出しは畳まず、時系列の線の上に 1 行ずつ並べる。押すと結果を開く
+        const li = el("li", "lg-step");
+        const d = el("details");
         const s = el("summary");
-        s.append(el("span", "lg-tool-name", e.tool ?? ""), el("span", "lg-tool-arg", e.text));
+        s.append(el("span", "lg-step-kind", stepKind(e.tool)), el("span", "lg-step-target", shortTarget(e.text)), el("span", "lg-step-out"));
+        s.title = `${e.tool ?? ""}: ${e.text}`;
         if (e.id && AGENT_TOOLS.includes(e.tool ?? "")) s.append(openAgentButton(e.id));
-        n.append(s);
+        d.append(s);
+        li.append(d);
+        turn.tools++;
         // 結果が届くまでは実行中（Bash やサブエージェントが動いているか、作業中の間はこの印で見分ける）
         if (e.id) {
-          pending.set(e.id, n);
-          n.classList.add("lg-pending");
+          pending.set(e.id, li);
+          li.classList.add("lg-pending");
+          if (e.at) li.dataset.at = e.at;
         }
-        return n;
+        const last = body.lastElementChild;
+        if (last?.classList.contains("lg-steps")) {
+          last.append(li);
+          return null;
+        }
+        const ol = el("ol", "lg-steps");
+        ol.append(li);
+        return ol;
       }
       case "result": {
         const images = e.images?.length ? imageStrip(e.images) : null;
         if (images) images.classList.add("lg-result-images");
         const pre = el("pre", "lg-result", e.text || (images ? "" : "（出力なし）"));
-        // 結果は呼び出したツールの中にしまう。呼び出しが表示の範囲外なら単独で出す。
-        // 画像は開かなくても見えるよう、ツールの行のすぐ下に出す
-        const tool = e.id ? pending.get(e.id) : undefined;
-        if (tool) {
-          if (e.text || !images) tool.append(pre);
-          if (images) tool.after(images);
-          tool.classList.remove("lg-pending");
-          tool.classList.toggle("lg-error", e.error);
+        if (e.change) {
+          const f = turn.files.get(e.change.path) ?? { added: 0, removed: 0 };
+          turn.files.set(e.change.path, { added: f.added + e.change.added, removed: f.removed + e.change.removed });
+        }
+        // 結果は呼び出したツールの行の中にしまう。呼び出しが表示の範囲外なら単独で出す。
+        // 画像は開かなくても見えるよう、行の下に出す
+        const step = e.id ? pending.get(e.id) : undefined;
+        if (step) {
+          if (e.text || !images) step.querySelector("details")!.append(pre);
+          if (images) step.append(images);
+          const out = step.querySelector<HTMLElement>(".lg-step-out")!;
+          out.textContent = e.error ? "失敗" : (e.outcome ?? "完了");
+          step.classList.remove("lg-pending");
+          step.classList.add(e.error ? "lg-error" : "lg-done");
           pending.delete(e.id!);
           return null;
         }
@@ -431,6 +545,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     path = null;
     offset = 0;
     pending.clear();
+    turn = newTurn(null);
     body.replaceChildren();
     renderBar();
     applyStatus();
@@ -486,6 +601,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       if (chunk.reset) {
         body.replaceChildren();
         pending.clear();
+        turn = newTurn(null);
       }
       path = chunk.path;
       offset = chunk.offset;
@@ -499,6 +615,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         if (n) body.append(n);
       }
       while (body.childElementCount > o.maxNodes) body.firstElementChild!.remove();
+      renderTurn();
       if (atBottom || chunk.reset) body.scrollTop = body.scrollHeight;
     } catch (e) {
       o.onError(e);
@@ -577,7 +694,9 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   sendBtn.onclick = submit;
 
   const timer = setInterval(() => {
-    if (!document.hidden) refresh();
+    if (document.hidden) return;
+    refresh();
+    renderTurn();
   }, POLL_MS);
 
   return {
@@ -588,6 +707,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       root.dataset.status = next;
       applyStatus();
       renderBar();
+      renderTurn();
     },
     focus() {
       input.focus({ preventScroll: true });
@@ -619,6 +739,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     setSession(id: string | null, agentName: string | null) {
       if (id === sessionId) return void refresh();
       sessionId = id;
+      agentKind = agentName;
+      root.dataset.agent = agentName ?? "";
       supported = TRANSCRIPT_AGENTS.includes(agentName ?? "");
       path = null;
       offset = 0;
@@ -627,6 +749,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       shell = null;
       shells = [];
       openGroup = null;
+      pending.clear();
+      turn = newTurn(null);
       renderBar();
       applyStatus();
       if (!id) return void body.replaceChildren();

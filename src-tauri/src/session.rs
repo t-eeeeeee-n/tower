@@ -543,6 +543,11 @@ impl Manager {
         Ok(footer_lines(self.get(id)?.term.lock().unwrap().parser.screen()))
     }
 
+    /// 出力の末尾（最後の空行を除いた max_lines 行）
+    pub fn tail(&self, id: &str, max_lines: usize) -> Result<Vec<Vec<Span>>, String> {
+        Ok(tail_lines(&mut self.get(id)?.term.lock().unwrap().parser, max_lines))
+    }
+
     pub fn transcript(&self, id: &str) -> Result<Option<PathBuf>, String> {
         Ok(self.get(id)?.transcript.lock().unwrap().clone())
     }

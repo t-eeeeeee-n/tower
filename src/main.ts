@@ -678,7 +678,7 @@ function render() {
       line2.append(
         el("span", "s-status", STATUS_LABEL[s.status]),
         el("span", "s-age", fmtAge(s.since)),
-        el("span", "s-agent", AGENT_LABEL[s.agent]),
+        agentTag(s.agent),
         // サイドバーは 2 行目が詰まっているので、worktree の元のフォルダは名前の行に出す
         ...(heads.has(id) ? [branchTag(heads.get(id)!, "s-branch", "none")] : []),
         ...(unseen.has(id) ? [el("span", "s-unseen", "未確認")] : []),
@@ -739,6 +739,7 @@ function render() {
   if (active) {
     $("head-name").textContent = active.name;
     $("head-agent").textContent = AGENT_LABEL[active.agent];
+    $("head-agent").dataset.agent = active.agent;
     fillBranch($("head-branch"), heads.get(active.id), "full");
     applyMark($("head-mark"), $("head-mark"), active.cwd);
     $("head-cwd").textContent = active.cwd;
@@ -1101,6 +1102,8 @@ function showFooter(pre: HTMLElement, lines: Span[][]) {
 }
 
 // セッション画面の会話の表示でも、入力欄の下にエージェントの画面の入力欄の下の行を出す
+// 作業中の行（「✻ Thinking… (12s)」など）も、一覧のカードと同じく画面から拾って入力欄の上に出す
+let logTailKey = "";
 setInterval(() => {
   const id = attachedId;
   if (!id || view !== "session" || !log.shown || document.hidden) return;
@@ -1109,7 +1112,23 @@ setInterval(() => {
       if (id === attachedId) showFooter($("log-footer"), lines);
     })
     .catch(() => {});
+  invoke<Span[][]>("session_tail", { id, lines: 15 })
+    .then((lines) => {
+      const s = sessions.get(id);
+      if (id !== attachedId || !s) return;
+      const key = `${id}\n${lines.map((l) => l.map((x) => x.t).join("")).join("\n")}`;
+      if (key !== logTailKey || !screenChangedAt.has(id)) screenChangedAt.set(id, Date.now());
+      logTailKey = key;
+      showActivity($("log-activity"), s, lines);
+    })
+    .catch(() => {});
 }, 1000);
+
+function agentTag(agent: Agent) {
+  const tag = el("span", "s-agent", AGENT_LABEL[agent]);
+  tag.dataset.agent = agent;
+  return tag;
+}
 
 function updateCard(card: HTMLElement, s: Session) {
   const q = (cls: string) => card.querySelector<HTMLElement>(cls)!;
@@ -1117,6 +1136,7 @@ function updateCard(card: HTMLElement, s: Session) {
   card.title = s.cwd;
   q(".c-name").textContent = s.name;
   q(".c-agent").textContent = AGENT_LABEL[s.agent];
+  q(".c-agent").dataset.agent = s.agent;
   q(".c-status").textContent = STATUS_LABEL[s.status];
   q(".c-unseen").hidden = !unseen.has(s.id);
   applyMark(card, q(".c-mark"), s.cwd);

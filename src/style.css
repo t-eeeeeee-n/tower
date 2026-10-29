@@ -15,6 +15,11 @@
   --st-starting: #a99be0;
   --st-shell: #7e8a9c;
   --st-exited: #4d5668;
+  /* エージェントの見分け。状態の色（水色・黄・緑・紫）と重ならない色にする */
+  --ag-claude: #e0896a;
+  --ag-codex: #d5dbe5;
+  --ag-copilot: #c79bf2;
+  --ag-antigravity: #6ea8fe;
   --danger: #e57373;
   --on-running: #08222a;
   --on-waiting: #2a1d05;
@@ -169,6 +174,13 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .s-status { color: var(--st); }
 .s-age { color: var(--faint); }
 .s-agent { margin-left: auto; color: var(--faint); font-size: 11px; }
+/* どのエージェントか見分けられるよう、名前の札と会話の見出しをエージェントごとの色にする */
+[data-agent="claude"] { --agent: var(--ag-claude); }
+[data-agent="codex"] { --agent: var(--ag-codex); }
+[data-agent="copilot"] { --agent: var(--ag-copilot); }
+[data-agent="antigravity"] { --agent: var(--ag-antigravity); }
+.s-agent[data-agent]:not([data-agent="shell"]) { color: var(--agent, var(--faint)); }
+.agent-tag[data-agent]:not([data-agent="shell"]), .c-agent[data-agent]:not([data-agent="shell"]) { color: var(--agent); border-color: color-mix(in srgb, var(--agent) 45%, transparent); }
 .agent-tag, .c-agent {
   padding: 0 6px;
   border: 1px solid var(--line);
@@ -286,7 +298,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .log[hidden] { display: none; }
 /* 表示する会話の切り替え。数が増えても幅が変わらないよう、列には種類ごとのボタンだけを置き、中身は開いた一覧で選ぶ */
 .log, .c-conv { position: relative; }
-.lg-agents { flex: none; display: flex; align-items: stretch; padding: 0 max(8px, calc((100% - 820px) / 2)); border-bottom: 1px solid var(--line); }
+/* 会話は最大 1080px の列にして中央に置く（広すぎると返事の 1 行が長くなり、狭く寄せると左右が空く） */
+.log { --log-gutter: max(16px, calc((100% - 1080px) / 2)); }
+.c-conv { --log-gutter: 6px; }
+.lg-agents { flex: none; display: flex; align-items: stretch; padding: 0 var(--log-gutter); border-bottom: 1px solid var(--line); }
 .lg-agents[hidden] { display: none; }
 .lg-seg { flex: none; position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px 6px; border: 0; background: transparent; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .lg-seg:hover, .lg-seg[aria-expanded="true"] { color: var(--text); background: var(--raise); }
@@ -346,32 +361,48 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .t-link:hover { color: var(--st-running); text-decoration-color: currentColor; }
 .lg-open-agent { flex: none; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--st-running); font-size: 11px; }
 .lg-open-agent:hover { background: var(--raise-2); }
-.log-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; padding: 12px max(8px, calc((100% - 820px) / 2)) 24px; scrollbar-color: var(--line) transparent; user-select: text; }
+.log-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; padding: 12px var(--log-gutter) 24px; scrollbar-color: var(--line) transparent; user-select: text; }
 /* 会話が少ないとき（/clear の直後など）は、入力欄のすぐ上に寄せる。justify-content: flex-end だと、あふれたときに上の方へスクロールできなくなる */
 .log-body > * { flex-shrink: 0; }
 .log-body > :first-child { margin-top: auto; }
 #log-btn[hidden] { display: none; }
-.log-compose { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px max(8px, calc((100% - 820px) / 2)) 12px; border-top: 1px solid var(--line); }
+.log-compose { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px var(--log-gutter) 12px; border-top: 1px solid var(--line); }
 .log-compose textarea { flex: 1; min-width: 0; resize: none; max-height: 200px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; line-height: 1.5; }
 .log-compose textarea:focus { outline: none; border-color: var(--st-running); }
 .log-compose button:disabled { opacity: 0.45; }
-.log-footer { flex: none; margin: 0; padding: 0 max(8px, calc((100% - 820px) / 2)) 8px; font: 11.5px/1.45 var(--mono); color: var(--term-dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-footer { flex: none; margin: 0; padding: 0 var(--log-gutter) 8px; font: 11.5px/1.45 var(--mono); color: var(--term-dim); white-space: pre-wrap; overflow-wrap: anywhere; }
 .log-footer[hidden] { display: none; }
-.lg-user { display: flex; justify-content: flex-end; margin: 10px 12px 6px 36px; }
-.lg-user-text { padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: var(--raise-2); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+/* 読むところ（発言・返事）は大きめの文字と吹き出し、ツールの操作は時系列の線の上に 1 行ずつ並べる */
+.lg-user { display: flex; justify-content: flex-end; margin: 14px 12px 8px 48px; }
+.lg-user-text { padding: 9px 14px; border-radius: 16px; background: var(--raise-2); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.7; }
 .lg-command { margin: 8px 12px; color: var(--muted); font: 12px var(--mono); }
-.lg-assistant.md-preview { padding: 4px 14px; font-size: 13px; line-height: 1.7; }
-.lg-tool { margin: 2px 12px; border-left: 2px solid var(--line); font: 12px/1.5 var(--mono); }
-.lg-tool summary { display: flex; gap: 8px; padding: 2px 8px; cursor: default; list-style: none; color: var(--muted); white-space: nowrap; }
-.lg-tool summary::-webkit-details-marker { display: none; }
-.lg-tool summary:hover { background: var(--raise); }
-.lg-tool-name { flex: none; color: var(--st-running); font-weight: 600; }
-.lg-tool-arg { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-[data-status="running"] .lg-tool.lg-pending { border-left-color: var(--st-running); }
-[data-status="running"] .lg-tool.lg-pending > summary::after { content: "実行中"; flex: none; margin-left: auto; color: var(--st-running); animation: c-pulse 1.2s ease-in-out infinite; }
-.lg-tool.lg-error { border-left-color: var(--danger); }
-.lg-tool.lg-error .lg-tool-name { color: var(--danger); }
-.lg-result { margin: 2px 0 6px 8px; padding: 6px 8px; max-height: 240px; overflow: auto; background: var(--ink); color: var(--muted); font: 11.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.lg-assistant.md-preview { padding: 4px 14px; max-width: none; font-size: 14px; line-height: 1.8; }
+.lg-who { display: flex; align-items: center; gap: 6px; margin: 14px 14px 0; color: var(--agent, var(--muted)); font-size: 11.5px; font-weight: 600; }
+.lg-who::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.lg-chip-agent { color: var(--agent, var(--muted)); background: color-mix(in srgb, var(--agent, var(--muted)) 16%, transparent); font-family: var(--sans); font-weight: 600; }
+.log-activity { padding: 5px var(--log-gutter); }
+.lg-turn { flex: none; display: flex; flex-wrap: wrap; gap: 6px; padding: 6px var(--log-gutter); border-bottom: 1px solid var(--line); font: 11px var(--mono); color: var(--muted); }
+.lg-turn[hidden] { display: none; }
+.lg-chip { padding: 1px 8px; border-radius: 10px; background: var(--raise); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lg-chip-file { color: var(--st-idle); }
+.lg-chip-live { color: var(--st-running); background: color-mix(in srgb, var(--st-running) 18%, transparent); }
+.lg-steps { list-style: none; margin: 4px 12px 4px 20px; padding: 0 0 0 12px; border-left: 2px solid var(--line); display: grid; gap: 1px; }
+.lg-step { position: relative; min-width: 0; font: 12px/1.5 var(--mono); }
+.lg-step::before { content: ""; position: absolute; left: -17px; top: 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); box-shadow: 0 0 0 3px var(--ink); }
+.lg-step.lg-done::before { background: var(--st-idle); }
+.lg-step.lg-error::before { background: var(--danger); }
+[data-status="running"] .lg-step.lg-pending::before { background: var(--st-running); animation: c-pulse 1.2s ease-in-out infinite; }
+.lg-step summary { display: grid; grid-template-columns: 4.5em minmax(0, 1fr) auto auto; gap: 8px; align-items: baseline; padding: 2px 6px; border-radius: 4px; cursor: default; list-style: none; white-space: nowrap; }
+.lg-step summary::-webkit-details-marker { display: none; }
+.lg-step summary:hover { background: var(--raise); }
+.lg-step-kind { color: var(--faint); overflow: hidden; text-overflow: ellipsis; }
+.lg-step-target { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.lg-step-out { color: var(--muted); font-variant-numeric: tabular-nums; }
+.lg-step.lg-done .lg-step-out { color: var(--st-idle); }
+.lg-step.lg-error .lg-step-out, .lg-step.lg-error .lg-step-kind { color: var(--danger); }
+[data-status="running"] .lg-step.lg-pending .lg-step-out { color: var(--st-running); }
+.lg-step .lg-result-images { margin: 4px 6px 6px; }
+.lg-result { margin: 2px 6px 6px; padding: 6px 8px; max-height: 240px; overflow: auto; background: var(--panel); border-radius: 4px; color: var(--muted); font: 11.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 pre.lg-result.lg-error { color: var(--danger); }
 
 /* Markdown のプレビュー */
@@ -504,7 +535,13 @@ pre.lg-result.lg-error { color: var(--danger); }
 .c-conv { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; margin: 0 8px; background: var(--ink); border-radius: 4px; cursor: auto; }
 .c-log.log-body { padding: 8px 4px 10px; font-size: 12.5px; }
 .c-log .lg-user { margin: 8px 6px 4px 24px; }
-.c-log .lg-command, .c-log .lg-tool { margin-left: 6px; margin-right: 6px; }
+.c-log .lg-who { margin: 10px 8px 0; font-size: 11px; }
+.c-log .lg-user-text { padding: 7px 11px; border-radius: 14px; font-size: 12.5px; line-height: 1.6; }
+.c-log .lg-steps { margin: 2px 6px 2px 12px; padding-left: 10px; }
+.c-log .lg-step { font-size: 11px; }
+.c-log .lg-step::before { left: -15px; top: 7px; width: 7px; height: 7px; }
+.c-conv .lg-turn { padding: 4px 6px; font-size: 10.5px; }
+.c-log .lg-command { margin-left: 6px; margin-right: 6px; }
 .c-log .lg-assistant.md-preview { padding: 2px 8px; font-size: 12.5px; line-height: 1.65; }
 .c-activity { flex: none; display: flex; align-items: center; gap: 7px; padding: 4px 10px; border-top: 1px solid var(--line); color: var(--st-running); font: 11.5px var(--mono); }
 .c-activity[hidden] { display: none; }
@@ -513,7 +550,7 @@ pre.lg-result.lg-error { color: var(--danger); }
 .c-activity.still { color: var(--st-waiting); }
 .c-activity.still::before { animation: none; }
 @keyframes c-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .c-activity::before, .lg-pending > summary::after, .lg-seg-count::before, .lg-item-mark { animation: none !important; } }
+@media (prefers-reduced-motion: reduce) { .c-activity::before, .lg-step::before, .lg-seg-count::before, .lg-item-mark { animation: none !important; } }
 .c-compose.log-compose { padding: 6px; gap: 6px; }
 .c-footer.log-footer { padding: 0 8px 6px; font-size: 10.5px; }
 .c-compose textarea { padding: 5px 8px; font-size: 12.5px; }
