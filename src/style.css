@@ -135,7 +135,22 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .mascot.signal .m-light { animation: m-signal 0.7s steps(1, end); }
 .mascot.happy .m-eye:not(.m-eye-top) { fill: #ef8a3c; }
 .mascot.happy .m-eye-top { animation: none; }
-@keyframes m-hop { 0% { transform: none; } 20% { transform: translateY(-6px); } 55% { transform: none; } 70% { transform: translateY(-3px); } 85% { transform: none; } }
+/* 跳ねる高さは 1 点の大きさに合わせる（--hop は 1 点、場面のキャラは 6px） */
+@keyframes m-hop { 0% { transform: none; } 20% { transform: translateY(calc(var(--hop, 6px) * -1)); } 55% { transform: none; } 70% { transform: translateY(calc(var(--hop, 6px) * -0.5)); } 85% { transform: none; } }
+
+/* セッションを作ったときと、作業が終わったときに、サイドバーやカードから飛び立つ・降りてくる小さな飛行機 */
+.fx-plane { position: fixed; z-index: 50; pointer-events: none; }
+.fx-takeoff { animation: fx-takeoff 1.4s cubic-bezier(.5, 0, .8, .6) forwards; }
+.fx-land { animation: fx-land 1.4s ease-out forwards; }
+@keyframes fx-takeoff { 0% { transform: translate(-36px, 0); opacity: 0; } 15% { opacity: 1; } 45% { transform: none; } 100% { transform: translate(90px, -48px); opacity: 0; } }
+@keyframes fx-land { 0% { transform: translate(-90px, -44px); opacity: 0; } 20% { opacity: 1; } 70% { transform: translate(-4px, 0); opacity: 1; } 100% { transform: none; opacity: 0; } }
+
+/* 会話がまだ無いときに、会話の欄の真ん中で待っているキャラ */
+.fv-empty.with-mascot { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; }
+.fv-empty.with-mascot .mascot { flex: none; margin-bottom: 10px; --hop: 5px; cursor: pointer; }
+.fv-empty.with-mascot small { color: var(--faint); font-size: 11.5px; }
+.c-log .fv-empty.with-mascot .mascot { width: 39px; height: 36px; margin-bottom: 4px; --hop: 3px; }
+.mascot[data-look="down"] .m-eye { transform: translateY(1px); }
 @keyframes m-signal { 0%, 30%, 60% { opacity: 1; fill: #fff; } 15%, 45%, 75% { opacity: 0.2; } }
 .ws-star { position: absolute; width: 2px; height: 2px; background: var(--line); }
 .ws-plane { position: absolute; bottom: 19px; }
@@ -149,7 +164,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .ws-plane.land { animation: ws-return 0.9s ease-out; }
 @keyframes ws-takeoff { 0% { transform: translate(0, 0); } 45% { transform: translate(120px, 0); } 100% { transform: translate(min(60vw, 720px), -140px); opacity: 0; } }
 @keyframes ws-return { from { opacity: 0; transform: translateX(-16px); } to { opacity: 1; transform: none; } }
-@media (prefers-reduced-motion: reduce) { .mascot.alive .m-light, .mascot.alive .m-eye-top, .mascot.hop, .ws-plane { animation: none !important; } }
+@media (prefers-reduced-motion: reduce) { .mascot .m-light, .mascot .m-eye-top, .mascot.hop, .ws-plane, .fx-plane { animation: none !important; } }
 .icon-btn {
   width: 28px; height: 28px;
   display: grid; place-items: center;

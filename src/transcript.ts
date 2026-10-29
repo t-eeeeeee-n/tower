@@ -3,6 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { markdownHtml } from "./files";
 import { linkify } from "./links";
+import { createMascot, glanceAround, lookMascot, moveMascot, type MascotState } from "./mascot";
 
 interface Entry {
   kind: "user" | "assistant" | "command" | "tool" | "result";
@@ -267,8 +268,27 @@ export function createTranscriptView(o: TranscriptViewOptions) {
 
   const visible = () => !root.hidden && !!sessionId && o.visible();
 
-  function note(text: string) {
-    body.replaceChildren(el("p", "fv-empty", text));
+  // 会話がまだ無いときに、真ん中で待っているキャラ。入力欄に打つと下を見て、送ると跳ねる
+  let waiter: SVGSVGElement | null = null;
+
+  /** mood を渡すと、真ん中で待っているキャラと添え書き（hint）を出す（起動待ちは run でアンテナを点滅させ、呼びかけている様子にする） */
+  function note(text: string, mood?: MascotState, hint?: string) {
+    // 読み直すたびに同じ文を作り直すと、キャラの動きが途切れる
+    const shown = body.querySelector<HTMLElement>(":scope > .fv-empty");
+    if (shown?.dataset.note === text && body.childElementCount === 1) return;
+    const p = el("p", "fv-empty", text);
+    p.dataset.note = text;
+    waiter = null;
+    if (mood) {
+      const m = createMascot(6, mood);
+      m.onclick = () => moveMascot(m, "hop", "happy");
+      glanceAround(m);
+      p.classList.add("with-mascot");
+      p.replaceChildren(m, el("span", "", text));
+      if (hint) p.append(el("small", "", hint));
+      waiter = m;
+    }
+    body.replaceChildren(p);
     pending.clear();
     turn = newTurn(null);
   }
@@ -608,8 +628,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       }
       path = chunk.path;
       offset = chunk.offset;
-      if (!chunk.path) return note("エージェントの起動を待っています（SessionStart の hook が届くと表示します）。");
-      if (!chunk.entries.length && !body.childElementCount) return note("まだ会話がありません。");
+      if (!chunk.path) return note("エージェントの起動を待っています", "run", "SessionStart の hook が届くと表示します");
+      if (!chunk.entries.length && !body.childElementCount) return note("まだ会話がありません", "ok", "下の欄から指示を送れます");
       if (!chunk.entries.length) return;
       if (body.querySelector(":scope > .fv-empty")) body.replaceChildren();
       const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
@@ -649,6 +669,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     if (agent || shell || status !== "idle" || sending || !text) return;
     sending = true;
     applyStatus();
+    if (waiter?.isConnected) moveMascot(waiter, "hop", "happy");
     try {
       await o.send(text);
       input.value = "";
@@ -672,6 +693,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   input.addEventListener("input", () => {
     fitInput();
     applyStatus();
+    if (waiter?.isConnected) lookMascot(waiter, "down", 1500);
   });
   // textarea の変換中の文字には細い下線しか付かず、確定したかどうかが見分けにくいので、欄の縁で知らせる
   input.addEventListener("compositionstart", () => input.classList.add("ime"));

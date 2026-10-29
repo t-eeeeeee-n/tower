@@ -10,7 +10,7 @@ import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import { createFilesPanel } from "./files";
 import { handleLinks, linkify, openLink, terminalLinks } from "./links";
-import { createWelcomeScene } from "./mascot";
+import { createWelcomeScene, planeEffect } from "./mascot";
 import { createTranscriptPanel, createTranscriptView, TRANSCRIPT_AGENTS, type TranscriptView } from "./transcript";
 import { createTemplates } from "./templates";
 import { createSettings } from "./settings";
@@ -405,6 +405,8 @@ async function createSession(name: string, cwd: string, agent: Agent, resume = f
   refreshHeads();
   restorable = [];
   saveSessions();
+  render();
+  planeAt(info.id, "takeoff");
   return info.id;
 }
 
@@ -697,6 +699,7 @@ function render() {
     ...order.map((id, i) => {
       const s = sessions.get(id)!;
       const li = el("li", "session");
+      li.dataset.id = id;
       li.dataset.status = s.status;
       li.classList.toggle("active", view === "session" && id === activeId);
       li.classList.toggle("waiting", s.status === "waiting");
@@ -786,6 +789,14 @@ function render() {
     st.dataset.status = active.status;
     st.textContent = statusLabel(active);
   }
+}
+
+// セッションの始まりは離陸、作業の終わりは着陸に見立てて、サイドバーの項目と（一覧なら）カードに小さな飛行機を飛ばす
+function planeAt(id: string, kind: "takeoff" | "land") {
+  const li = document.querySelector(`#session-list li[data-id="${CSS.escape(id)}"]`);
+  if (li) planeEffect(li, kind);
+  const head = view === "overview" ? cards.get(id)?.querySelector(".c-head") : null;
+  if (head) planeEffect(head, kind);
 }
 
 // ---------- 一覧 ----------
@@ -1956,6 +1967,7 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
   if (finished) {
     unseen.add(s.id);
     render();
+    planeAt(s.id, "land");
   }
   if (becameWaiting) {
     if (!settings.notify().waiting) return;

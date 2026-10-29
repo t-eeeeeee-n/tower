@@ -62,6 +62,24 @@ export function createMascot(px: number, state: MascotState = "ok") {
   return svg;
 }
 
+const still = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// style.css の .mascot.hop / .happy / .signal の長さ
+const MOVE_MS = { hop: 500, happy: 900, signal: 700 };
+export type MascotMove = keyof typeof MOVE_MS;
+
+/** 跳ねる・目を細める・アンテナで合図する。続けて呼ぶと、動きを最初から流し直す */
+export function moveMascot(svg: SVGSVGElement, ...moves: MascotMove[]) {
+  if (still()) return;
+  for (const m of moves) {
+    svg.classList.remove(m);
+    void svg.getBoundingClientRect();
+    svg.classList.add(m);
+    clearTimeout(Number(svg.dataset[m]));
+    svg.dataset[m] = String(setTimeout(() => svg.classList.remove(m), MOVE_MS[m]));
+  }
+}
+
 // 横向きの小さな飛行機。P 機体 / T 尾翼 / L 機首の灯
 const PLANE = ["T.......", "TT.PP...", "PPPPPPPL", "...PP..."];
 const PLANE_PART: Record<string, string> = { P: "p-body", T: "p-tail", L: "p-light" };
@@ -69,8 +87,26 @@ const TAKEOFF_MS = 3200;
 const LAND_MS = 900;
 /** 離陸の動き（style.css の ws-takeoff）で、滑走路を離れて上りはじめるところ */
 const LIFTOFF_MS = TAKEOFF_MS * 0.45;
-const HOP_MS = 500;
 const GLANCE_MS = 1200;
+// style.css の fx-takeoff / fx-land の長さ
+const FX_MS = 1400;
+
+/**
+ * target の右寄りから小さな飛行機を飛び立たせる（takeoff）か、そこへ降ろす（land）。
+ * 画面全体の上に重ねて飛ばすので、target が描き直されても途切れない
+ */
+export function planeEffect(target: Element, kind: "takeoff" | "land") {
+  const box = target.getBoundingClientRect();
+  if (still() || !box.width) return;
+  const p = document.createElement("div");
+  p.className = `fx-plane fx-${kind}`;
+  p.setAttribute("aria-hidden", "true");
+  p.append(pixels(PLANE, 2, "plane", (c) => PLANE_PART[c]));
+  p.style.left = `${box.right - 34}px`;
+  p.style.top = `${box.top + box.height / 2 - 4}px`;
+  document.body.append(p);
+  setTimeout(() => p.remove(), FX_MS + 100);
+}
 
 /**
  * セッションが無いときの画面の下に置く、管制塔と滑走路の小さな場面。
@@ -86,14 +122,6 @@ export function createWelcomeScene(root: HTMLElement) {
   const mascot = createMascot(6, "ok");
   mascot.classList.add("alive");
   tower.append(mascot);
-  const still = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
-  // 動きを付け直すと、CSS のアニメーションを最初から流し直す
-  const flash = (cls: string, ms: number) => {
-    mascot.classList.remove(cls);
-    void mascot.getBoundingClientRect();
-    mascot.classList.add(cls);
-    setTimeout(() => mascot.classList.remove(cls), ms);
-  };
   let watching = false;
   const look = (dir: string) => {
     if (dir) mascot.dataset.look = dir;
@@ -102,8 +130,7 @@ export function createWelcomeScene(root: HTMLElement) {
   // 飛行機を見送る。アンテナで合図して跳ね、目で追う
   const seeOff = () => {
     watching = true;
-    flash("signal", 700);
-    flash("hop", HOP_MS);
+    moveMascot(mascot, "signal", "hop");
     look("right");
     setTimeout(() => look("up"), LIFTOFF_MS);
     setTimeout(() => {
@@ -117,11 +144,7 @@ export function createWelcomeScene(root: HTMLElement) {
     look(Math.random() < 0.5 ? "left" : "right");
     setTimeout(() => !watching && look(""), GLANCE_MS);
   }, 1000);
-  tower.onclick = () => {
-    if (still()) return;
-    flash("hop", HOP_MS);
-    flash("happy", 900);
-  };
+  tower.onclick = () => moveMascot(mascot, "hop", "happy");
   const planes = [0, 1, 2].map((i) => {
     const p = document.createElement("div");
     p.className = `ws-plane ws-plane-${i}`;
@@ -156,6 +179,23 @@ export function createWelcomeScene(root: HTMLElement) {
     }, TAKEOFF_MS + 600);
   }
   return { takeoff };
+}
+
+/** しばらく dir の向きを見る（right / left / up / down） */
+export function lookMascot(svg: SVGSVGElement, dir: string, ms: number) {
+  if (still()) return;
+  svg.dataset.look = dir;
+  clearTimeout(Number(svg.dataset.lookTimer));
+  svg.dataset.lookTimer = String(setTimeout(() => delete svg.dataset.look, ms));
+}
+
+/** 待っている間、ときどき左右を見る。svg が画面から外されたら止める */
+export function glanceAround(svg: SVGSVGElement) {
+  const timer = setInterval(() => {
+    if (!svg.isConnected) return clearInterval(timer);
+    if (svg.dataset.look || !svg.getClientRects().length || Math.random() > 0.12) return;
+    lookMascot(svg, Math.random() < 0.5 ? "left" : "right", GLANCE_MS);
+  }, 1000);
 }
 
 export function setMascot(svg: SVGSVGElement, state: MascotState) {
