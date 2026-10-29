@@ -67,21 +67,20 @@ button { font: inherit; color: inherit; cursor: pointer; }
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 12px 10px 10px 14px;
+  padding: 10px 10px 8px;
 }
-.brand { display: flex; align-items: center; gap: 9px; margin-right: auto; font-size: 14px; font-weight: 600; }
+/* アプリの名前とアイコンはウィンドウのタイトルに出ているので、上の行は「一覧」と操作のボタンだけにする */
+.sidebar-head .nav-btn { flex: 1; min-width: 0; margin: 0; }
 .chev { display: inline-block; font-family: var(--mono); line-height: 1; }
 #sidebar-toggle[aria-expanded="true"] .chev { transform: rotate(180deg); }
 
 /* たたんだサイドバー：番号と状態のランプだけの細い帯 */
 .app.sidebar-collapsed { grid-template-columns: 56px 1fr; }
 .sidebar-collapsed .sidebar-head { flex-direction: column; padding: 12px 0 10px; }
-.sidebar-collapsed .brand { margin: 0 0 4px; }
-.sidebar-collapsed .brand-text,
 .sidebar-collapsed .shortcut,
 .sidebar-collapsed .waiting-jump,
 .sidebar-collapsed .sidebar-foot { display: none; }
-.sidebar-collapsed .nav-btn { justify-content: center; margin: 0 4px 6px; padding: 6px 0; font-size: 12px; }
+.sidebar-collapsed .nav-btn { flex: none; justify-content: center; align-self: stretch; margin: 0 4px 4px; padding: 6px 0; font-size: 12px; }
 .sidebar-collapsed .session-list { padding: 4px 4px 0; }
 .sidebar-collapsed .session { display: block; height: 42px; padding: 0; }
 .sidebar-collapsed .session > :not(.s-key) { display: none; }
@@ -251,6 +250,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
   flex: none;
   width: 42%;
   min-width: 240px;
+  /* 広いウィンドウで広げた幅が保存されていても、狭いウィンドウでターミナルや会話の場所を潰さない（ドラッグの上限と同じ） */
+  max-width: calc(100% - 320px);
   display: flex; flex-direction: column;
   min-height: 0;
   background: var(--panel);
