@@ -239,9 +239,17 @@ pub fn find_files(root: &Path, query: &str) -> Result<Vec<String>, String> {
 /// エクスプローラーで開く。ファイルなら入っているフォルダを開いてそのファイルを選び、フォルダならそのフォルダを開く
 pub fn reveal(root: &Path, rel: &str) -> Result<(), String> {
     let path = resolve(root, rel)?;
-    // canonicalize は \\?\C:\… の形を返すが、エクスプローラーはこの形を開けない
+    // canonicalize は \\?\C:\… や \\?\UNC\server\share\… の形を返すが、エクスプローラーはこの形を開けない
     let full = path.to_string_lossy();
-    let shown = full.strip_prefix(r"\\?\").unwrap_or(&full);
+    let shown = match full.strip_prefix(r"\\?\UNC\") {
+        Some(unc) => format!(r"\\{unc}"),
+        None => full.strip_prefix(r"\\?\").unwrap_or(&full).to_string(),
+    };
+    // 下で引用符ごとコマンド行に入れるので、引用符を閉じられる文字は通さない。
+    // Windows のファイル名に " は使えないが、念のため弾く
+    if shown.chars().any(|c| c == '"' || c.is_control()) {
+        return Err(format!("この名前はエクスプローラーで開けません: {rel}"));
+    }
     let mut cmd = std::process::Command::new("explorer.exe");
     #[cfg(windows)]
     {
