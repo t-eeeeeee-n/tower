@@ -24,10 +24,12 @@ WebView2 は Windows 10/11 に標準で入っています。
 
 ```bash
 npm install
-npm run tauri dev
+npm run tauri:dev
 ```
 
 初回は Rust の依存ビルドに数分かかります。
+
+`tauri:dev` は識別子を `dev.tower.app.dev` に替えて起動するので、インストールした Tower が動いていても並べて動かせます（Tower は同じ識別子では 1 つしか起動しないため）。設定や信頼したフォルダなどの保存先も `%APPDATA%\dev.tower.app.dev` に分かれ、インストールした Tower のものとは混ざりません。
 
 ## 配布用ビルド
 
