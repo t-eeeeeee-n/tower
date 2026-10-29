@@ -301,6 +301,31 @@ fn set_tray_waiting(app: AppHandle, count: usize) {
     tray::set_waiting(&app, count);
 }
 
+/// panic の内容と場所を panic.log に書き足す。
+/// メインスレッド（WebView2 から呼ばれる処理の中）の panic はプロセスごと中断され（0xc0000409）、
+/// Windows のイベントログには終了コードしか残らないため
+fn log_panics(dir: std::path::PathBuf) {
+    let path = dir.join("panic.log");
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let line = format!(
+            "{} [{} {}] {}\n",
+            session::now_ms(),
+            env!("CARGO_PKG_VERSION"),
+            thread.name().unwrap_or("?"),
+            info.to_string().replace('\n', " / "),
+        );
+        // 書き足し続けて大きくならないよう、1 MB を超えたら作り直す
+        let large = std::fs::metadata(&path).map_or(false, |m| m.len() > 1 << 20);
+        let file = std::fs::OpenOptions::new().create(true).append(!large).write(true).truncate(large).open(&path);
+        if let Ok(mut f) = file {
+            let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+        }
+        default(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     update::wait_previous();
@@ -315,6 +340,7 @@ pub fn run() {
         .setup(|app| {
             update::remove_old_binaries();
             let dir = app.path().app_data_dir()?;
+            log_panics(dir.clone());
             let settings_path = dir.join("hooks-settings.json");
             let mut hooks_error = None;
             if let Err(e) = hooks::write_settings(&settings_path) {
