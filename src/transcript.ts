@@ -248,7 +248,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     if (turnBar.hidden) return;
     const live = status === "running" && !agent;
     const until = live ? Date.now() : Date.parse(turn.end ?? turn.start!);
-    const chips: HTMLElement[] = [el("span", "lg-chip lg-chip-agent", whoName()), el("span", "lg-chip", fmtDuration(until - Date.parse(turn.start!)))];
+    const chips: HTMLElement[] = [el("span", "lg-chip", fmtDuration(until - Date.parse(turn.start!)))];
     if (turn.tools) chips.push(el("span", "lg-chip", `ツール ${turn.tools}`));
     const files = [...turn.files];
     for (const [p, f] of files.slice(0, 2)) {
@@ -375,9 +375,11 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   // エージェントが終わると、終わった知らせの届かなかったシェルも一緒に止まる
   const shellStatus = (s: Shell): Shell["status"] => (s.status === "running" && status === "exited" ? "killed" : s.status);
 
+  // 一覧に出すのは動いているものだけ（止まったサブエージェントは、ツールの行の「会話を見る」から開ける）。
+  // 表示中のものは、止まっても何を見ているか分かるよう残す
   function items(group: Group): Item[] {
     if (group === "agent") {
-      return agents.map((a) => ({
+      return agents.filter((a) => active(a) || a.id === agent).map((a) => ({
         id: a.id,
         label: a.description || a.agent_type || a.id,
         sub: a.agent_type ?? "",
@@ -389,19 +391,21 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         pick: () => setAgent(a.id),
       }));
     }
-    return shells.map((s) => {
-      const st = shellStatus(s);
-      return {
-        id: s.id,
-        label: s.description || s.command,
-        sub: s.description ? s.command : "",
-        state: st,
-        time: st === "running" ? () => fmtSince(Date.parse(s.started)) : () => SHELL_LABEL[st],
-        title: `$ ${s.command}`,
-        selected: s.id === shell,
-        pick: () => setShell(s.id),
-      };
-    });
+    return shells
+      .filter((s) => shellStatus(s) === "running" || s.id === shell)
+      .map((s) => {
+        const st = shellStatus(s);
+        return {
+          id: s.id,
+          label: s.description || s.command,
+          sub: s.description ? s.command : "",
+          state: st,
+          time: st === "running" ? () => fmtSince(Date.parse(s.started)) : () => SHELL_LABEL[st],
+          title: `$ ${s.command}`,
+          selected: s.id === shell,
+          pick: () => setShell(s.id),
+        };
+      });
   }
 
   function segment(label: string, selected: boolean) {
@@ -442,9 +446,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         b.classList.toggle("lg-live", live > 0);
         b.setAttribute("aria-haspopup", "menu");
         b.setAttribute("aria-expanded", String(openGroup === g));
-        // 動いている数 / 全部の数
-        b.append(el("span", "lg-seg-count", live ? `${live}/${list.length}` : String(list.length)), el("span", "lg-seg-caret"));
-        b.title = `${GROUP_LABEL[g]}: 動いているもの ${live} 件 / 全部で ${list.length} 件`;
+        b.append(el("span", "lg-seg-count", String(live)), el("span", "lg-seg-caret"));
+        b.title = `${GROUP_LABEL[g]}: 動いているもの ${live} 件`;
         b.onclick = () => (openGroup === g ? closeMenu() : openMenu(g));
         parts.push(el("span", "lg-seg-sep"), b);
       }

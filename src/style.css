@@ -479,7 +479,6 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .lg-assistant.md-preview { padding: 4px 14px; max-width: none; font-size: 14px; line-height: 1.8; }
 .lg-who { display: flex; align-items: center; gap: 6px; margin: 14px 14px 0; color: var(--agent, var(--muted)); font-size: 11.5px; font-weight: 600; }
 .lg-who::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-.lg-chip-agent { color: var(--agent, var(--muted)); background: color-mix(in srgb, var(--agent, var(--muted)) 16%, transparent); font-family: var(--sans); font-weight: 600; }
 .log-activity { padding: 5px var(--log-gutter); }
 .lg-turn { flex: none; display: flex; flex-wrap: wrap; gap: 6px; padding: 6px var(--log-gutter); border-bottom: 1px solid var(--line); font: 11px var(--mono); color: var(--muted); }
 .lg-turn[hidden] { display: none; }
