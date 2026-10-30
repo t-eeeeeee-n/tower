@@ -352,6 +352,12 @@ fn entries_of(v: &Value) -> Vec<Entry> {
     if v.get("isMeta").and_then(Value::as_bool).unwrap_or(false) {
         return Vec::new();
     }
+    // 文脈が足りなくなったときの要約（compact）は人の発言として残るが、Claude Code が書いたものなので区切りだけを出す
+    if v.get("isCompactSummary").and_then(Value::as_bool).unwrap_or(false) {
+        let mut e = entry(Kind::Command, "会話を要約して続けています（compact）".into());
+        e.at = v.get("timestamp").and_then(Value::as_str).map(String::from);
+        return vec![e];
+    }
     if v.get("type").and_then(Value::as_str) == Some("response_item") {
         return v.get("payload").map(codex_entries).unwrap_or_default();
     }
@@ -666,6 +672,9 @@ mod tests {
         assert_eq!(kinds(json!({"type":"user","message":{"content":"直して"}})), vec![(Kind::User, "直して".into())]);
         assert!(kinds(json!({"type":"user","message":{"content":"<local-command-stdout></local-command-stdout>"}})).is_empty());
         assert!(kinds(json!({"type":"user","isMeta":true,"message":{"content":"meta"}})).is_empty());
+        // compact の要約は自分の発言として出さず、区切りにする
+        let summary = json!({"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"content":"This session is being continued from a previous conversation..."}});
+        assert_eq!(kinds(summary), vec![(Kind::Command, "会話を要約して続けています（compact）".into())]);
 
         // 貼り付けの囲みの行は出さない。貼り付けだけの発言も、囲みで始まるからといって消さない
         let pasted = "\n\n<pasted_content id=\"2225\">\n# 依頼\n直して\n</pasted_content id=\"2225\">\n";
