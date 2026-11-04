@@ -268,6 +268,7 @@ impl Manager {
         cwd: String,
         agent: Agent,
         resume: bool,
+        extra_args: &str,
     ) -> Result<SessionInfo, String> {
         if !Path::new(&cwd).is_dir() {
             return Err(format!("フォルダが見つかりません: {cwd}"));
@@ -427,7 +428,7 @@ impl Manager {
         }
 
         let settings = self.hooks_settings.to_string_lossy().replace('\\', "/");
-        if let Some(line) = agent.launch_line(&settings, resume) {
+        if let Some(line) = agent.launch_line(&settings, resume, extra_args) {
             let mut w = writer.lock().unwrap();
             let _ = w.write_all(line.as_bytes());
             let _ = w.flush();

@@ -48,7 +48,14 @@ pub(crate) fn git_raw(program: &Path, dir: &Path, args: &[&str]) -> Result<Strin
 
 /// `<リポジトリ名>-<ブランチ名>` の worktree をリポジトリの隣に作り、そのパスを返す。
 /// ブランチが無ければ現在の HEAD から作る。
-pub fn create_worktree(program: &Path, cwd: &str, branch: &str) -> Result<String, String> {
+/// worktree を作る場所（設定）。base が無ければリポジトリの隣、name が無ければ `{repo}-{branch}`
+#[derive(Default)]
+pub struct WorktreePlace {
+    pub base: Option<String>,
+    pub name: Option<String>,
+}
+
+pub fn create_worktree(program: &Path, cwd: &str, branch: &str, place: &WorktreePlace) -> Result<String, String> {
     let branch = branch.trim();
     git(program, Path::new(cwd), &["check-ref-format", "--branch", branch])
         .map_err(|_| format!("ブランチ名として使えません: {branch}"))?;
@@ -57,7 +64,25 @@ pub fn create_worktree(program: &Path, cwd: &str, branch: &str) -> Result<String
     let root = PathBuf::from(root);
     let repo = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let suffix: String = branch.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' }).collect();
-    let dir = root.parent().unwrap_or(&root).join(format!("{repo}-{suffix}"));
+    // 名前の型の {repo} と {branch} を埋める。型にフォルダの区切りなどが入っていても、1 つのフォルダ名に収める
+    let name: String = place
+        .name
+        .as_deref()
+        .unwrap_or("{repo}-{branch}")
+        .replace("{repo}", &repo)
+        .replace("{branch}", &suffix)
+        .chars()
+        .map(|c| if c.is_control() || "\\/:*?\"<>|".contains(c) { '-' } else { c })
+        .collect();
+    let name = name.trim().trim_matches('.');
+    if name.is_empty() {
+        return Err("worktree のフォルダ名が空になります（設定のフォルダ名の型を確かめてください）".into());
+    }
+    let base = place.base.as_deref().map(|b| PathBuf::from(b.trim())).unwrap_or_else(|| root.parent().unwrap_or(&root).to_path_buf());
+    if !base.is_dir() {
+        return Err(format!("worktree を作る場所がありません: {}", base.display()));
+    }
+    let dir = base.join(name);
     // 同じブランチの worktree が既にあれば、作り直さずにそれを開く（閉じたセッションを開き直すとき）
     if let Some(found) = worktree_of(program, &root, branch) {
         return Ok(if cfg!(windows) { found.replace('/', "\\") } else { found });
@@ -273,19 +298,28 @@ mod tests {
         git(&program, &repo, &["init", "-q"]).unwrap();
         git(&program, &repo, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init"]).unwrap();
 
-        let dir = create_worktree(&program, &repo.to_string_lossy(), "feature/x").unwrap();
+        let dir = create_worktree(&program, &repo.to_string_lossy(), "feature/x", &WorktreePlace::default()).unwrap();
         assert!(Path::new(&dir).ends_with("app-feature-x"), "{dir}");
         assert!(Path::new(&dir).join(".git").exists());
         assert_eq!(git(&program, Path::new(&dir), &["branch", "--show-current"]).unwrap(), "feature/x");
 
         // 同じブランチなら、作り直さずに既にある worktree を返す（Windows では大文字と小文字を区別しない）
-        assert_eq!(create_worktree(&program, &repo.to_string_lossy(), "feature/x").unwrap(), dir);
+        assert_eq!(create_worktree(&program, &repo.to_string_lossy(), "feature/x", &WorktreePlace::default()).unwrap(), dir);
         if cfg!(windows) {
-            assert_eq!(create_worktree(&program, &repo.to_string_lossy(), "feature/X").unwrap(), dir);
+            assert_eq!(create_worktree(&program, &repo.to_string_lossy(), "feature/X", &WorktreePlace::default()).unwrap(), dir);
         }
         // 別のブランチでフォルダの名前がぶつかるときはエラー
-        assert!(create_worktree(&program, &repo.to_string_lossy(), "feature-x").is_err());
-        assert!(create_worktree(&program, &repo.to_string_lossy(), "bad..name").is_err());
+        assert!(create_worktree(&program, &repo.to_string_lossy(), "feature-x", &WorktreePlace::default()).is_err());
+
+        // 設定の場所と名前の型。区切りなどは 1 つのフォルダ名に収める
+        let wt = base.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let place = WorktreePlace { base: Some(wt.to_string_lossy().into_owned()), name: Some("{branch}/{repo}".into()) };
+        let custom = create_worktree(&program, &repo.to_string_lossy(), "fix/a", &place).unwrap();
+        assert!(Path::new(&custom).ends_with("wt/fix-a-app") || Path::new(&custom).ends_with("wt\\fix-a-app"), "{custom}");
+        let missing = WorktreePlace { base: Some(base.join("nope").to_string_lossy().into_owned()), name: None };
+        assert!(create_worktree(&program, &repo.to_string_lossy(), "fix/b", &missing).is_err());
+        assert!(create_worktree(&program, &repo.to_string_lossy(), "bad..name", &WorktreePlace::default()).is_err());
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -323,7 +357,7 @@ mod tests {
         let head_main = head(&repo.join("sub")).unwrap();
         assert_eq!((head_main.branch.as_str(), head_main.worktree), ("main", false));
 
-        let dir = PathBuf::from(create_worktree(&program, &repo.to_string_lossy(), "feature/y").unwrap());
+        let dir = PathBuf::from(create_worktree(&program, &repo.to_string_lossy(), "feature/y", &WorktreePlace::default()).unwrap());
         let h = head(&dir).unwrap();
         assert_eq!((h.branch.as_str(), h.worktree), ("feature/y", true));
         let origin = h.origin.unwrap();
@@ -345,7 +379,7 @@ mod tests {
         assert!(!dir.exists(), "worktree 自体は消える");
         assert!(git(&program, &repo, &["rev-parse", "--verify", "--quiet", "refs/heads/feature/y"]).is_ok());
 
-        let dir = PathBuf::from(create_worktree(&program, &repo.to_string_lossy(), "feature/y").unwrap());
+        let dir = PathBuf::from(create_worktree(&program, &repo.to_string_lossy(), "feature/y", &WorktreePlace::default()).unwrap());
         merge_worktree(&program, &dir).unwrap();
         assert_eq!(worktree_state(&program, &dir).unwrap().ahead, 0);
         remove_worktree(&program, &dir, true).unwrap();

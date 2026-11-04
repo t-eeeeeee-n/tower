@@ -1,15 +1,35 @@
-// 設定画面：配色・フォント・カーソル、通知、履歴の行数。配色は Git Bash（mintty）のテーマファイルから選べる
+// 設定画面：配色・フォント・カーソル・会話の表示、通知、履歴の行数、セッションの開き方。配色は Git Bash（mintty）のテーマファイルから選べる
 import { invoke } from "@tauri-apps/api/core";
 import type { Terminal } from "@xterm/xterm";
 import { MinttyConfig, Palette, ThemeOption, TOWER, parseMintty, themeOptions, uiTokens, xtermTheme } from "./theme";
 
 type CursorStyle = "block" | "underline" | "bar";
+/** 会話の表示で、終わった依頼をどこまで畳むか（none 畳まない / tools ツールの列 / all 最後の返答以外） */
+export type FoldMode = "none" | "tools" | "all";
 interface Appearance {
   theme: string;
   font: string;
   fontSize: number;
   cursor: CursorStyle;
   blink: boolean;
+  fold: FoldMode;
+  /** 会話の表示の文字の大きさ（px） */
+  logSize: number;
+  /** 飛行機やキャラを動かすか */
+  motion: boolean;
+}
+export type RestoreMode = "ask" | "auto" | "never";
+export type OpenAs = "last" | "log" | "term";
+/** セッションの開き方・閉じ方。このあと開くセッションから効く */
+export interface SessionPrefs {
+  /** エージェントごとに、起動のコマンドに足す引数 */
+  args: Record<string, string>;
+  restore: RestoreMode;
+  openAs: OpenAs;
+  /** worktree を作る場所（空ならリポジトリの隣）と、フォルダ名の型 */
+  worktreeDir: string;
+  worktreeName: string;
+  closeToTray: boolean;
 }
 interface Notify {
   waiting: boolean;
@@ -20,7 +40,11 @@ interface History {
   overview: number;
 }
 
-const DEFAULT: Appearance = { theme: "tower", font: "Cascadia Mono", fontSize: 14, cursor: "block", blink: true };
+const DEFAULT: Appearance = { theme: "tower", font: "Cascadia Mono", fontSize: 14, cursor: "block", blink: true, fold: "tools", logSize: 14, motion: true };
+const LOG_SIZE_MIN = 11;
+const LOG_SIZE_MAX = 20;
+const SESSION_DEFAULT: SessionPrefs = { args: {}, restore: "ask", openAs: "last", worktreeDir: "", worktreeName: "", closeToTray: true };
+const ARG_AGENTS = ["claude", "codex", "copilot", "antigravity"];
 const FONTS = ["Cascadia Mono", "Cascadia Code", "Consolas", "BIZ UDGothic", "MS Gothic", "Lucida Console", "Courier New"];
 // 選んだフォントに無い文字（日本語など）を補う
 const FALLBACK = '"Cascadia Code", "BIZ UDGothic", Consolas, "MS Gothic", monospace';
@@ -115,16 +139,47 @@ function loadSettings(): Appearance {
     fontSize: Number.isFinite(v.fontSize) ? clampSize(v.fontSize) : DEFAULT.fontSize,
     cursor: v.cursor in { block: 1, underline: 1, bar: 1 } ? v.cursor : DEFAULT.cursor,
     blink: v.blink !== false,
+    fold: v.fold in { none: 1, tools: 1, all: 1 } ? v.fold : DEFAULT.fold,
+    logSize: Number.isFinite(v.logSize) ? clampInt(v.logSize, LOG_SIZE_MIN, LOG_SIZE_MAX) : DEFAULT.logSize,
+    motion: v.motion !== false,
   };
 }
 
-export function createSettings(term: Terminal, refit: () => void, showError: (e: unknown) => void) {
+function loadSession(): SessionPrefs {
+  const v = { ...SESSION_DEFAULT, ...loadJson<SessionPrefs>("sessionPrefs") };
+  const text = (x: unknown) => (typeof x === "string" ? x : "");
+  return {
+    args: Object.fromEntries(ARG_AGENTS.map((a) => [a, text(v.args?.[a])])),
+    restore: v.restore in { ask: 1, auto: 1, never: 1 } ? v.restore : SESSION_DEFAULT.restore,
+    openAs: v.openAs in { last: 1, log: 1, term: 1 } ? v.openAs : SESSION_DEFAULT.openAs,
+    worktreeDir: text(v.worktreeDir),
+    worktreeName: text(v.worktreeName),
+    closeToTray: v.closeToTray !== false,
+  };
+}
+
+export function createSettings(
+  term: Terminal,
+  refit: () => void,
+  showError: (e: unknown) => void,
+  /** 会話の畳み方が変わった（試しているときも呼ぶ） */
+  onFold: (mode: FoldMode) => void,
+) {
   const dialog = $<HTMLDialogElement>("look-dialog");
   const list = $("look-themes");
   const fFont = $<HTMLInputElement>("look-font");
   const fSize = $<HTMLInputElement>("look-size");
   const fCursor = $<HTMLSelectElement>("look-cursor");
   const fBlink = $<HTMLInputElement>("look-blink");
+  const fFold = $<HTMLSelectElement>("look-fold");
+  const fLogSize = $<HTMLInputElement>("look-log-size");
+  const fMotion = $<HTMLInputElement>("look-motion");
+  const fArgs = Object.fromEntries(ARG_AGENTS.map((a) => [a, $<HTMLInputElement>(`look-args-${a}`)]));
+  const fRestore = $<HTMLSelectElement>("look-restore");
+  const fOpenAs = $<HTMLSelectElement>("look-open-as");
+  const fClose = $<HTMLSelectElement>("look-close");
+  const fWtDir = $<HTMLInputElement>("look-wt-dir");
+  const fWtName = $<HTMLInputElement>("look-wt-name");
   const fFontHint = $("look-font-hint");
   const fNotifyWaiting = $<HTMLInputElement>("look-notify-waiting");
   const fNotifyDone = $<HTMLInputElement>("look-notify-done");
@@ -132,10 +187,12 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
   const fOverview = $<HTMLInputElement>("look-overview");
 
   let settings = loadSettings();
+  let appliedFold = settings.fold;
   let options: ThemeOption[] = [{ id: "tower", label: "Tower", palette: TOWER }];
   let gitBash = new Map<string, string>();
   let notify = loadNotify();
   let history = loadHistory();
+  let session = loadSession();
   let before = settings;
   // テーマファイルを読み終わるまでは、前回の配色で表示しておく（起動時に Tower の色が一瞬出ないように）
   let cached = loadJson<Palette>("appearancePalette") as Palette | null;
@@ -162,7 +219,10 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
     term.options.fontSize = settings.fontSize;
     term.options.cursorStyle = settings.cursor;
     term.options.cursorBlink = settings.blink;
+    root.setProperty("--log-text", `${settings.logSize}px`);
+    document.documentElement.classList.toggle("no-motion", !settings.motion);
     refit();
+    if (settings.fold !== appliedFold) onFold((appliedFold = settings.fold));
   }
 
   function checkFont() {
@@ -170,6 +230,22 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
     const missing = name !== "" && !fontInstalled(name);
     fFontHint.textContent = missing ? `「${name}」はこの PC に見つかりません。代わりに Cascadia Code などで表示しています。` : "";
     fFontHint.hidden = !missing;
+  }
+
+  function applySession() {
+    invoke("set_close_to_tray", { on: session.closeToTray }).catch(showError);
+  }
+
+  // セッションの設定は試しながら変えるものではないので、OK を押したときに画面から読む
+  function readSession(): SessionPrefs {
+    return {
+      args: Object.fromEntries(ARG_AGENTS.map((a) => [a, fArgs[a].value.trim()])),
+      restore: fRestore.value as RestoreMode,
+      openAs: fOpenAs.value as OpenAs,
+      worktreeDir: fWtDir.value.trim(),
+      worktreeName: fWtName.value.trim(),
+      closeToTray: fClose.value === "tray",
+    };
   }
 
   function applyHistory() {
@@ -181,7 +257,10 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
     save("appearance", settings);
     save("notify", notify);
     save("history", history);
+    session = readSession();
+    save("sessionPrefs", session);
     applyHistory();
+    applySession();
     cached = palette();
     save("appearancePalette", cached);
   }
@@ -229,6 +308,15 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
     fSize.value = String(settings.fontSize);
     fCursor.value = settings.cursor;
     fBlink.checked = settings.blink;
+    fFold.value = settings.fold;
+    fLogSize.value = String(settings.logSize);
+    fMotion.checked = settings.motion;
+    for (const a of ARG_AGENTS) fArgs[a].value = session.args[a] ?? "";
+    fRestore.value = session.restore;
+    fOpenAs.value = session.openAs;
+    fClose.value = session.closeToTray ? "tray" : "quit";
+    fWtDir.value = session.worktreeDir;
+    fWtName.value = session.worktreeName;
     fNotifyWaiting.checked = notify.waiting;
     fNotifyDone.checked = notify.done;
     fScrollback.value = String(history.scrollback);
@@ -287,6 +375,13 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
   fSize.onchange = () => (fSize.value = String(settings.fontSize));
   fCursor.onchange = () => update({ cursor: fCursor.value as CursorStyle });
   fBlink.onchange = () => update({ blink: fBlink.checked });
+  fFold.onchange = () => update({ fold: fFold.value as FoldMode });
+  fLogSize.oninput = () => {
+    const n = Number(fLogSize.value);
+    if (fLogSize.value && Number.isFinite(n)) update({ logSize: clampInt(n, LOG_SIZE_MIN, LOG_SIZE_MAX) });
+  };
+  fLogSize.onchange = () => (fLogSize.value = String(settings.logSize));
+  fMotion.onchange = () => update({ motion: fMotion.checked });
   fNotifyWaiting.onchange = () => (notify = { ...notify, waiting: fNotifyWaiting.checked });
   fNotifyDone.onchange = () => (notify = { ...notify, done: fNotifyDone.checked });
   // 打っている途中の値（「5」など）で丸めないよう、確定したときに範囲へ収める
@@ -301,7 +396,7 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
     };
   }
 
-  const tabs = [$("look-tab-view"), $("look-tab-more")];
+  const tabs = [$("look-tab-view"), $("look-tab-more"), $("look-tab-session")];
   function showTab(i: number) {
     tabs.forEach((t, j) => {
       t.setAttribute("aria-selected", String(i === j));
@@ -324,6 +419,7 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
     update({ ...DEFAULT });
     notify = { ...NOTIFY_DEFAULT };
     history = { ...HISTORY_DEFAULT };
+    session = { ...SESSION_DEFAULT, args: {} };
     fill();
   };
   $("look-cancel").onclick = cancel;
@@ -339,6 +435,7 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
 
   apply();
   applyHistory();
+  applySession();
   invoke<MinttyConfig>("mintty_config")
     .then((m) => {
       options = themeOptions(m);
@@ -353,6 +450,8 @@ export function createSettings(term: Terminal, refit: () => void, showError: (e:
   return {
     isOpen: () => dialog.open,
     notify: () => notify,
+    fold: () => settings.fold,
+    session: () => session,
     overviewLines: () => history.overview,
     open() {
       if (dialog.open) return;

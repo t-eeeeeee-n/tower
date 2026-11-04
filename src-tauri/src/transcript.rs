@@ -50,6 +50,9 @@ pub struct Entry {
     /// ファイルを変えたツールの結果の、変えたファイルと増えた行・減った行
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change: Option<Change>,
+    /// 予定のツール（TodoWrite・TaskCreate・TaskUpdate）の入力。会話の表示が予定の一覧を組み立てる
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub todo: Option<Value>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -68,6 +71,12 @@ pub struct Chunk {
     /// 呼び出し側が持っている表示を捨てて、entries だけにする
     pub reset: bool,
     pub entries: Vec<Entry>,
+    /// reset のとき、読みはじめた位置（行の頭）。前の会話を読み足すときは、ここより前から読み直す
+    pub start: u64,
+    /// reset のとき、表示しきれなかった前の会話があるか（ファイルの途中から読んだか、limit で古いものを捨てたか）
+    pub more: bool,
+    /// 読んだところまでの最後の行の uuid。次に続きを読むときに渡すと、巻き戻し（枝分かれ）に気づける
+    pub tip: Option<String>,
 }
 
 pub fn path_from_hook(body: &str) -> Option<PathBuf> {
@@ -306,28 +315,29 @@ pub fn shell_output(main: &Path, task: &str) -> Result<ShellOutput, String> {
 /// `known` は呼び出し側が読んでいたファイルで、今のファイルと違えば最初から（長ければ末尾から）読み直す。
 /// `limit` を渡すと、新しい方からその数だけ返す（呼び出し側が表示しきれない分を送らないため）。
 /// `sidechain` はサブエージェントの記録を読むとき。サブエージェントの行には isSidechain が付いていて、
-/// 本体の記録に混ざっている古い版のものは読み飛ばす
-pub fn read(current: Option<PathBuf>, known: Option<String>, offset: u64, limit: Option<usize>, sidechain: bool) -> Result<Chunk, String> {
+/// 本体の記録に混ざっている古い版のものは読み飛ばす。
+/// `from` を渡すと、その位置（の次の行の頭）から読み直す（前の会話を読み足すとき）。
+/// `tip` は前回の Chunk の tip。続きに、それにつながらない発言があれば、巻き戻されたとみなして読み直す
+pub fn read(current: Option<PathBuf>, known: Option<String>, offset: u64, limit: Option<usize>, sidechain: bool, from: Option<u64>, tip: Option<String>) -> Result<Chunk, String> {
     let Some(path) = current else {
-        return Ok(Chunk { path: None, offset: 0, reset: true, entries: Vec::new() });
+        return Ok(Chunk { path: None, offset: 0, reset: true, entries: Vec::new(), start: 0, more: false, tip: None });
     };
     let path_str = path.to_string_lossy().into_owned();
     let mut file = match std::fs::File::open(&path) {
         Ok(f) => f,
         // 起動直後は、最初の発言まで記録ファイルが作られない
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Chunk { path: Some(path_str), offset: 0, reset: true, entries: Vec::new() });
+            return Ok(Chunk { path: Some(path_str), offset: 0, reset: true, entries: Vec::new(), start: 0, more: false, tip: None });
         }
         Err(e) => return Err(format!("会話の記録を開けませんでした: {e}")),
     };
     let len = file.metadata().map_err(|e| e.to_string())?.len();
-    let reset = known.as_deref() != Some(path_str.as_str()) || offset > len;
-    let (start, skip_partial) = if !reset {
-        (offset, false)
-    } else if len > INITIAL_TAIL {
-        (len - INITIAL_TAIL, true)
-    } else {
-        (0, false)
+    let reset = from.is_some() || known.as_deref() != Some(path_str.as_str()) || offset > len;
+    let (start, skip_partial) = match from {
+        Some(f) => (f.min(len), f.min(len) > 0),
+        None if !reset => (offset, false),
+        None if len > INITIAL_TAIL => (len - INITIAL_TAIL, true),
+        None => (0, false),
     };
     file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
@@ -336,16 +346,85 @@ pub fn read(current: Option<PathBuf>, known: Option<String>, offset: u64, limit:
     // 書きかけの最後の行は次に回す
     let end = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     let begin = if skip_partial { buf[..end].iter().position(|&b| b == b'\n').map_or(end, |i| i + 1) } else { 0 };
-    let mut entries: Vec<Entry> = buf[begin..end]
+    let mut lines: Vec<Value> = buf[begin..end]
         .split(|&b| b == b'\n')
         .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
         .filter(|v| sidechain || !v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false))
-        .flat_map(|v| entries_of(&v))
         .collect();
-    if let Some(limit) = limit {
-        entries.drain(..entries.len().saturating_sub(limit));
+    if !reset && branched(&lines, tip.as_deref()) {
+        return read(Some(path), None, 0, limit, sidechain, None, None);
     }
-    Ok(Chunk { path: Some(path_str), offset: start + end as u64, reset, entries })
+    if reset {
+        lines = current_branch(lines);
+    }
+    let new_tip = lines.iter().rev().find_map(|v| uuid(v)).map(String::from).or(tip);
+    let mut entries: Vec<Entry> = lines.iter().flat_map(entries_of).collect();
+    let dropped = limit.map_or(0, |limit| entries.len().saturating_sub(limit));
+    entries.drain(..dropped);
+    let head = start + begin as u64;
+    Ok(Chunk { path: Some(path_str), offset: start + end as u64, reset, entries, start: head, more: head > 0 || dropped > 0, tip: new_tip })
+}
+
+fn uuid(v: &Value) -> Option<&str> {
+    v.get("uuid").and_then(Value::as_str)
+}
+
+/// 親の行。要約（compact）の区切りは親を持たないので、元の親（logicalParentUuid）をたどる
+fn parent(v: &Value) -> Option<&str> {
+    v.get("parentUuid").and_then(Value::as_str).or_else(|| v.get("logicalParentUuid").and_then(Value::as_str))
+}
+
+/// 人が書いた発言（ツールの結果やメタ情報ではない）
+fn is_prompt(v: &Value) -> bool {
+    v.get("type").and_then(Value::as_str) == Some("user")
+        && v.pointer("/message/content").is_some_and(Value::is_string)
+        && !v.get("isMeta").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// 続きの行に、それまでの最後の行（tip）につながらない発言があるか。
+/// 巻き戻すと、記録の行は消えずに残ったまま、次の発言が戻った先の行を親にして書き足される（Claude Code）。
+/// ツールの結果は呼び出しの行を親にするので、すぐ前の行が親とは限らない。発言だけで確かめる
+fn branched(lines: &[Value], tip: Option<&str>) -> bool {
+    let mut last = tip.map(String::from);
+    for v in lines {
+        let Some(id) = uuid(v) else { continue };
+        if is_prompt(v) && last.is_some() && parent(v) != last.as_deref() {
+            return true;
+        }
+        last = Some(id.to_string());
+    }
+    false
+}
+
+/// 巻き戻しで捨てられた枝を除き、今の会話の行だけを残す。最後の行から親をたどった行と、
+/// そこから発言以外の行だけでつながる行（並列に呼んだツールの結果など、たどった道から外れる行）を残す。
+/// 捨てられた枝は発言から始まるので、ここで外れる。uuid の無い行（Codex など）はそのまま残す
+fn current_branch(lines: Vec<Value>) -> Vec<Value> {
+    let by_id: std::collections::HashMap<&str, &Value> = lines.iter().filter_map(|v| Some((uuid(v)?, v))).collect();
+    let mut on = std::collections::HashSet::new();
+    let mut at = lines.iter().rev().find_map(|v| uuid(v));
+    while let Some(id) = at {
+        if !on.insert(id.to_string()) {
+            break;
+        }
+        at = by_id.get(id).and_then(|v| parent(v));
+    }
+    if on.is_empty() {
+        return lines;
+    }
+    // 記録は古い順なので、親は子より前に出てくる。前から 1 回なめれば、つながる行をすべて拾える
+    let mut keep = Vec::with_capacity(lines.len());
+    for v in lines {
+        let Some(id) = uuid(&v).map(String::from) else {
+            keep.push(v);
+            continue;
+        };
+        if on.contains(&id) || (!is_prompt(&v) && parent(&v).is_some_and(|p| on.contains(p))) {
+            on.insert(id);
+            keep.push(v);
+        }
+    }
+    keep
 }
 
 fn entries_of(v: &Value) -> Vec<Entry> {
@@ -460,7 +539,7 @@ fn codex_entries(p: &Value) -> Vec<Entry> {
                 Ok(v @ Value::Object(_)) => tool_summary(&v),
                 _ => truncate(raw.trim(), MAX_TOOL_INPUT),
             };
-            vec![Entry { kind: Kind::Tool, text, tool: Some(name), id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None }]
+            vec![Entry { kind: Kind::Tool, text, tool: Some(name), id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None }]
         }
         Some("function_call_output" | "custom_tool_call_output") => {
             let text = match p.get("output") {
@@ -472,14 +551,14 @@ fn codex_entries(p: &Value) -> Vec<Entry> {
                 Some(v) => v.get("content").and_then(Value::as_str).map(String::from).unwrap_or_else(|| v.to_string()),
                 None => String::new(),
             };
-            vec![Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None }]
+            vec![Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None }]
         }
         _ => Vec::new(),
     }
 }
 
 fn entry(kind: Kind, text: String) -> Entry {
-    Entry { kind, text, tool: None, id: None, error: false, images: Vec::new(), at: None, outcome: None, change: None }
+    Entry { kind, text, tool: None, id: None, error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None }
 }
 
 /// 人が打った発言。スラッシュコマンドは名前だけにし、Claude Code が差し込むタグ付きの文は出さない
@@ -547,7 +626,7 @@ fn user_block(b: &Value) -> Option<Entry> {
             };
             let error = b.get("is_error").and_then(Value::as_bool).unwrap_or(false);
             let id = b.get("tool_use_id").and_then(Value::as_str).map(String::from);
-            Some(Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id, error, images, at: None, outcome: None, change: None })
+            Some(Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id, error, images, at: None, outcome: None, change: None, todo: None })
         }
         _ => None,
     }
@@ -568,6 +647,9 @@ fn merge_user_images(entries: Vec<Entry>) -> Vec<Entry> {
     out
 }
 
+/// 予定を書くツール。古い版は TodoWrite で一覧ごと、今の版は TaskCreate / TaskUpdate で 1 件ずつ書く
+const TODO_TOOLS: &[&str] = &["TodoWrite", "TaskCreate", "TaskUpdate"];
+
 fn assistant_block(b: &Value) -> Option<Entry> {
     match b.get("type")?.as_str()? {
         "text" => {
@@ -578,7 +660,8 @@ fn assistant_block(b: &Value) -> Option<Entry> {
             let name = b.get("name")?.as_str()?.to_string();
             let text = tool_summary(b.get("input").unwrap_or(&Value::Null));
             let id = b.get("id").and_then(Value::as_str).map(String::from);
-            Some(Entry { kind: Kind::Tool, text, tool: Some(name), id, error: false, images: Vec::new(), at: None, outcome: None, change: None })
+            let todo = TODO_TOOLS.contains(&name.as_str()).then(|| b.get("input").cloned()).flatten();
+            Some(Entry { kind: Kind::Tool, text, tool: Some(name), id, error: false, images: Vec::new(), at: None, outcome: None, change: None, todo })
         }
         _ => None,
     }
@@ -586,6 +669,10 @@ fn assistant_block(b: &Value) -> Option<Entry> {
 
 /// ツールの入力のうち、何をしようとしているかが一番わかる 1 項目
 fn tool_summary(input: &Value) -> String {
+    // 質問（AskUserQuestion）は、入力の JSON ではなく最初の問いの文を出す
+    if let Some(q) = input.pointer("/questions/0/question").and_then(Value::as_str) {
+        return truncate(q.trim(), MAX_TOOL_INPUT);
+    }
     const KEYS: &[&str] = &["command", "cmd", "file_path", "path", "pattern", "url", "query", "description", "prompt", "skill"];
     let text = KEYS
         .iter()
@@ -696,12 +783,12 @@ mod tests {
         std::fs::write(sub.join("agent-bad id.jsonl"), "").unwrap();
 
         let texts = |c: Chunk| c.entries.into_iter().map(|e| e.text).collect::<Vec<_>>();
-        assert_eq!(texts(read(Some(main.clone()), None, 0, None, false).unwrap()), ["本体"]);
+        assert_eq!(texts(read(Some(main.clone()), None, 0, None, false, None, None).unwrap()), ["本体"]);
         let list = subagents(&main);
         assert_eq!(list.len(), 1);
         assert_eq!((list[0].id.as_str(), list[0].description.as_str(), list[0].tool_use_id.as_deref()), ("a1", "調査", Some("toolu_1")));
         let path = subagent_path(&main, "a1").unwrap();
-        assert_eq!(texts(read(Some(path), None, 0, None, true).unwrap()), ["調べて"]);
+        assert_eq!(texts(read(Some(path), None, 0, None, true, None, None).unwrap()), ["調べて"]);
         assert!(subagent_path(&main, "../s").is_err());
         assert!(subagent_path(&main, "").is_err());
         std::fs::remove_dir_all(&dir).ok();
@@ -762,18 +849,76 @@ mod tests {
         let path = dir.join("s.jsonl");
         let line = |t: &str| format!("{}\n", json!({"type":"user","message":{"content":t}}));
         std::fs::write(&path, format!("{}{}", line("一"), r#"{"type":"user","mess"#)).unwrap();
-        let first = read(Some(path.clone()), None, 0, None, false).unwrap();
+        let first = read(Some(path.clone()), None, 0, None, false, None, None).unwrap();
         assert!(first.reset);
         assert_eq!(first.entries.len(), 1);
 
         std::fs::write(&path, format!("{}{}", line("一"), line("二"))).unwrap();
-        let next = read(Some(path.clone()), first.path.clone(), first.offset, None, false).unwrap();
+        let next = read(Some(path.clone()), first.path.clone(), first.offset, None, false, None, None).unwrap();
         assert!(!next.reset);
         assert_eq!(next.entries.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), vec!["二"]);
 
-        let other = read(Some(path.clone()), Some("other.jsonl".into()), next.offset, Some(1), false).unwrap();
+        let other = read(Some(path.clone()), Some("other.jsonl".into()), next.offset, Some(1), false, None, None).unwrap();
         assert!(other.reset);
         assert_eq!(other.entries.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), vec!["二"]);
+        // limit で古いものを捨てたら、前の会話があることを知らせる
+        assert!(other.more && other.start == 0);
+        assert!(!first.more);
+
+        // 前の会話を読み足すときは、渡した位置の次の行の頭から読み直す
+        std::fs::write(&path, format!("{}{}{}", line("一"), line("二"), line("三"))).unwrap();
+        let from_mid = read(Some(path.clone()), first.path.clone(), next.offset, None, false, Some(3), None).unwrap();
+        assert!(from_mid.reset && from_mid.more);
+        assert_eq!(from_mid.start, line("一").len() as u64);
+        assert_eq!(from_mid.entries.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), vec!["二", "三"]);
+        let all = read(Some(path.clone()), first.path.clone(), next.offset, None, false, Some(0), None).unwrap();
+        assert!(!all.more);
+        assert_eq!(all.entries.len(), 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn todo_tools_keep_their_input() {
+        let v = json!({"type":"assistant","message":{"content":[
+            {"type":"tool_use","id":"t1","name":"TaskCreate","input":{"subject":"テストを書く","description":"…"}},
+            {"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"a.ts"}}
+        ]}});
+        let e = entries_of(&v);
+        assert_eq!(e[0].todo, Some(json!({"subject":"テストを書く","description":"…"})));
+        assert_eq!(e[1].todo, None);
+    }
+
+    #[test]
+    fn follows_the_current_branch_after_rewind() {
+        let dir = std::env::temp_dir().join(format!("tower-branch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let user = |id: &str, parent: Option<&str>, t: &str| json!({"type":"user","uuid":id,"parentUuid":parent,"message":{"content":t}});
+        let say = |id: &str, parent: &str, t: &str| json!({"type":"assistant","uuid":id,"parentUuid":parent,"message":{"content":[{"type":"text","text":t}]}});
+        let call = |id: &str, parent: &str, tool: &str| json!({"type":"assistant","uuid":id,"parentUuid":parent,"message":{"content":[{"type":"tool_use","id":tool,"name":"Read","input":{"file_path":tool}}]}});
+        let result = |id: &str, parent: &str, tool: &str| json!({"type":"user","uuid":id,"parentUuid":parent,"message":{"content":[{"type":"tool_result","tool_use_id":tool,"content":"ok"}]}});
+        let lines = |vs: &[Value]| vs.iter().map(|v| format!("{v}\n")).collect::<String>();
+        // 並列に呼んだツールの結果（r1 は c1 を親にする）も残す
+        let first = [user("u1", None, "一つ目"), call("c1", "u1", "a"), call("c2", "c1", "b"), result("r1", "c1", "a"), result("r2", "c2", "b"), say("a1", "r2", "はい1"),
+            user("u2", Some("a1"), "二つ目"), say("a2", "u2", "はい2")];
+        std::fs::write(&path, lines(&first)).unwrap();
+        let texts = |c: &Chunk| c.entries.iter().filter(|e| matches!(e.kind, Kind::User | Kind::Assistant)).map(|e| e.text.clone()).collect::<Vec<_>>();
+        let a = read(Some(path.clone()), None, 0, None, false, None, None).unwrap();
+        assert_eq!(texts(&a), ["一つ目", "はい1", "二つ目", "はい2"]);
+        assert_eq!(a.entries.iter().filter(|e| e.kind == Kind::Result).count(), 2);
+        assert_eq!(a.tip.as_deref(), Some("a2"));
+
+        // 「二つ目」を巻き戻して、「はい1」の次に書き直した
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(lines(&[user("u3", Some("a1"), "二つ目（直した）"), say("a3", "u3", "はい3")]).as_bytes()).unwrap();
+        let b = read(Some(path.clone()), a.path.clone(), a.offset, None, false, None, a.tip.clone()).unwrap();
+        assert!(b.reset);
+        assert_eq!(texts(&b), ["一つ目", "はい1", "二つ目（直した）", "はい3"]);
+
+        // ふつうに続けたときは読み直さない
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(lines(&[user("u4", Some("a3"), "三つ目")]).as_bytes()).unwrap();
+        let c = read(Some(path.clone()), b.path.clone(), b.offset, None, false, None, b.tip.clone()).unwrap();
+        assert!(!c.reset);
+        assert_eq!(texts(&c), ["三つ目"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

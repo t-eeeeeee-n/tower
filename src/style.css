@@ -165,6 +165,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 @keyframes ws-takeoff { 0% { transform: translate(0, 0); } 45% { transform: translate(120px, 0); } 100% { transform: translate(min(60vw, 720px), -140px); opacity: 0; } }
 @keyframes ws-return { from { opacity: 0; transform: translateX(-16px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .mascot .m-light, .mascot .m-eye-top, .mascot.hop, .ws-plane, .fx-plane { animation: none !important; } }
+.no-motion .mascot .m-light, .no-motion .mascot .m-eye-top, .no-motion .mascot.hop, .no-motion .ws-plane, .no-motion .fx-plane { animation: none !important; }
 .icon-btn {
   width: 28px; height: 28px;
   display: grid; place-items: center;
@@ -495,26 +496,72 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .log-body > * { flex-shrink: 0; }
 .log-body > :first-child { margin-top: auto; }
 #log-btn[hidden] { display: none; }
-.log-compose { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px var(--log-gutter) 12px; border-top: 1px solid var(--line); }
-.log-compose textarea { flex: 1; min-width: 0; resize: none; max-height: 200px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; line-height: 1.5; }
+.log-compose { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px var(--log-gutter) 12px; border-top: 1px solid var(--line); position: relative; }
+/* 予定（ToDo）。まだ終わっていない予定があるとき、入力欄の上に出す */
+.lg-todos { flex: none; max-height: 132px; overflow: auto; padding: 6px var(--log-gutter); border-top: 1px solid var(--line); font-size: 12.5px; }
+.lg-todos[hidden] { display: none; }
+.lg-todo-head { color: var(--muted); font-size: 11.5px; font-weight: 600; margin-bottom: 2px; }
+.lg-todo { padding: 1px 0; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lg-todo[data-status="completed"] { color: var(--faint); text-decoration: line-through; }
+.lg-todo[data-status="in_progress"] { color: var(--st-running); font-weight: 600; }
+.c-conv .lg-todos { max-height: 72px; padding: 4px 8px; font-size: 11.5px; }
+/* 入力待ちの確認や選択肢。押すと選んだ番号をエージェントに送る */
+.lg-prompt { flex: none; padding: 10px var(--log-gutter); border-top: 1px solid var(--st-waiting); background: color-mix(in srgb, var(--st-waiting) 8%, var(--panel)); }
+.lg-prompt[hidden] { display: none; }
+.lg-prompt-q { margin-bottom: 8px; white-space: pre-wrap; font-size: 13px; color: var(--text); }
+/* 選択肢は上から順に 1 列に並べ、取り消しのボタンだけ最後の行の右に置く */
+.lg-prompt-opts { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+.lg-prompt-opt { padding: 5px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--raise); color: var(--text); font-size: 12.5px; text-align: left; }
+.lg-prompt-opt:hover { border-color: var(--st-waiting); background: var(--raise-2); }
+.lg-prompt-opt.picked { border-color: var(--st-waiting); background: var(--raise-2); box-shadow: inset 3px 0 var(--st-waiting); }
+.lg-rewind .lg-prompt-opt.picked, .lg-rewind .lg-prompt-opt:hover { border-color: var(--st-running); box-shadow: inset 3px 0 var(--st-running); }
+.lg-rewind { border-top-color: var(--st-running); background: color-mix(in srgb, var(--st-running) 7%, var(--panel)); }
+.lg-rewind .lg-prompt-opts { max-height: 180px; overflow: auto; }
+.lg-rewind-msg { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-prompt-term { align-self: flex-end; padding: 5px 10px; border: 0; background: transparent; color: var(--muted); font-size: 12px; }
+.lg-prompt-term:hover { color: var(--text); text-decoration: underline; }
+/* 「/」で始めたときのコマンドの候補。入力欄の上に重ねて出す */
+.lg-cmds { position: absolute; left: var(--log-gutter); right: var(--log-gutter); bottom: calc(100% + 4px); z-index: 10; max-height: 280px; overflow: auto; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); box-shadow: 0 6px 18px rgb(0 0 0 / 0.35); }
+.lg-cmds[hidden] { display: none; }
+.lg-cmd { display: flex; align-items: baseline; gap: 10px; padding: 5px 8px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+.lg-cmd[aria-selected="true"], .lg-cmd:hover { background: var(--raise-2); }
+.lg-cmd-name { flex: none; color: var(--text); font: 12.5px var(--mono); }
+.lg-cmd-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 12px; }
+.lg-cmd-tag { flex: none; color: var(--faint); font-size: 11px; }
+.c-compose .lg-cmds { left: 6px; right: 6px; max-height: 200px; }
+.log-compose textarea { flex: 1; min-width: 0; resize: none; max-height: 200px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; line-height: 1.5; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 .log-compose textarea:focus { outline: none; border-color: var(--st-running); }
-.log-compose textarea.ime { border-color: var(--st-waiting); box-shadow: 0 0 0 1px var(--st-waiting); background: color-mix(in srgb, var(--st-waiting) 8%, var(--panel)); }
 .log-compose button:disabled { opacity: 0.45; }
 .log-footer { flex: none; margin: 0; padding: 0 var(--log-gutter) 8px; font: 11.5px/1.45 var(--mono); color: var(--term-dim); white-space: pre-wrap; overflow-wrap: anywhere; }
 .log-footer[hidden] { display: none; }
 /* 読むところ（発言・返事）は大きめの文字と吹き出し、ツールの操作は時系列の線の上に 1 行ずつ並べる */
 .lg-user { display: flex; justify-content: flex-end; margin: 14px 12px 8px 48px; }
-.lg-user-text { padding: 9px 14px; border-radius: 16px; background: var(--raise-2); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.7; }
+.lg-user-text { padding: 9px 14px; border-radius: 16px; background: var(--raise-2); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--log-text, 14px); line-height: 1.7; }
 .lg-command { margin: 8px 12px; color: var(--muted); font: 12px var(--mono); }
-.lg-assistant.md-preview { padding: 4px 14px; max-width: none; font-size: 14px; line-height: 1.8; }
+.lg-assistant.md-preview { padding: 4px 14px; max-width: none; font-size: var(--log-text, 14px); line-height: 1.8; }
 .lg-who { display: flex; align-items: center; gap: 6px; margin: 14px 14px 0; color: var(--agent, var(--muted)); font-size: 11.5px; font-weight: 600; }
 .lg-who::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-.log-activity { padding: 5px var(--log-gutter); }
+/* 一覧のカードの .c-activity（後ろで左右 10px にしている）より強くして、会話の表示の左右の余白にそろえる */
+.c-activity.log-activity { padding: 5px var(--log-gutter); }
 .lg-turn { flex: none; display: flex; flex-wrap: wrap; gap: 6px; padding: 6px var(--log-gutter); border-bottom: 1px solid var(--line); font: 11px var(--mono); color: var(--muted); }
 .lg-turn[hidden] { display: none; }
+/* 前の会話を読み足すボタン。会話の上の端に、細い帯として出す */
+.lg-older { flex: none; padding: 3px 0; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--muted); font-size: 11.5px; }
+.lg-older:hover { background: var(--raise); color: var(--text); }
+.lg-older[hidden] { display: none; }
 .lg-chip { padding: 1px 8px; border-radius: 10px; background: var(--raise); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .lg-chip-file { color: var(--st-idle); }
-.lg-chip-live { color: var(--st-running); background: color-mix(in srgb, var(--st-running) 18%, transparent); }
+/* 終わった依頼の、ひと続きのツールの列を畳んだ 1 行。押すと開く */
+.lg-work { margin: 2px 12px 2px 14px; }
+.lg-work > summary { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 4px; color: var(--muted); font-size: 12px; cursor: pointer; list-style: none; }
+.lg-work > summary::-webkit-details-marker { display: none; }
+.lg-work > summary::before { content: ""; width: 0; height: 0; border: 4px solid transparent; border-left: 5px solid currentColor; border-right: 0; }
+.lg-work[open] > summary::before { transform: rotate(90deg); }
+.lg-work > summary:hover { background: var(--raise); color: var(--text); }
+/* 最後の返答。途中の返答と見分けられるよう、左にエージェントの色の線を付ける */
+.lg-assistant.lg-final { margin-left: 14px; padding-left: 12px; border-left: 2px solid color-mix(in srgb, var(--agent, var(--st-running)) 75%, transparent); }
+.c-log .lg-assistant.lg-final { margin-left: 6px; padding-left: 8px; }
+.c-log .lg-work { margin: 4px 6px 2px 8px; }
 .lg-steps { list-style: none; margin: 4px 12px 4px 20px; padding: 0 0 0 12px; border-left: 2px solid var(--line); display: grid; gap: 1px; }
 .lg-step { position: relative; min-width: 0; font: 12px/1.5 var(--mono); }
 .lg-step::before { content: ""; position: absolute; left: -17px; top: 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); box-shadow: 0 0 0 3px var(--ink); }
@@ -820,6 +867,14 @@ input:not([type]):focus, input[type="number"]:focus { border-color: var(--st-run
 .look-panels > [role="tabpanel"] { grid-area: 1 / 1; }
 .look-panels > [role="tabpanel"][hidden] { display: block; visibility: hidden; }
 .look-row.look-history { grid-template-columns: 1fr 1fr; }
+.look-row.look-conv { grid-template-columns: 1fr 120px; margin-top: 4px; }
+.look-row.look-two { grid-template-columns: 1fr 1fr; margin-bottom: 12px; }
+.look-motion { margin: 10px 0 0; }
+.look-args { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+.look-args input { font-family: var(--mono); }
+.look-args + .hint { display: block; margin: 6px 0 16px; }
+.look-close { margin-bottom: 16px; }
+#look-wt-dir, #look-wt-name { font-family: var(--mono); }
 .look-history + .hint { display: block; margin: -4px 0 16px; }
 .theme-list {
   display: grid; grid-template-columns: 1fr 1fr; gap: 6px;

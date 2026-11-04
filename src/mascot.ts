@@ -62,7 +62,8 @@ export function createMascot(px: number, state: MascotState = "ok") {
   return svg;
 }
 
-const still = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+// OS の「アニメーションを減らす」か、設定で動きを止めているとき（settings.ts が no-motion を付ける）
+const still = () => matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.classList.contains("no-motion");
 
 // style.css の .mascot.hop / .happy / .signal の長さ
 const MOVE_MS = { hop: 500, happy: 900, signal: 700 };
@@ -164,7 +165,7 @@ export function createWelcomeScene(root: HTMLElement) {
 
   /** 次の飛行機を 1 機離陸させる。最後の 1 機なら、飛び去ったあとに 3 機を元の場所に戻す */
   function takeoff() {
-    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (still()) return;
     const p = queue.find((x) => !x.classList.contains("fly") && !x.classList.contains("land"));
     if (!p) return;
     p.classList.add("fly");

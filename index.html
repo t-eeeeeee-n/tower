@@ -141,7 +141,7 @@
         <label id="f-branch-field" class="field" hidden>
           <span>ブランチ名</span>
           <input id="f-branch" autocomplete="off" placeholder="feature/login" />
-          <small class="hint">リポジトリの隣に「リポジトリ名-ブランチ名」のフォルダを作ります。ブランチが無ければ今の HEAD から作ります。</small>
+          <small class="hint">設定の「セッション」で決めた場所に作ります（初めはリポジトリの隣の「リポジトリ名-ブランチ名」）。ブランチが無ければ今の HEAD から作ります。</small>
         </label>
         <label class="field">
           <span>表示名</span>
@@ -167,6 +167,7 @@
         <div class="look-tabs" role="tablist">
           <button type="button" id="look-tab-view" role="tab" aria-selected="true" aria-controls="look-panel-view">表示</button>
           <button type="button" id="look-tab-more" role="tab" aria-selected="false" aria-controls="look-panel-more" tabindex="-1">通知と履歴</button>
+          <button type="button" id="look-tab-session" role="tab" aria-selected="false" aria-controls="look-panel-session" tabindex="-1">セッション</button>
         </div>
         <div class="look-panels">
         <div id="look-panel-view" role="tabpanel" aria-labelledby="look-tab-view">
@@ -201,6 +202,24 @@
             <span>点滅させる</span>
           </label>
         </div>
+        <div class="look-row look-conv">
+          <label class="field">
+            <span>会話の表示で、終わった依頼を</span>
+            <select id="look-fold">
+              <option value="none">畳まない</option>
+              <option value="tools">ツールの列を畳む（途中の返答は残す）</option>
+              <option value="all">最後の返答以外を畳む</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>会話の文字の大きさ</span>
+            <input id="look-log-size" type="number" min="11" max="20" step="1" />
+          </label>
+        </div>
+        <label class="check look-motion">
+          <input id="look-motion" type="checkbox" />
+          <span>飛行機やキャラを動かす</span>
+        </label>
         </div>
         <div id="look-panel-more" role="tabpanel" aria-labelledby="look-tab-more" hidden>
         <h3 class="look-section">通知</h3>
@@ -225,6 +244,53 @@
           </label>
         </div>
         <small class="hint">ターミナルのスクロール履歴は、このあと開くセッションから変わります（開いているセッションは今のまま）。一覧でさかのぼれる行数は、スクロール履歴の行数までです。</small>
+        </div>
+        <div id="look-panel-session" role="tabpanel" aria-labelledby="look-tab-session" hidden>
+        <h3 class="look-section">起動するときに足す引数</h3>
+        <div class="look-args">
+          <label class="field"><span>Claude Code</span><input id="look-args-claude" autocomplete="off" spellcheck="false" placeholder="--model sonnet" /></label>
+          <label class="field"><span>Codex</span><input id="look-args-codex" autocomplete="off" spellcheck="false" placeholder="-m gpt-5" /></label>
+          <label class="field"><span>Copilot CLI</span><input id="look-args-copilot" autocomplete="off" spellcheck="false" /></label>
+          <label class="field"><span>Antigravity</span><input id="look-args-antigravity" autocomplete="off" spellcheck="false" /></label>
+        </div>
+        <small class="hint">このあと開くセッションから使います。書いたものはそのまま起動のコマンドに続けて渡します。</small>
+        <h3 class="look-section">開くとき・閉じるとき</h3>
+        <div class="look-row look-two">
+          <label class="field">
+            <span>Tower を起動したとき、前回のセッションを</span>
+            <select id="look-restore">
+              <option value="ask">再開するか、画面で選ぶ</option>
+              <option value="auto">自動で再開する</option>
+              <option value="never">再開しない</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Claude Code・Codex のセッションを開いたとき</span>
+            <select id="look-open-as">
+              <option value="last">最後に使った表示で開く</option>
+              <option value="log">会話の表示で開く</option>
+              <option value="term">ターミナルで開く</option>
+            </select>
+          </label>
+        </div>
+        <label class="field look-close">
+          <span>セッションが動いているときにウィンドウを閉じたら</span>
+          <select id="look-close">
+            <option value="tray">タスクトレイに隠れて動かし続ける</option>
+            <option value="quit">セッションを終了して閉じる（確認あり）</option>
+          </select>
+        </label>
+        <h3 class="look-section">worktree</h3>
+        <div class="look-row look-two">
+          <label class="field">
+            <span>作る場所（空ならリポジトリの隣）</span>
+            <input id="look-wt-dir" autocomplete="off" spellcheck="false" placeholder="C:\workspace\worktrees" />
+          </label>
+          <label class="field">
+            <span>フォルダ名（{repo} と {branch} が入る）</span>
+            <input id="look-wt-name" autocomplete="off" spellcheck="false" placeholder="{repo}-{branch}" />
+          </label>
+        </div>
         </div>
         </div>
         <div class="dialog-actions">

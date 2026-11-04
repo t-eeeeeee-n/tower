@@ -1,4 +1,5 @@
 pub mod agent;
+mod commands;
 mod files;
 mod git;
 mod trust;
@@ -12,6 +13,7 @@ mod transcript;
 mod tray;
 mod update;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -25,6 +27,8 @@ struct App {
     manager: Arc<Manager>,
     hooks_error: Mutex<Option<String>>,
     trust: trust::Trust,
+    /// 動いているセッションがあるときにウィンドウを閉じたら、トレイに隠れるか（false なら終了してよいか聞く）。設定で変わる
+    close_to_tray: AtomicBool,
 }
 
 #[derive(Serialize)]
@@ -63,8 +67,9 @@ fn create_session(
     cwd: String,
     agent: Agent,
     resume: bool,
+    args: Option<String>,
 ) -> Result<SessionInfo, String> {
-    state.manager.create(&app, name, cwd, agent, resume)
+    state.manager.create(&app, name, cwd, agent, resume, args.as_deref().unwrap_or(""))
 }
 
 fn session_root(state: &App, id: &str) -> Result<std::path::PathBuf, String> {
@@ -125,8 +130,10 @@ fn installed_agents() -> Vec<Agent> {
 }
 
 #[tauri::command(async)]
-fn create_worktree(state: State<'_, App>, cwd: String, branch: String) -> Result<String, String> {
-    let dir = git::create_worktree(&git::git_program(&state.manager.shell.program), &cwd, &branch)?;
+fn create_worktree(state: State<'_, App>, cwd: String, branch: String, base: Option<String>, name: Option<String>) -> Result<String, String> {
+    let filled = |v: &Option<String>| v.as_deref().filter(|s| !s.trim().is_empty()).map(String::from);
+    let place = git::WorktreePlace { base: filled(&base), name: filled(&name) };
+    let dir = git::create_worktree(&git::git_program(&state.manager.shell.program), &cwd, &branch, &place)?;
     // 信頼したフォルダから作った worktree は、同じリポジトリなので信頼済みにする
     if state.trust.contains(std::path::Path::new(&cwd)) {
         state.trust.add(std::path::Path::new(&dir))?;
@@ -217,13 +224,28 @@ fn read_transcript(
     offset: u64,
     limit: Option<usize>,
     agent: Option<String>,
+    from: Option<u64>,
+    tip: Option<String>,
 ) -> Result<transcript::Chunk, String> {
     let main = state.manager.transcript(&id)?;
     let target = match (&agent, main) {
         (Some(a), Some(m)) => Some(transcript::subagent_path(&m, a)?),
         (_, main) => main,
     };
-    transcript::read(target, path, offset, limit, agent.is_some())
+    transcript::read(target, path, offset, limit, agent.is_some(), from, tip)
+}
+
+#[tauri::command]
+fn set_close_to_tray(state: State<'_, App>, on: bool) {
+    state.close_to_tray.store(on, Ordering::Relaxed);
+}
+
+/// セッションのフォルダとユーザーの、Claude Code のカスタムコマンドとスキル
+#[tauri::command(async)]
+fn list_commands(state: State<'_, App>, id: String) -> Result<Vec<commands::Command>, String> {
+    let cwd = state.manager.get(&id)?.cwd.clone();
+    let home = std::env::var_os("USERPROFILE").map(std::path::PathBuf::from);
+    Ok(commands::list(std::path::Path::new(&cwd), home.as_deref()))
 }
 
 #[tauri::command(async)]
@@ -357,7 +379,7 @@ pub fn run() {
             }
             memory::start(app.handle().clone(), manager.clone());
             let trust = trust::Trust::load(dir.join("trusted-folders.json"));
-            app.manage(App { manager, hooks_error: Mutex::new(hooks_error), trust });
+            app.manage(App { manager, hooks_error: Mutex::new(hooks_error), trust, close_to_tray: AtomicBool::new(true) });
             app.manage(notify::Notifier::default());
             notify::init(app.handle());
             let state = app.state::<App>();
@@ -366,15 +388,22 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 動いているセッションがあるときは終了せずトレイに隠れる。無ければそのまま終了する
+            // 動いているセッションがあるときは、設定に従ってトレイに隠れるか、終了してよいか聞く。無ければそのまま終了する
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.state::<App>().manager.has_live() {
+                let state = window.state::<App>();
+                if state.manager.has_live() {
                     api.prevent_close();
-                    tray::hide_main(window.app_handle());
+                    if state.close_to_tray.load(Ordering::Relaxed) {
+                        tray::hide_main(window.app_handle());
+                    } else {
+                        tray::quit_app(window.app_handle(), true);
+                    }
                 }
             }
         })
         .invoke_handler(tauri::generate_handler![
+            list_commands,
+            set_close_to_tray,
             set_tray_waiting,
             save_pasted_image,
             session_heads,

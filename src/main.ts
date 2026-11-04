@@ -11,7 +11,8 @@ import "./style.css";
 import { createFilesPanel } from "./files";
 import { handleLinks, linkify, openLink, terminalLinks } from "./links";
 import { createWelcomeScene, planeEffect } from "./mascot";
-import { createTranscriptPanel, createTranscriptView, TRANSCRIPT_AGENTS, type TranscriptView } from "./transcript";
+import { createTranscriptPanel, createTranscriptView, TRANSCRIPT_AGENTS, type PromptChoice, type TranscriptView } from "./transcript";
+import type { SlashCommand } from "./slash";
 import { createTemplates } from "./templates";
 import { createSettings } from "./settings";
 import { createMarks, MARK_COLORS, type MarkColor } from "./marks";
@@ -125,8 +126,16 @@ const files = createFilesPanel({
 // 会話の入力欄の文字は貼り付けとして入れてから Enter を送る（貼り付けの中の改行では送信されない）。
 // 終わりの印（ESC[201~）が中に混ざると後ろが打ち込んだ文字になるので、ESC は取り除く
 async function sendPrompt(id: string | null, text: string) {
-  if (!id || sessions.get(id)?.status !== "idle") throw new Error("指示待ちのときだけ送れます");
-  const body = text.replace(/\x1b/g, "").replace(/\r?\n/g, "\r");
+  const status = id ? sessions.get(id)?.status : undefined;
+  if (!id || (status !== "idle" && status !== "running")) throw new Error("指示待ちか作業中のときだけ送れます");
+  let body = text.replace(/\x1b/g, "").replace(/\r?\n/g, "\r");
+  // 「!」で始めるとシェルのコマンドとして実行する。エージェントは打った「!」でシェルのモードに切り替わり、
+  // 貼り付けた「!」では切り替わらないので、「!」だけを打ってから残りを貼り付ける
+  if (body.startsWith("!") && sessions.get(id)?.agent === "claude") {
+    await invoke("write_session", { id, data: "!" });
+    await new Promise((r) => setTimeout(r, 120));
+    body = body.slice(1);
+  }
   await invoke("write_session", { id, data: `\x1b[200~${body}\x1b[201~` });
   // 貼り付けと同じ書き込みに Enter を続けると、貼り付けの一部として扱われることがある
   await new Promise((r) => setTimeout(r, 80));
@@ -141,15 +150,210 @@ const log = createTranscriptPanel({
   onError: (e) => showError(e),
   send: (text) => sendPrompt(attachedId, text),
   interrupt: () => interruptSession(attachedId),
-  // コマンドの候補はターミナルにしか出ないので、作業が始まるか Ctrl+Shift+L で戻すまでターミナルで打つ
-  onSlash: () => {
+  fold: () => settings.fold(),
+  listCommands: () => (attachedId ? invoke<SlashCommand[]>("list_commands", { id: attachedId }) : Promise.resolve([])),
+  // 選ぶ画面はターミナルにしか出ないので、作業が始まるか Ctrl+Shift+L で戻すまでターミナルの表示にする
+  openInTerminal: (command) => {
     if (!attachedId) return;
     termUntilRunning = true;
     applyLogView();
     term.focus();
-    invoke("write_session", { id: attachedId, data: "/" }).catch(showError);
+    typeCommand(attachedId, command);
   },
+  rewind: () => {
+    if (!attachedId) return;
+    termUntilRunning = true;
+    applyLogView();
+    term.focus();
+    rewindIn(attachedId);
+  },
+  findFiles: (query) => (attachedId ? invoke<string[]>("find_files", { id: attachedId, query }) : Promise.resolve([])),
+  sendKeys: (data) => attachedId && writeKeys(attachedId, data),
+  answer: (key) => {
+    if (!attachedId) return;
+    // 答えが画面に出るまでの間に、同じ選択肢を出し直さない
+    promptQuietUntil = Date.now() + PROMPT_QUIET_MS;
+    writeKeys(attachedId, key);
+  },
+  answerInTerminal: () => {
+    termUntilRunning = true;
+    log.showPrompt(null);
+    applyLogView();
+    term.focus();
+  },
+  rewindTo: async (steps, text) => {
+    const id = attachedId;
+    if (!id) return null;
+    const p = await rewindTo(id, steps, text);
+    if (!p && attachedId === id) {
+      // 狙いどおりに選べなかったので、開いている巻き戻しの画面の続きをターミナルでしてもらう
+      termUntilRunning = true;
+      applyLogView();
+      term.focus();
+      showError("巻き戻しの画面を読み取れなかったので、ターミナルで続けてください");
+    }
+    return p;
+  },
+  rewindAnswer: (key) => (attachedId ? rewindAnswer(attachedId, key) : Promise.resolve("")),
+  rewindCancel: () => attachedId && rewindCancel(attachedId),
 });
+
+function writeKeys(id: string, data: string) {
+  invoke("write_session", { id, data }).then(pokePeeks, showError);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const write = (id: string, data: string) => invoke("write_session", { id, data });
+async function screenText(id: string) {
+  const lines = await invoke<Span[][]>("session_tail", { id, lines: 45 });
+  return lines.map((l) => l.map((x) => x.t).join("").trimEnd());
+}
+const squash = (t: string) => t.replace(/\s+/g, "").replace(/…$/, "");
+
+// 巻き戻し（Claude Code の /rewind）を、画面を切り替えずに裏で進める。巻き戻しの画面は古い順の一覧で、最後の「(current)」が選ばれて開く。
+// ↑ で戻り先まで動かし、選ばれている行が狙った発言かを確かめてから Enter を押し、次の確認（どこまで戻すか）を読み取る。
+// 画面の形に頼るので、どこかで食い違えば null を返し、呼び出し側がターミナルで続きをしてもらう
+async function rewindTo(id: string, steps: number, text: string): Promise<PromptChoice | null> {
+  await write(id, "/rewind");
+  await sleep(150);
+  await write(id, "\r");
+  await sleep(900);
+  if (!(await screenText(id)).some((l) => l.trim() === "Rewind")) return null;
+  for (let i = 0; i < steps; i++) {
+    await write(id, "\x1b[A");
+    await sleep(40);
+  }
+  await sleep(350);
+  const lines = await screenText(id);
+  const from = lines.findIndex((l) => l.trim() === "Rewind");
+  const picked = lines.slice(from).find((l) => l.trim().startsWith("❯ "));
+  const shown = squash(picked?.trim().slice(2) ?? "");
+  const want = squash(text.split("\n")[0]);
+  // 画面では長い発言は途中で切れるので、頭が合えばよい
+  if (!shown || !(want.startsWith(shown) || shown.startsWith(want.slice(0, 20)))) return null;
+  await write(id, "\r");
+  await sleep(900);
+  return parsePrompt(await screenText(id));
+}
+
+// 巻き戻しの確認に答える。会話を戻すと、戻した発言がエージェントの入力欄に戻されるので、それを消して会話の入力欄に移す
+async function rewindAnswer(id: string, key: string) {
+  await write(id, key);
+  await sleep(1200);
+  // やめるほうを選ぶと一覧に戻ることがあるので、裏で開いたままにしない
+  if ((await screenText(id)).some((l) => l.trim() === "Rewind")) {
+    await write(id, "");
+    await sleep(400);
+  }
+  const lines = await screenText(id);
+  // 入力欄は、区切りの線に挟まれた「❯」の行
+  let at = -1;
+  lines.forEach((l, i) => {
+    if (/^❯/.test(l.trim()) && /^[─━]{3,}/.test(lines[i - 1]?.trim() ?? "")) at = i;
+  });
+  if (at < 0) return "";
+  const end = lines.findIndex((l, i) => i > at && /^[─━]{3,}/.test(l.trim()));
+  const back = lines
+    .slice(at, end < 0 ? at + 1 : end)
+    .map((l, i) => (i === 0 ? l.trim().replace(/^❯\s?/, "") : l.trim()))
+    .join("\n")
+    .trim();
+  if (!back) return "";
+  // 文が入っているときの Esc 2 回は、エージェントの入力欄を消す（空のときの Esc 2 回は巻き戻しになるので、確かめてから送る）
+  await write(id, "\x1b");
+  await sleep(150);
+  await write(id, "\x1b");
+  return back;
+}
+
+async function rewindCancel(id: string) {
+  // 確認の画面から一覧へ、一覧から閉じる
+  await write(id, "\x1b");
+  await sleep(250);
+  if ((await screenText(id)).some((l) => l.trim() === "Rewind")) await write(id, "\x1b");
+}
+
+// 入力待ちの画面から、確認や選択肢（「❯ 1. Yes」「  2. No」のような番号付きの行）を読み取る。
+// エージェントの画面の形に頼るので、読み取れなければ null（呼び出し側はターミナルに切り替えて答えてもらう）
+function parsePrompt(lines: string[]): PromptChoice | null {
+  const clean = lines.map((l) => l.replace(/[│┃╭╮╰╯]/g, " ").trimEnd());
+  const option = /^\s*(?:[❯›>]\s*)?(\d)[.)]\s+(.+?)\s*$/;
+  let last = -1;
+  for (let i = clean.length - 1; i >= 0 && last < 0; i--) if (option.test(clean[i])) last = i;
+  if (last < 0) return null;
+  const options: { key: string; label: string }[] = [];
+  let first = last;
+  for (let i = last; i >= 0; i--) {
+    const m = option.exec(clean[i]);
+    if (m) {
+      options.unshift({ key: m[1], label: m[2] });
+      first = i;
+    } else if (clean[i].trim() && !/^\s{4,}\S/.test(clean[i]) && !/^\s*[─━-]{3,}\s*$/.test(clean[i])) {
+      // 選択肢の説明（字下げした行）・区切りの線・空行は飛ばし、それ以外の行で選択肢の並びが終わる
+      break;
+    }
+  }
+  if (options.length < 2 || options.some((o, i) => o.key !== String(i + 1))) return null;
+  const question: string[] = [];
+  for (let i = first - 1; i >= 0 && question.length < 6; i--) {
+    const t = clean[i].trim();
+    if (/^[─━\-=_]{3,}$/.test(t)) break;
+    if (t) question.unshift(t);
+    else if (question.length) break;
+  }
+  return { question: question.join("\n"), options };
+}
+
+// 入力待ちの間、画面から確認や選択肢を読み取って会話の表示にボタンで出す。
+// 画面は hook の知らせより遅れて描かれることがあるので、少しの間読み直し、それでも読み取れなければターミナルに切り替える
+let promptTimer = 0;
+let promptQuietUntil = 0;
+const PROMPT_TRIES = 3;
+const PROMPT_QUIET_MS = 2000;
+function watchPrompt(id: string) {
+  clearInterval(promptTimer);
+  log.showPrompt(null);
+  let tries = 0;
+  const check = async () => {
+    if (attachedId !== id || sessions.get(id)?.status !== "waiting") {
+      clearInterval(promptTimer);
+      log.showPrompt(null);
+      return;
+    }
+    const lines = await invoke<Span[][]>("session_tail", { id, lines: 40 }).catch(() => [] as Span[][]);
+    if (attachedId !== id || sessions.get(id)?.status !== "waiting" || Date.now() < promptQuietUntil || termUntilRunning) return;
+    const p = parsePrompt(lines.map((l) => l.map((x) => x.t).join("")));
+    if (p) {
+      termUntilRunning = false;
+      log.showPrompt(p);
+    } else if (++tries >= PROMPT_TRIES && !termUntilRunning) {
+      termUntilRunning = true;
+      log.showPrompt(null);
+    }
+    applyLogView();
+  };
+  check();
+  promptTimer = window.setInterval(check, 1000);
+}
+
+// 前のメッセージに戻る画面を開く。Claude Code は /rewind で開く（Esc 2 回と同じ画面）。
+// ほかのエージェント（Codex は Esc 2 回で前のメッセージを直す）には Esc を 2 回送る。
+// 続けて書き込むと 1 回の Alt+Esc として読まれることがあるので、間を空ける
+function rewindIn(id: string) {
+  if (sessions.get(id)?.agent === "claude") return typeCommand(id, "/rewind");
+  invoke("write_session", { id, data: "\x1b" })
+    .then(() => new Promise((r) => setTimeout(r, 150)))
+    .then(() => invoke("write_session", { id, data: "\x1b" }))
+    .then(pokePeeks, showError);
+}
+
+// コマンドを打って実行する。名前を打つとエージェントが候補を出すので、少し待ってから Enter で選ぶ
+function typeCommand(id: string, command: string) {
+  invoke("write_session", { id, data: command })
+    .then(() => new Promise((r) => setTimeout(r, 120)))
+    .then(() => invoke("write_session", { id, data: "\r" }))
+    .then(pokePeeks, showError);
+}
 // 一覧のカードごとの会話の表示（Claude Code と Codex のセッションだけ）
 const cardViews = new Map<string, TranscriptView>();
 // 「/」を打って、コマンドを選ぶ間だけ画面の表示にしているカード
@@ -255,7 +459,10 @@ function fitTerm() {
   if (!$("work").hidden && !$("term-wrap").hidden) fit.fit();
 }
 
-const settings = createSettings(term, fitTerm, (e) => showError(e));
+const settings = createSettings(term, fitTerm, (e) => showError(e), () => {
+  log.refold();
+  for (const v of cardViews.values()) v.refold();
+});
 
 term.onData((data) => {
   if (attachedId) invoke("write_session", { id: attachedId, data }).catch(showError);
@@ -364,7 +571,12 @@ async function activate(id: string) {
   attachedId = id;
   files.setSession(id);
   log.setSession(id, sessions.get(id)!.agent);
-  termUntilRunning = sessions.get(id)!.status === "waiting";
+  termUntilRunning = false;
+  if (sessions.get(id)!.status === "waiting") watchPrompt(id);
+  else log.showPrompt(null);
+  // 設定で開き方を決めていれば、最後に使った表示ではなくそれで開く（このセッションの中で切り替えたものはそのまま）
+  const openAs = settings.session().openAs;
+  if (openAs !== "last") preferLog = openAs === "log";
   applyLogView();
   const token = ++attachToken;
   term.reset();
@@ -399,7 +611,7 @@ async function activate(id: string) {
 // ---------- セッション操作 ----------
 
 async function createSession(name: string, cwd: string, agent: Agent, resume = false) {
-  const info = await invoke<SessionInfo>("create_session", { name, cwd, agent, resume });
+  const info = await invoke<SessionInfo>("create_session", { name, cwd, agent, resume, args: settings.session().args[agent] ?? "" });
   sessions.set(info.id, info);
   order.push(info.id);
   refreshHeads();
@@ -885,6 +1097,45 @@ function fitCards() {
 }
 
 const RGB_FLAG = 1 << 24;
+const DIM_FLAG = 2;
+const CURSOR_FLAG = 32;
+
+// 薄く描かれた文字（DIM か、灰色）
+function faint(s: Span) {
+  if (s.f & DIM_FLAG || s.fg === 9) return true;
+  if (!(s.fg & RGB_FLAG)) return false;
+  const [r, g, b] = [(s.fg >> 16) & 255, (s.fg >> 8) & 255, s.fg & 255];
+  return Math.max(r, g, b) - Math.min(r, g, b) < 24 && Math.max(r, g, b) < 200;
+}
+
+// エージェントが入力欄に薄く出している次の指示の候補（Claude Code の返事のあと）。
+// 入力欄は区切りの線に挟まれた「❯」の行で、候補は打った文字と違って薄く描かれる。
+// 新しいセッションの「Try "…"」は例なので候補にしない
+function inputSuggestion(lines: Span[][]): string | null {
+  const text = (l: Span[]) => l.map((x) => x.t).join("");
+  const rule = (l?: Span[]) => !!l && /^[─━]{3,}$/.test(text(l).trim());
+  for (let i = lines.length - 2; i > 0; i--) {
+    if (!rule(lines[i - 1]) || !rule(lines[i + 1]) || !text(lines[i]).trim().startsWith("❯")) continue;
+    let body = "";
+    let typed = false;
+    let afterPrompt = false;
+    for (const s of lines[i]) {
+      let t = s.t;
+      if (!afterPrompt) {
+        const k = t.indexOf("❯");
+        if (k < 0) continue;
+        afterPrompt = true;
+        t = t.slice(k + 1);
+      }
+      // カーソルのある 1 文字は、薄い色ではなく反転で描かれる
+      if (t.trim() && !faint(s) && !(s.f & CURSOR_FLAG)) typed = true;
+      body += t;
+    }
+    const found = body.trim();
+    return typed || !found || /^Try "/.test(found) ? null : found;
+  }
+  return null;
+}
 const [BOLD, DIM, ITALIC, UNDERLINE, INVERSE, CURSOR] = [1, 2, 4, 8, 16, 32];
 const CUBE = [0, 95, 135, 175, 215, 255];
 
@@ -1001,19 +1252,34 @@ function makeCardConversation(id: string) {
     onError: showError,
     send: (text) => sendPrompt(id, text),
     interrupt: () => interruptSession(id),
-    // コマンドの候補は画面にしか出ないので、作業が始まるかカードの外へ移るまで画面の表示で打つ
-    onSlash: () => {
-      const card = cards.get(id);
-      const kbd = card?.querySelector<HTMLTextAreaElement>(".c-kbd");
-      if (!card || !kbd) return;
-      slashCards.add(id);
-      // 会話の入力欄を隠す前に移しておく。隠れてフォーカスが外れると、カードの外へ移ったとみなして戻してしまう
-      kbd.disabled = false;
-      kbd.focus({ preventScroll: true });
-      updateCard(card, sessions.get(id)!);
-      invoke("write_session", { id, data: "/" }).then(pokePeeks, showError);
+    fold: () => settings.fold(),
+    listCommands: () => invoke<SlashCommand[]>("list_commands", { id }),
+    // 選ぶ画面は画面の表示にしか出ないので、作業が始まるかカードの外へ移るまで画面の表示にする
+    openInTerminal: (command) => showCardScreen(() => typeCommand(id, command)),
+    rewind: () => showCardScreen(() => rewindIn(id)),
+    findFiles: (query) => invoke<string[]>("find_files", { id, query }),
+    sendKeys: (data) => writeKeys(id, data),
+    answer: (key) => writeKeys(id, key),
+    answerInTerminal: () => {},
+    rewindTo: async (steps, text) => {
+      const p = await rewindTo(id, steps, text);
+      if (!p) showCardScreen(() => {});
+      return p;
     },
+    rewindAnswer: (key) => rewindAnswer(id, key),
+    rewindCancel: () => rewindCancel(id),
   });
+  function showCardScreen(run: () => void) {
+    const card = cards.get(id);
+    const kbd = card?.querySelector<HTMLTextAreaElement>(".c-kbd");
+    if (!card || !kbd) return;
+    slashCards.add(id);
+    // 会話の入力欄を隠す前に移しておく。隠れてフォーカスが外れると、カードの外へ移ったとみなして戻してしまう
+    kbd.disabled = false;
+    kbd.focus({ preventScroll: true });
+    updateCard(card, sessions.get(id)!);
+    run();
+  }
   tv.setSession(id, agent);
   cardViews.set(id, tv);
   return root;
@@ -1170,6 +1436,7 @@ setInterval(() => {
       if (key !== logTailKey || !screenChangedAt.has(id)) screenChangedAt.set(id, Date.now());
       logTailKey = key;
       showActivity($("log-activity"), s, lines);
+      log.setSuggestion(s.status === "idle" ? inputSuggestion(lines) : null);
     })
     .catch(() => {});
 }, 1000);
@@ -1193,6 +1460,7 @@ function updateCard(card: HTMLElement, s: Session) {
 
   const peek = peeks.get(s.id);
   const lines = peek?.lines ?? [];
+  cardViews.get(s.id)?.setSuggestion(s.status === "idle" ? inputSuggestion(lines.slice(-12)) : null);
   const tail = q(".c-tail");
   const max = settings.overviewLines();
   const ime = imeText.get(s.id) ?? "";
@@ -1705,7 +1973,8 @@ $<HTMLFormElement>("new-form").onsubmit = async (ev) => {
   const submit = ev.submitter as HTMLButtonElement | null;
   if (submit) submit.disabled = true;
   try {
-    const dir = fWorktree.checked ? await invoke<string>("create_worktree", { cwd, branch }) : cwd;
+    const wt = settings.session();
+    const dir = fWorktree.checked ? await invoke<string>("create_worktree", { cwd, branch, base: wt.worktreeDir, name: wt.worktreeName }) : cwd;
     rememberRecent(cwd, agent);
     // worktree も最近開いたものに入れ、セッションを閉じたあとに開き直せるようにする
     if (dir !== cwd) rememberRecent(dir, agent);
@@ -1834,10 +2103,15 @@ const KEY_GROUPS: { title: string; keys: { k: string; d: string; first?: boolean
   {
     title: "会話の入力欄（セッション画面と一覧のカード）",
     keys: [
-      { k: "Enter", d: "送信（指示待ちのときだけ）" },
+      { k: "Enter", d: "送信（作業中なら、作業の区切りで渡る）" },
+      { k: "↑ / ↓（入力欄が空のとき）", d: "前に送った指示を呼び出す" },
+      { k: "Shift+Tab", d: "モード（auto・plan など）を切り替える" },
+      { k: "@", d: "ファイルの場所の候補を出す" },
+      { k: "!（先頭）", d: "シェルのコマンドとして実行する（Claude Code）" },
       { k: "Shift+Enter / Alt+Enter", d: "改行" },
       { k: "Esc", d: "作業中なら中断" },
-      { k: "/（入力欄が空のとき）", d: "コマンドの候補を出す（画面の表示に切り替わる）" },
+      { k: "Esc を 2 回（指示待ちで入力欄が空のとき）", d: "前のメッセージに戻る（Claude Code は会話の中で選ぶ）" },
+      { k: "/", d: "コマンドの候補を出す（↑↓ で選び、Enter で実行、Tab で補完）" },
     ],
   },
   {
@@ -1961,7 +2235,9 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
   if (payload.status !== "idle") unseen.delete(s.id);
   if (payload.status === "running") slashCards.delete(payload.id);
   if (payload.id === attachedId) {
-    if (payload.status === "waiting" || payload.status === "running") termUntilRunning = payload.status === "waiting";
+    if (payload.status === "running") termUntilRunning = false;
+    if (payload.status === "waiting") watchPrompt(payload.id);
+    else log.showPrompt(null);
     applyLogView();
   }
   render();
@@ -2017,8 +2293,11 @@ setInterval(render, 20_000);
     order.push(s.id);
   }
   if (!order.length) restorable = savedSessions();
+  const restore = settings.session().restore;
+  if (restore === "never") restorable = [];
   render();
   if (order.length) await activate(order[0]);
+  else if (restorable.length && restore === "auto") await restoreSessions();
 })().catch(showError);
 
 // トレイから戻したときなど、ターミナルに出ているセッションはその時点で見たことにする

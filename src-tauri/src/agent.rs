@@ -17,18 +17,22 @@ pub enum Agent {
 
 impl Agent {
     /// bash に入力する起動コマンド。`claude_settings` は Claude Code に渡す hooks 設定のパス。
+    /// `extra` は設定で足す引数（`--model sonnet` など）。利用者が書いたものをそのまま渡すが、
+    /// 改行が入ると bash がそこで別のコマンドとして実行するので、制御文字は取り除く。
     /// 再開は、再開する会話が無いと失敗する（終了コード 1）ので、そのときは新しく始める。
-    pub fn launch_line(self, claude_settings: &str, resume: bool) -> Option<String> {
+    pub fn launch_line(self, claude_settings: &str, resume: bool, extra: &str) -> Option<String> {
+        let extra: String = extra.chars().filter(|c| !c.is_control()).collect();
+        let x = if extra.trim().is_empty() { String::new() } else { format!(" {}", extra.trim()) };
         let (start, cont) = match self {
             Agent::Shell => return None,
             Agent::Claude => (
-                format!("claude --settings '{claude_settings}'"),
-                format!("claude --continue --settings '{claude_settings}'"),
+                format!("claude{x} --settings '{claude_settings}'"),
+                format!("claude{x} --continue --settings '{claude_settings}'"),
             ),
             // tower プロファイル（hooks::codex_profile）を利用者の設定の上に重ねる
-            Agent::Codex => ("codex -p tower".into(), "codex -p tower resume --last".into()),
-            Agent::Copilot => ("copilot".into(), "copilot --continue".into()),
-            Agent::Antigravity => ("agy".into(), "agy --continue".into()),
+            Agent::Codex => (format!("codex -p tower{x}"), format!("codex -p tower{x} resume --last")),
+            Agent::Copilot => (format!("copilot{x}"), format!("copilot{x} --continue")),
+            Agent::Antigravity => (format!("agy{x}"), format!("agy{x} --continue")),
         };
         Some(if resume { format!("{cont} || {start}\r") } else { format!("{start}\r") })
     }
@@ -108,9 +112,17 @@ mod tests {
 
     #[test]
     fn resume_falls_back_to_new_session() {
-        assert_eq!(Agent::Copilot.launch_line("", true).unwrap(), "copilot --continue || copilot\r");
-        assert_eq!(Agent::Codex.launch_line("", false).unwrap(), "codex -p tower\r");
-        assert!(Agent::Shell.launch_line("", true).is_none());
+        assert_eq!(Agent::Copilot.launch_line("", true, "").unwrap(), "copilot --continue || copilot\r");
+        assert_eq!(Agent::Codex.launch_line("", false, "").unwrap(), "codex -p tower\r");
+        assert!(Agent::Shell.launch_line("", true, "").is_none());
+    }
+
+    #[test]
+    fn extra_arguments_from_settings() {
+        assert_eq!(Agent::Claude.launch_line("s.json", false, " --model sonnet ").unwrap(), "claude --model sonnet --settings 's.json'\r");
+        assert_eq!(Agent::Codex.launch_line("", true, "-m o4").unwrap(), "codex -p tower -m o4 resume --last || codex -p tower -m o4\r");
+        // 改行で別のコマンドを走らせない
+        assert_eq!(Agent::Copilot.launch_line("", false, "--x\rrm -rf ~\n").unwrap(), "copilot --xrm -rf ~\r");
     }
 
     #[test]

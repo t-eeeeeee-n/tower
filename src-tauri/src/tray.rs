@@ -41,7 +41,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>, has_live: impl Fn() -> bool + Send +
     Ok(())
 }
 
-fn quit_app<R: Runtime>(app: &AppHandle<R>, has_live: bool) {
+pub fn quit_app<R: Runtime>(app: &AppHandle<R>, has_live: bool) {
     if !has_live {
         app.exit(0);
         return;
