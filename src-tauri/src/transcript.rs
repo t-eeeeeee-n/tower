@@ -93,8 +93,10 @@ pub struct Subagent {
     pub agent_type: Option<String>,
     /// 本体の会話で、このサブエージェントを呼び出した Agent ツールの呼び出しの ID
     pub tool_use_id: Option<String>,
-    /// 記録ファイルを最後に書き換えた時刻（UNIX 時間のミリ秒）。作業中かどうかの目安に使う
+    /// 記録ファイルを最後に書き換えた時刻（UNIX 時間のミリ秒）
     pub modified: u64,
+    /// 本体の記録から分かった、まだ動いているか。呼び出しが読んだ範囲より前で分からなければ None
+    pub running: Option<bool>,
 }
 
 /// Claude Code は、サブエージェントの会話を本体の記録の隣の `<セッションID>/subagents/agent-<ID>.jsonl` に残し、
@@ -114,6 +116,13 @@ pub fn subagent_path(main: &Path, agent: &str) -> Result<PathBuf, String> {
 /// 新しく書き換えられた順。Codex など、サブエージェントの記録が無ければ空
 pub fn subagents(main: &Path) -> Vec<Subagent> {
     let Ok(dir) = std::fs::read_dir(subagent_dir(main)) else { return Vec::new() };
+    let (calls, launched) = {
+        let scans = SHELL_SCANS.get_or_init(Default::default);
+        let mut scans = scans.lock().unwrap_or_else(|e| e.into_inner());
+        let scan = scans.entry(main.to_path_buf()).or_default();
+        scan_shells(main, scan);
+        (scan.agent_calls.clone(), scan.agents.clone())
+    };
     let mut out: Vec<Subagent> = dir
         .filter_map(Result::ok)
         .filter_map(|e| {
@@ -128,12 +137,22 @@ pub fn subagents(main: &Path) -> Vec<Subagent> {
                 .and_then(|b| serde_json::from_slice(&b).ok())
                 .unwrap_or(Value::Null);
             let text = |k: &str| meta.get(k).and_then(Value::as_str).map(String::from);
+            let tool_use_id = text("toolUseId");
+            // 終わると meta.json に finished が付く。付く前は、本体の記録で、裏で動かしたものは終わった知らせまで、
+            // そうでないものは呼び出しの結果が届くまで動いているとみなす（どれも公開された仕様ではない）
+            let finished = meta.get("finished").and_then(Value::as_bool) == Some(true);
+            let running = if finished {
+                Some(false)
+            } else {
+                launched.get(id).map(|s| s == "running").or_else(|| tool_use_id.as_ref().and_then(|t| calls.get(t).copied()))
+            };
             Some(Subagent {
                 id: id.to_string(),
                 description: text("description").unwrap_or_default(),
                 agent_type: text("agentType"),
-                tool_use_id: text("toolUseId"),
+                tool_use_id,
                 modified,
+                running,
             })
         })
         .collect();
@@ -162,6 +181,10 @@ struct ShellScan {
     /// まだ結果の届いていない、裏で動かす Bash の呼び出し（ID → 説明・コマンド・時刻）
     calls: HashMap<String, (String, String, String)>,
     shells: Vec<Shell>,
+    /// サブエージェントの呼び出し（Agent ツールの ID → 結果がまだ届いていないか）
+    agent_calls: HashMap<String, bool>,
+    /// 裏で動かしたサブエージェント（ID → running / completed / failed / killed など）
+    agents: HashMap<String, String>,
 }
 
 /// 記録は長いと数十 MB になるので、前回読んだところから先だけを読む
@@ -209,7 +232,9 @@ fn shell_line(line: &[u8], scan: &mut ShellScan) {
     let has = |s: &str| line.windows(s.len()).any(|w| w == s.as_bytes());
     let (call, started, notice) = (has("\"run_in_background\":true"), has("\"backgroundTaskId\""), has("<task-notification>"));
     let stop = has("Successfully stopped task");
-    if !(call || started || notice || stop) {
+    let agent_call = has("\"name\":\"Agent\"") || has("\"name\":\"Task\"");
+    let agent_result = has("\"tool_result\"") && scan.agent_calls.iter().any(|(id, open)| *open && has(id));
+    if !(call || started || notice || stop || agent_call || agent_result) {
         return;
     }
     let Ok(v) = serde_json::from_slice::<Value>(line) else { return };
@@ -217,6 +242,30 @@ fn shell_line(line: &[u8], scan: &mut ShellScan) {
         return;
     }
     let str_at = |p: &str| v.pointer(p).and_then(Value::as_str).unwrap_or("").to_string();
+    let blocks = || v.pointer("/message/content").and_then(Value::as_array).into_iter().flatten();
+    if agent_call && v.get("type").and_then(Value::as_str) == Some("assistant") {
+        for b in blocks() {
+            let name = b.get("name").and_then(Value::as_str);
+            if b.get("type").and_then(Value::as_str) == Some("tool_use") && matches!(name, Some("Agent" | "Task")) {
+                if let Some(id) = b.get("id").and_then(Value::as_str) {
+                    scan.agent_calls.insert(id.to_string(), true);
+                }
+            }
+        }
+    }
+    if agent_result && v.get("type").and_then(Value::as_str) == Some("user") {
+        for b in blocks() {
+            let Some(tool) = b.get("tool_use_id").and_then(Value::as_str) else { continue };
+            let Some(open) = scan.agent_calls.get_mut(tool) else { continue };
+            *open = false;
+            // 裏で動かすと、結果は始めた知らせ（async_launched）になる
+            let r = v.get("toolUseResult");
+            let flag = |k: &str| r.and_then(|r| r.get(k)).and_then(Value::as_bool).unwrap_or(false);
+            if let Some(agent) = r.and_then(|r| r.get("agentId")).and_then(Value::as_str).filter(|_| flag("isAsync") || flag("background")) {
+                scan.agents.entry(agent.to_string()).or_insert_with(|| "running".into());
+            }
+        }
+    }
     if call && v.get("type").and_then(Value::as_str) == Some("assistant") {
         for b in v.pointer("/message/content").and_then(Value::as_array).into_iter().flatten() {
             let input = b.get("input");
@@ -234,6 +283,9 @@ fn shell_line(line: &[u8], scan: &mut ShellScan) {
         let task = str_at("/toolUseResult/task_id");
         if let Some(s) = scan.shells.iter_mut().find(|s| s.id == task) {
             s.status = "killed".into();
+        }
+        if let Some(a) = scan.agents.get_mut(&task) {
+            *a = "killed".into();
         }
     }
     if started {
@@ -275,6 +327,9 @@ fn shell_line(line: &[u8], scan: &mut ShellScan) {
             rest.split_once(&close).map(|(inner, _)| inner.trim().to_string())
         };
         if let (Some(task), Some(status)) = (tag("task-id"), tag("status")) {
+            if let Some(a) = scan.agents.get_mut(&task) {
+                a.clone_from(&status);
+            }
             if let Some(s) = scan.shells.iter_mut().find(|s| s.id == task) {
                 s.status = status;
             }
@@ -891,6 +946,45 @@ mod tests {
         assert_eq!(texts(read(Some(path), None, 0, None, true, None, None).unwrap()), ["調べて"]);
         assert!(subagent_path(&main, "../s").is_err());
         assert!(subagent_path(&main, "").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn subagents_running_from_the_main_transcript() {
+        let dir = std::env::temp_dir().join(format!("tower-agent-state-{}", std::process::id()));
+        let sub = dir.join("s").join("subagents");
+        std::fs::create_dir_all(&sub).unwrap();
+        let main = dir.join("s.jsonl");
+        let call = |ids: &[&str]| json!({"type":"assistant","message":{"content":ids.iter().map(|id| json!({"type":"tool_use","id":id,"name":"Agent","input":{}})).collect::<Vec<_>>()}});
+        let result = |tool: &str, r: Value| json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":tool,"content":"x"}]},"toolUseResult":r});
+        let done = |task: &str| json!({"type":"queue-operation","operation":"enqueue","content":format!("<task-notification>\n<task-id>{task}</task-id>\n<status>completed</status>\n</task-notification>")});
+        let lines = |vs: &[Value]| vs.iter().map(|v| format!("{v}\n")).collect::<String>();
+        for (agent, tool) in [("a1", "t1"), ("a2", "t2"), ("a3", "t3"), ("a4", "t4")] {
+            std::fs::write(sub.join(format!("agent-{agent}.jsonl")), "").unwrap();
+            std::fs::write(sub.join(format!("agent-{agent}.meta.json")), json!({"toolUseId": tool}).to_string()).unwrap();
+        }
+        // a1: 結果待ち、a2・a3: 裏で動かした、a4: 結果が届いた
+        std::fs::write(
+            &main,
+            lines(&[
+                call(&["t1", "t2", "t3", "t4"]),
+                result("t2", json!({"isAsync":true,"status":"async_launched","agentId":"a2"})),
+                result("t3", json!({"isAsync":true,"status":"async_launched","agentId":"a3"})),
+                result("t4", json!({"status":"completed","agentId":"a4"})),
+            ]),
+        )
+        .unwrap();
+        let states = || {
+            let mut v: Vec<_> = subagents(&main).into_iter().map(|a| (a.id, a.running)).collect();
+            v.sort();
+            v
+        };
+        let s = |id: &str, r: Option<bool>| (id.to_string(), r);
+        assert_eq!(states(), [s("a1", Some(true)), s("a2", Some(true)), s("a3", Some(true)), s("a4", Some(false))]);
+        // 終わった知らせと、meta.json の finished
+        std::fs::OpenOptions::new().append(true).open(&main).unwrap().write_all(lines(&[done("a2")]).as_bytes()).unwrap();
+        std::fs::write(sub.join("agent-a3.meta.json"), json!({"toolUseId": "t3", "finished": true}).to_string()).unwrap();
+        assert_eq!(states(), [s("a1", Some(true)), s("a2", Some(false)), s("a3", Some(false)), s("a4", Some(false))]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

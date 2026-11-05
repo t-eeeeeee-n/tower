@@ -108,6 +108,8 @@ interface Subagent {
   agent_type: string | null;
   tool_use_id: string | null;
   modified: number;
+  /** 本体の記録から分かった、まだ動いているか（分からなければ null） */
+  running: boolean | null;
 }
 
 interface Shell {
@@ -471,7 +473,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     return b;
   }
 
-  const active = (a: Subagent) => Date.now() - a.modified < SUBAGENT_ACTIVE_MS;
+  // 本体の記録で分からないもの（読んだ範囲より前に呼び出したもの）は、記録が最近書き換わったかで見る
+  const active = (a: Subagent) => status !== "exited" && (a.running ?? Date.now() - a.modified < SUBAGENT_ACTIVE_MS);
 
   // エージェントが終わると、終わった知らせの届かなかったシェルも一緒に止まる
   const shellStatus = (s: Shell): Shell["status"] => (s.status === "running" && status === "exited" ? "killed" : s.status);
