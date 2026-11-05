@@ -757,8 +757,6 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       if (chunk.reset) {
         body.replaceChildren();
         pending.clear();
-      resetTodos();
-    resetTodos();
         resetTodos();
         turn = newTurn(null);
         head = chunk.start;
@@ -805,7 +803,6 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       body.replaceChildren();
       pending.clear();
       resetTodos();
-    resetTodos();
       turn = newTurn(null);
       path = chunk.path;
       offset = chunk.offset;
@@ -1410,7 +1407,6 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       openGroup = null;
       pending.clear();
       resetTodos();
-    resetTodos();
       turn = newTurn(null);
       renderBar();
       applyStatus();

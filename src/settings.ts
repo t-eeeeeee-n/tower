@@ -348,10 +348,12 @@ export function createSettings(
 
   let notifyBefore = notify;
   let historyBefore = history;
+  let sessionBefore = session;
   function cancel() {
     settings = before;
     notify = notifyBefore;
     history = historyBefore;
+    session = sessionBefore;
     apply();
     dialog.close();
   }
@@ -458,6 +460,7 @@ export function createSettings(
       before = settings;
       notifyBefore = notify;
       historyBefore = history;
+      sessionBefore = session;
       showTab(0);
       fill();
       dialog.showModal();

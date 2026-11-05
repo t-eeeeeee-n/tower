@@ -228,9 +228,9 @@ async function rewindTo(id: string, steps: number, text: string): Promise<Prompt
   const from = lines.findIndex((l) => l.trim() === "Rewind");
   const picked = lines.slice(from).find((l) => l.trim().startsWith("❯ "));
   const shown = squash(picked?.trim().slice(2) ?? "");
-  const want = squash(text.split("\n")[0]);
+  const want = squash(text.trim().split("\n")[0]);
   // 画面では長い発言は途中で切れるので、頭が合えばよい
-  if (!shown || !(want.startsWith(shown) || shown.startsWith(want.slice(0, 20)))) return null;
+  if (!shown || !want || !(want.startsWith(shown) || shown.startsWith(want.slice(0, 20)))) return null;
   await write(id, "\r");
   await sleep(900);
   return parsePrompt(await screenText(id));
@@ -245,7 +245,8 @@ async function rewindAnswer(id: string, key: string) {
     await write(id, "");
     await sleep(400);
   }
-  const lines = await screenText(id);
+  const spans = await invoke<Span[][]>("session_tail", { id, lines: 45 });
+  const lines = spans.map((l) => l.map((x) => x.t).join("").trimEnd());
   // 入力欄は、区切りの線に挟まれた「❯」の行
   let at = -1;
   lines.forEach((l, i) => {
@@ -253,9 +254,11 @@ async function rewindAnswer(id: string, key: string) {
   });
   if (at < 0) return "";
   const end = lines.findIndex((l, i) => i > at && /^[─━]{3,}/.test(l.trim()));
-  const back = lines
+  // 薄く描かれた次の指示の候補は、戻ってきた入力ではない
+  const typed = (l: Span[]) => l.map((s) => (faint(s) && !(s.f & CURSOR_FLAG) ? " ".repeat(s.t.length) : s.t)).join("");
+  const back = spans
     .slice(at, end < 0 ? at + 1 : end)
-    .map((l, i) => (i === 0 ? l.trim().replace(/^❯\s?/, "") : l.trim()))
+    .map((l, i) => (i === 0 ? typed(l).trim().replace(/^❯\s?/, "") : typed(l).trim()))
     .join("\n")
     .trim();
   if (!back) return "";
@@ -281,6 +284,8 @@ function parsePrompt(lines: string[]): PromptChoice | null {
   let last = -1;
   for (let i = clean.length - 1; i >= 0 && last < 0; i--) if (option.test(clean[i])) last = i;
   if (last < 0) return null;
+  const rule = (t?: string) => /^\s*[─━]{3,}\s*$/.test(t ?? "");
+  if (clean.some((l, i) => i > last && /^\s*❯/.test(l) && rule(clean[i - 1]))) return null;
   const options: { key: string; label: string }[] = [];
   let first = last;
   for (let i = last; i >= 0; i--) {

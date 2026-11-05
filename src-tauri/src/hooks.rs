@@ -183,7 +183,7 @@ pub fn copilot_hooks() -> Value {
     json!({ "version": 1, "hooks": hooks })
 }
 
-fn home_dir(env: &str, default: &str) -> Option<PathBuf> {
+pub(crate) fn home_dir(env: &str, default: &str) -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(env) {
         return Some(PathBuf::from(dir));
     }

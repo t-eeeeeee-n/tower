@@ -62,6 +62,10 @@ pub fn create_worktree(program: &Path, cwd: &str, branch: &str, place: &Worktree
     let root = git(program, Path::new(cwd), &["rev-parse", "--show-toplevel"])
         .map_err(|_| format!("Git リポジトリではありません: {cwd}"))?;
     let root = PathBuf::from(root);
+    // 同じブランチの worktree が既にあれば、作り直さずにそれを開く（閉じたセッションを開き直すとき）
+    if let Some(found) = worktree_of(program, &root, branch) {
+        return Ok(if cfg!(windows) { found.replace('/', "\\") } else { found });
+    }
     let repo = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let suffix: String = branch.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' }).collect();
     // 名前の型の {repo} と {branch} を埋める。型にフォルダの区切りなどが入っていても、1 つのフォルダ名に収める
@@ -78,15 +82,11 @@ pub fn create_worktree(program: &Path, cwd: &str, branch: &str, place: &Worktree
     if name.is_empty() {
         return Err("worktree のフォルダ名が空になります（設定のフォルダ名の型を確かめてください）".into());
     }
-    let base = place.base.as_deref().map(|b| PathBuf::from(b.trim())).unwrap_or_else(|| root.parent().unwrap_or(&root).to_path_buf());
+    let base = place.base.as_deref().map(|b| root.join(b.trim())).unwrap_or_else(|| root.parent().unwrap_or(&root).to_path_buf());
     if !base.is_dir() {
         return Err(format!("worktree を作る場所がありません: {}", base.display()));
     }
     let dir = base.join(name);
-    // 同じブランチの worktree が既にあれば、作り直さずにそれを開く（閉じたセッションを開き直すとき）
-    if let Some(found) = worktree_of(program, &root, branch) {
-        return Ok(if cfg!(windows) { found.replace('/', "\\") } else { found });
-    }
     if dir.exists() {
         return Err(format!("フォルダが既にあります: {}", dir.display()));
     }
@@ -319,6 +319,8 @@ mod tests {
         assert!(Path::new(&custom).ends_with("wt/fix-a-app") || Path::new(&custom).ends_with("wt\\fix-a-app"), "{custom}");
         let missing = WorktreePlace { base: Some(base.join("nope").to_string_lossy().into_owned()), name: None };
         assert!(create_worktree(&program, &repo.to_string_lossy(), "fix/b", &missing).is_err());
+        // 設定の場所が無くなっても、既にある worktree は開ける
+        assert_eq!(create_worktree(&program, &repo.to_string_lossy(), "feature/x", &missing).unwrap(), dir);
         assert!(create_worktree(&program, &repo.to_string_lossy(), "bad..name", &WorktreePlace::default()).is_err());
 
         let _ = std::fs::remove_dir_all(&base);

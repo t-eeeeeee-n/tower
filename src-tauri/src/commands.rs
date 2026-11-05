@@ -18,9 +18,10 @@ const MAX_DESCRIPTION: usize = 120;
 /// サブフォルダ（名前の `:` 区切り）をたどる深さ
 const MAX_DEPTH: usize = 4;
 
-pub fn list(cwd: &Path, home: Option<&Path>) -> Vec<Command> {
+/// user は Claude Code のユーザーの設定フォルダ（ふつうは ~/.claude）
+pub fn list(cwd: &Path, user: Option<&Path>) -> Vec<Command> {
     let mut out = Vec::new();
-    let roots = [(cwd.join(".claude"), "project")].into_iter().chain(home.map(|h| (h.join(".claude"), "user")));
+    let roots = [(cwd.join(".claude"), "project")].into_iter().chain(user.map(|u| (u.to_path_buf(), "user")));
     for (root, source) in roots {
         collect_commands(&root.join("commands"), "", 0, source, &mut out);
         collect_skills(&root.join("skills"), source, &mut out);
@@ -119,7 +120,7 @@ mod tests {
         write(home.join(".claude/commands/deploy.md"), "---\ndescription: ユーザーの方\n---\n");
         write(home.join(".claude/skills/notify/SKILL.md"), "---\ndescription: |\n  複数行\n---\n");
 
-        let got: Vec<_> = list(&proj, Some(&home)).into_iter().map(|c| (c.name, c.description, c.source)).collect();
+        let got: Vec<_> = list(&proj, Some(&home.join(".claude"))).into_iter().map(|c| (c.name, c.description, c.source)).collect();
         assert_eq!(
             got,
             [

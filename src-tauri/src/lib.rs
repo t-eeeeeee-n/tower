@@ -244,8 +244,8 @@ fn set_close_to_tray(state: State<'_, App>, on: bool) {
 #[tauri::command(async)]
 fn list_commands(state: State<'_, App>, id: String) -> Result<Vec<commands::Command>, String> {
     let cwd = state.manager.get(&id)?.cwd.clone();
-    let home = std::env::var_os("USERPROFILE").map(std::path::PathBuf::from);
-    Ok(commands::list(std::path::Path::new(&cwd), home.as_deref()))
+    let user = hooks::home_dir("CLAUDE_CONFIG_DIR", ".claude");
+    Ok(commands::list(std::path::Path::new(&cwd), user.as_deref()))
 }
 
 #[tauri::command(async)]

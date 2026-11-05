@@ -374,11 +374,17 @@ fn parent(v: &Value) -> Option<&str> {
     v.get("parentUuid").and_then(Value::as_str).or_else(|| v.get("logicalParentUuid").and_then(Value::as_str))
 }
 
-/// 人が書いた発言（ツールの結果やメタ情報ではない）
+/// 人が書いた発言（ツールの結果やメタ情報ではない）。画像を付けた発言は中身が配列になる
 fn is_prompt(v: &Value) -> bool {
-    v.get("type").and_then(Value::as_str) == Some("user")
-        && v.pointer("/message/content").is_some_and(Value::is_string)
-        && !v.get("isMeta").and_then(Value::as_bool).unwrap_or(false)
+    let content = v.pointer("/message/content");
+    let written = match content {
+        Some(Value::String(_)) => true,
+        Some(Value::Array(items)) => {
+            !items.is_empty() && items.iter().all(|i| i.get("type").and_then(Value::as_str) != Some("tool_result"))
+        }
+        _ => false,
+    };
+    v.get("type").and_then(Value::as_str) == Some("user") && written && !v.get("isMeta").and_then(Value::as_bool).unwrap_or(false)
 }
 
 /// 続きの行に、それまでの最後の行（tip）につながらない発言があるか。
@@ -919,6 +925,13 @@ mod tests {
         let c = read(Some(path.clone()), b.path.clone(), b.offset, None, false, None, b.tip.clone()).unwrap();
         assert!(!c.reset);
         assert_eq!(texts(&c), ["三つ目"]);
+
+        // 画像を付けて書き直したときも、捨てた枝を除く
+        let image = json!({"type":"user","uuid":"u5","parentUuid":"a3","message":{"content":[{"type":"image","source":{}},{"type":"text","text":"画像つき"}]}});
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(lines(&[image, say("a5", "u5", "はい5")]).as_bytes()).unwrap();
+        let d = read(Some(path.clone()), c.path.clone(), c.offset, None, false, None, c.tip.clone()).unwrap();
+        assert!(d.reset);
+        assert!(!texts(&d).contains(&"三つ目".to_string()), "{:?}", texts(&d));
         std::fs::remove_dir_all(&dir).ok();
     }
 
