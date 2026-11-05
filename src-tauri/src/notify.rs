@@ -19,7 +19,8 @@ impl Notifier {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         self.targets.lock().unwrap().insert(id, session.to_string());
         *self.last.lock().unwrap() = Some(session.to_string());
-        app.notification().builder().id(id).title(title).body(body).show().map_err(|e| e.to_string())
+        // 音を指定しないと、Windows では notify-rust が音なし（<audio silent="true"/>）のトーストにする
+        app.notification().builder().id(id).title(title).body(body).sound("Default").show().map_err(|e| e.to_string())
     }
 }
 

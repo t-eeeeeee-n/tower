@@ -85,8 +85,29 @@ pub fn write_settings(path: &Path) -> std::io::Result<()> {
         }
         hooks.insert((*name).to_string(), json!([entry]));
     }
-    write(path, &serde_json::to_vec_pretty(&json!({ "hooks": hooks }))?)
+    let user = home_dir("CLAUDE_CONFIG_DIR", ".claude").and_then(|d| std::fs::read(d.join("settings.json")).ok());
+    let user_line = user.and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v.get("statusLine").cloned());
+    let settings = json!({ "hooks": hooks, "statusLine": status_line(user_line) });
+    write(path, &serde_json::to_vec_pretty(&settings)?)
 }
+
+/// 使用制限は Claude Code がステータスラインのコマンドにだけ渡すので、Tower のセッションではステータスラインを差し替える。
+/// `--settings` の statusLine は利用者の設定より優先されるので、利用者のステータスラインのコマンドは
+/// 同じ入力を渡してそのまま実行し、表示は変えない。入力に使用率があるときだけ受信口に送る
+/// （送った入力のうち、使用率のほかの項目は Tower で捨てる）
+fn status_line(user: Option<Value>) -> Value {
+    let post = format!(
+        "case \"$input\" in *'\"rate_limits\"'*) [ -n \"$DASH_HOOK_TOKEN\" ] && printf '%s' \"$input\" | \
+         curl -s --max-time 1 -X POST -H \"Authorization: Bearer $DASH_HOOK_TOKEN\" \
+         \"http://127.0.0.1:$DASH_HOOK_PORT/hook/$DASH_SESSION_ID/{STATUS_LINE}\" --data-binary @- >/dev/null 2>&1;; esac"
+    );
+    let mut line = user.filter(|u| u.get("type").and_then(Value::as_str) == Some("command")).unwrap_or_else(|| json!({ "type": "command" }));
+    let theirs = line.get("command").and_then(Value::as_str).map(|c| format!("printf '%s' \"$input\" | {{ {c}\n}}"));
+    line["command"] = json!(format!("input=$(cat); {post}{}", theirs.map(|t| format!("; {t}")).unwrap_or_default()));
+    line
+}
+
+pub(crate) const STATUS_LINE: &str = "status_line";
 
 /// Codex 用のプロファイル。`codex -p tower` で利用者の config.toml の上に重ねる。
 /// PermissionRequest の入力には実行しようとしているコマンドが入るので、中身は送らない。
@@ -282,7 +303,11 @@ pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: App
             let _ = req.as_reader().take(1 << 20).read_to_end(&mut raw);
             let body = String::from_utf8_lossy(&raw);
             if parts.len() == 3 && parts[0] == "hook" {
-                if parts[2] == "notification" {
+                if parts[2] == STATUS_LINE {
+                    if crate::usage::save_claude(&body) {
+                        let _ = tauri::Emitter::emit(&app, "usage-changed", ());
+                    }
+                } else if parts[2] == "notification" {
                     match read_notification(&body) {
                         Notice::Waiting(message) => manager.apply_hook(&app, &parts[1], "notification", message),
                         Notice::Idle => manager.apply_hook(&app, &parts[1], "idle_prompt", None),
@@ -326,6 +351,19 @@ mod tests {
         assert_eq!(read_notification(""), Notice::Waiting(None));
         // BOM 付きでも読める
         assert_eq!(read_notification("\u{feff}{\"notification_type\":\"agent_idle\"}"), Notice::Other);
+    }
+
+    #[test]
+    fn status_line_keeps_the_users_command() {
+        let user = json!({"type": "command", "command": "echo mine", "padding": 1});
+        let line = status_line(Some(user));
+        let cmd = line["command"].as_str().unwrap();
+        assert!(cmd.starts_with("input=$(cat); case \"$input\" in *'\"rate_limits\"'*)"));
+        assert!(cmd.ends_with("; printf '%s' \"$input\" | { echo mine\n}"));
+        assert_eq!(line["padding"], json!(1));
+        // 利用者のステータスラインが無ければ、送るだけで何も出さない
+        let none = status_line(None);
+        assert!(none["command"].as_str().unwrap().ends_with("esac"));
     }
 
     #[test]

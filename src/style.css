@@ -297,6 +297,16 @@ button { font: inherit; color: inherit; cursor: pointer; }
   font-size: 12px;
   display: grid; gap: 2px;
 }
+.limits { display: grid; gap: 3px; margin-bottom: 4px; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.limits[hidden] { display: none; }
+.limit { display: grid; grid-template-columns: 46px 30px 1fr 32px auto; align-items: center; gap: 6px; }
+.limit-agent { color: var(--text); }
+.limit-label, .limit-reset { color: var(--faint); }
+.limit-pct { text-align: right; }
+.limit-bar { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.limit-bar > span { display: block; height: 100%; background: var(--st-running); }
+.limit-bar > .mid { background: var(--st-waiting); }
+.limit-bar > .high { background: var(--danger); }
 .sidebar-foot #hooks-state { color: var(--faint); }
 .sidebar-foot #hooks-state.error { color: var(--danger); }
 
@@ -498,6 +508,12 @@ button { font: inherit; color: inherit; cursor: pointer; }
 #log-btn[hidden] { display: none; }
 .log-compose { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px var(--log-gutter) 12px; border-top: 1px solid var(--line); position: relative; }
 /* 予定（ToDo）。まだ終わっていない予定があるとき、入力欄の上に出す */
+/* 作業中に送って、エージェントが受け取るのを待っている指示 */
+.lg-queue { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-height: 132px; overflow: auto; padding: 6px var(--log-gutter); }
+.lg-queue[hidden] { display: none; }
+.lg-queued { display: flex; align-items: baseline; gap: 8px; max-width: 80%; padding: 6px 12px; border: 1px dashed var(--line); border-radius: 14px; color: var(--muted); font-size: 13px; }
+.lg-queued-tag { flex: none; font-size: 11px; font-weight: 600; }
+.lg-queued-text { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .lg-todos { flex: none; max-height: 132px; overflow: auto; padding: 6px var(--log-gutter); border-top: 1px solid var(--line); font-size: 12.5px; }
 .lg-todos[hidden] { display: none; }
 .lg-todo-head { color: var(--muted); font-size: 11.5px; font-weight: 600; margin-bottom: 2px; }
@@ -508,6 +524,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
 /* 入力待ちの確認や選択肢。押すと選んだ番号をエージェントに送る */
 .lg-prompt { flex: none; padding: 10px var(--log-gutter); border-top: 1px solid var(--st-waiting); background: color-mix(in srgb, var(--st-waiting) 8%, var(--panel)); }
 .lg-prompt[hidden] { display: none; }
+.lg-prompt-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.lg-prompt-tab { padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); font-size: 12px; }
+.lg-prompt-tab:hover { color: var(--text); }
+.lg-prompt-tab.current { border-color: var(--st-waiting); background: var(--raise-2); color: var(--text); }
 .lg-prompt-q { margin-bottom: 8px; white-space: pre-wrap; font-size: 13px; color: var(--text); }
 /* 選択肢は上から順に 1 列に並べ、取り消しのボタンだけ最後の行の右に置く */
 .lg-prompt-opts { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
@@ -536,6 +556,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .log-footer[hidden] { display: none; }
 /* 読むところ（発言・返事）は大きめの文字と吹き出し、ツールの操作は時系列の線の上に 1 行ずつ並べる */
 .lg-user { display: flex; justify-content: flex-end; margin: 14px 12px 8px 48px; }
+/* 送ったばかりで、まだ会話の記録に届いていない発言 */
+.lg-sent .lg-user-text { opacity: 0.7; }
 .lg-user-text { padding: 9px 14px; border-radius: 16px; background: var(--raise-2); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--log-text, 14px); line-height: 1.7; }
 .lg-command { margin: 8px 12px; color: var(--muted); font: 12px var(--mono); }
 .lg-assistant.md-preview { padding: 4px 14px; max-width: none; font-size: var(--log-text, 14px); line-height: 1.8; }

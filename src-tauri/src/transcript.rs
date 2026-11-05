@@ -408,14 +408,14 @@ fn sessions_root(path: &Path) -> Option<&Path> {
 }
 
 /// 日のフォルダ（新しい順）
-fn day_dirs(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn day_dirs(root: &Path) -> Vec<PathBuf> {
     let mut days: Vec<PathBuf> = read_dirs(root).iter().flat_map(|y| read_dirs(y)).flat_map(|m| read_dirs(&m)).collect();
     days.sort();
     days.reverse();
     days
 }
 
-fn jsonl_in(dir: &Path) -> impl Iterator<Item = PathBuf> {
+pub(crate) fn jsonl_in(dir: &Path) -> impl Iterator<Item = PathBuf> {
     std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
 }
 
@@ -535,6 +535,12 @@ fn entries_of(v: &Value) -> Vec<Entry> {
         (Some("user"), Some(Value::String(s))) => user_text(s).into_iter().collect(),
         (Some("user"), Some(Value::Array(blocks))) => merge_user_images(blocks.iter().filter_map(user_block).collect()),
         (Some("assistant"), Some(Value::Array(blocks))) => blocks.iter().filter_map(assistant_block).collect(),
+        // 作業中に送った指示は、区切りで渡されると user の行ではなく queued_command として残る（Claude Code）
+        (Some("attachment"), _) if v.pointer("/attachment/type").and_then(Value::as_str) == Some("queued_command")
+            && v.pointer("/attachment/origin/kind").and_then(Value::as_str) == Some("human") =>
+        {
+            v.pointer("/attachment/prompt").and_then(Value::as_str).and_then(user_text).into_iter().collect()
+        }
         _ => Vec::new(),
     };
     let at = v.get("timestamp").and_then(Value::as_str);
@@ -849,6 +855,10 @@ mod tests {
         assert_eq!(kinds(json!({"type":"user","message":{"content":"直して"}})), vec![(Kind::User, "直して".into())]);
         assert!(kinds(json!({"type":"user","message":{"content":"<local-command-stdout></local-command-stdout>"}})).is_empty());
         assert!(kinds(json!({"type":"user","isMeta":true,"message":{"content":"meta"}})).is_empty());
+        // 作業中に送って区切りで渡された指示は出し、裏のシェルの知らせは出さない
+        let queued = |prompt: &str, kind: &str| json!({"type":"attachment","attachment":{"type":"queued_command","prompt":prompt,"commandMode":"prompt","origin":{"kind":kind}}});
+        assert_eq!(kinds(queued("こっちも直して", "human")), vec![(Kind::User, "こっちも直して".into())]);
+        assert!(kinds(queued("<task-notification>x</task-notification>", "task-notification")).is_empty());
         // compact の要約は自分の発言として出さず、区切りにする
         let summary = json!({"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"content":"This session is being continued from a previous conversation..."}});
         assert_eq!(kinds(summary), vec![(Kind::Command, "会話を要約して続けています（compact）".into())]);

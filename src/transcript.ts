@@ -34,6 +34,8 @@ interface Todo {
 export interface PromptChoice {
   question: string;
   options: { key: string; label: string }[];
+  /** 質問が複数あるとき（Claude Code の AskUserQuestion）の、上に並ぶ質問の見出し。mark は画面の ☐（まだ）・☒（答えた）・✔（送信） */
+  tabs?: { mark: string; label: string; current: boolean }[];
 }
 
 interface Turn {
@@ -763,7 +765,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       const chunk = await invoke<Chunk>("read_transcript", { id, path, offset, limit: Number.isFinite(cap) ? cap : null, agent, tip });
       if (id !== sessionId || shownAgent !== agent || shell) return;
       if (chunk.reset) {
-        body.replaceChildren();
+        body.replaceChildren(...sent.map((s) => s.node));
         pending.clear();
         resetTodos();
         turn = newTurn(null);
@@ -780,9 +782,12 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       if (body.querySelector(":scope > .fv-empty")) body.replaceChildren();
       const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
       for (const e of chunk.entries) {
+        if (e.kind === "user" && (queued.length || sent.length)) delivered(e.text);
         const n = render(e);
         if (n) body.append(n);
       }
+      // まだ記録に届いていない仮の発言は、いちばん下に置いておく
+      for (const s of sent) body.append(s.node);
       foldTurns();
       while (body.childElementCount > cap) body.firstElementChild!.remove();
       renderTurn();
@@ -875,12 +880,20 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     sending = true;
     applyStatus();
     if (waiter?.isConnected) moveMascot(waiter, "hop", "happy");
+    // 送り終わるまで（届いたかを確かめる間を含めて 1 秒ほど）待たずに、送った文を出して入力欄を空ける
+    if (status === "running") queue(text);
+    else showSent(text);
+    input.value = "";
+    historyAt = -1;
+    fitInput();
     try {
       await o.send(text);
-      input.value = "";
-      historyAt = -1;
-      fitInput();
     } catch (e) {
+      unsend(text);
+      if (!input.value) {
+        input.value = text;
+        fitInput();
+      }
       o.onError(e);
     } finally {
       sending = false;
@@ -1083,9 +1096,110 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     term.type = "button";
     term.onclick = () => o.answerInTerminal();
     opts.append(...buttons, term);
-    promptBox.replaceChildren(el("div", "lg-prompt-q", p.question || "確認を待っています"), opts);
+    const head: HTMLElement[] = [];
+    const at = p.tabs?.findIndex((t) => t.current) ?? -1;
+    if (p.tabs && at >= 0) {
+      const tabs = el("div", "lg-prompt-tabs");
+      tabs.append(
+        ...p.tabs.map((t, i) => {
+          const b = el("button", "lg-prompt-tab", `${t.mark} ${t.label}`);
+          b.type = "button";
+          b.classList.toggle("current", t.current);
+          b.onclick = () => moveTab(i - at);
+          return b;
+        }),
+      );
+      head.push(tabs);
+    }
+    promptBox.replaceChildren(...head, el("div", "lg-prompt-q", p.question || "確認を待っています"), opts);
     panelPick = 0;
     markPick();
+  }
+
+  // 質問が複数あるときは、エージェントの画面と同じく ←→ で質問を切り替える
+  function moveTab(step: number) {
+    if (!step) return;
+    o.sendKeys((step > 0 ? "\x1b[C" : "\x1b[D").repeat(Math.abs(step)));
+  }
+
+  // 作業中に送った指示は、エージェントが区切り（ツールの合間か返事の終わり）で受け取るまで、入力欄の上に「待機中」として出す。
+  // 受け取られると会話の記録に発言として残るので、そこで消す
+  const queueBox = el("div", "lg-queue");
+  queueBox.hidden = true;
+  compose.before(queueBox);
+  let queued: string[] = [];
+  let queueTimer = 0;
+  // 返事が終わると、Claude Code は待っていた指示をすぐ次の依頼として送る。少し待っても届かなければ、取り消されたとみなす
+  const QUEUE_DROP_MS = 8000;
+  const flat = (t: string) => t.replace(/\s+/g, "");
+  function renderQueue() {
+    // 欄の高さが変わると会話の欄が縮むので、いちばん下を見ていたら下に付いたままにする
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    queueBox.hidden = !queued.length;
+    queueBox.replaceChildren(
+      ...queued.map((t) => {
+        const n = el("div", "lg-queued");
+        n.append(el("span", "lg-queued-tag", "待機中"), el("span", "lg-queued-text", t));
+        return n;
+      }),
+    );
+    if (atBottom) body.scrollTop = body.scrollHeight;
+  }
+  function queue(text: string) {
+    queued.push(text);
+    renderQueue();
+  }
+  function delivered(text: string) {
+    const got = flat(text);
+    const match = (t: string) => got.includes(flat(t).slice(0, 200));
+    sent = sent.filter((s) => !(match(s.text) && (s.node.remove(), true)));
+    const left = queued.filter((q) => !match(q));
+    if (left.length === queued.length) return;
+    queued = left;
+    renderQueue();
+  }
+
+  // 待っているときに送った指示は、エージェントが記録に書くまで数秒かかる（UserPromptSubmit の hook などのあと）ので、
+  // 送った時点で仮の発言として出しておき、記録に届いたら本物と入れ替える。
+  // コマンド（/…）とシェル（!…）は記録で別の形になるので出さない
+  let sent: { text: string; node: HTMLElement }[] = [];
+  let sentTimer = 0;
+  // 送れていなければ作業中にならないまま。そのときは仮の発言を消す
+  const SENT_DROP_MS = 30000;
+  function showSent(text: string) {
+    if (/^[/!]/.test(text.trim())) return;
+    body.querySelector(":scope > .fv-empty")?.remove();
+    const node = el("div", "lg-user lg-sent");
+    node.append(el("div", "lg-user-text", text));
+    body.append(node);
+    body.scrollTop = body.scrollHeight;
+    sent.push({ text, node });
+    clearTimeout(sentTimer);
+    sentTimer = window.setTimeout(() => {
+      if (status !== "idle") return;
+      for (const s of sent) s.node.remove();
+      sent = [];
+    }, SENT_DROP_MS);
+  }
+  function unsend(text: string) {
+    const at = sent.map((s) => s.text).lastIndexOf(text);
+    if (at >= 0) sent.splice(at, 1)[0].node.remove();
+    const q = queued.lastIndexOf(text);
+    if (q >= 0) {
+      queued.splice(q, 1);
+      renderQueue();
+    }
+  }
+  function dropSent() {
+    clearTimeout(sentTimer);
+    for (const s of sent) s.node.remove();
+    sent = [];
+  }
+  function dropQueue() {
+    clearTimeout(queueTimer);
+    if (!queued.length) return;
+    queued = [];
+    renderQueue();
   }
 
   // 巻き戻しや確認の欄が出ているときは、入力欄が空なら ↑↓ で選び Enter で決める（ターミナルと同じ）
@@ -1285,16 +1399,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       o.sendKeys("\x1b[Z");
       return;
     }
-    const choices = input.value ? [] : panelChoices();
-    if (choices.length && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    if (!e.shiftKey && choiceKey(e.key)) {
       e.preventDefault();
-      panelPick = (panelPick + (e.key === "ArrowDown" ? 1 : -1) + choices.length) % choices.length;
-      markPick();
-      return;
-    }
-    if (choices.length && e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      choices[panelPick]?.click();
       return;
     }
     if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey && recall(e.key === "ArrowUp" ? 1 : -1)) {
@@ -1315,6 +1421,22 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       escapeTwice();
     }
   });
+
+  function choiceKey(key: string) {
+    const choices = input.value ? [] : panelChoices();
+    if (!choices.length) return false;
+    if (key === "ArrowUp" || key === "ArrowDown") {
+      panelPick = (panelPick + (key === "ArrowDown" ? 1 : -1) + choices.length) % choices.length;
+      markPick();
+    } else if (key === "Enter") {
+      choices[panelPick]?.click();
+    } else if ((key === "ArrowLeft" || key === "ArrowRight") && !promptBox.hidden && promptBox.querySelector(".lg-prompt-tab")) {
+      moveTab(key === "ArrowRight" ? 1 : -1);
+    } else {
+      return false;
+    }
+    return true;
+  }
 
   // ターミナルと同じく、↑↓ で前に送った指示を呼び出す。会話の中の自分の発言から新しい順に選ぶ。
   // 書きかけの文を消さないよう、空のときか呼び出している途中だけで、カーソルが先頭（↑）・末尾（↓）の行にあるときにする
@@ -1369,6 +1491,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     setStatus(next: string) {
       if (next === status) return;
       status = next;
+      clearTimeout(queueTimer);
+      if (next !== "running" && next !== "waiting" && queued.length) queueTimer = window.setTimeout(dropQueue, QUEUE_DROP_MS);
       // 中断されたツールには結果が残らないことがあるので、実行中の印は作業中の間だけ見せる（style.css）
       root.dataset.status = next;
       applyStatus();
@@ -1378,6 +1502,12 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     },
     focus() {
       input.focus({ preventScroll: true });
+    },
+    /** 入力欄の外で押した ↑↓←→ や Enter を、選択肢の欄の操作として扱う。扱ったら true（入力欄に戻す） */
+    choiceKey(key: string) {
+      if (!choiceKey(key)) return false;
+      input.focus({ preventScroll: true });
+      return true;
     },
     /** 入力欄の外で打った文字を、入力欄で打ったのと同じように扱う */
     typed(ch: string) {
@@ -1431,6 +1561,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       openGroup = null;
       pending.clear();
       resetTodos();
+      dropQueue();
+      dropSent();
       turn = newTurn(null);
       renderBar();
       applyStatus();

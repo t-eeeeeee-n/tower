@@ -138,20 +138,33 @@ async function sendPrompt(id: string | null, text: string) {
   }
   await invoke("write_session", { id, data: `\x1b[200~${body}\x1b[201~` });
   // 貼り付けと同じ書き込みに Enter を続けると、貼り付けの一部として扱われることがある
-  const codex = sessions.get(id)?.agent === "codex";
-  await sleep(codex ? CODEX_PASTE_MS : 80);
+  const agent = sessions.get(id)?.agent;
+  await sleep(agent === "codex" ? CODEX_PASTE_MS : 80);
   await invoke("write_session", { id, data: "\r" });
-  // Codex は貼り付けのすぐ後の Enter を、間を空けても改行として入れることがある。入力欄に残っていたらもう一度押す
-  if (codex) {
-    await sleep(CODEX_SUBMIT_CHECK_MS);
-    const head = squash(body.split("\r")[0]).slice(0, 20);
-    const lines = await screenText(id);
-    const input = lines.filter((l) => l.trim().startsWith("›")).pop();
-    if (sessions.get(id)?.status === "idle" && input && head && squash(input).includes(head)) await write(id, "\r");
+  // 貼り付けのすぐ後の Enter は、間を空けても改行として入れられたり、読まれずに消えたりすることがある
+  // （Codex で、また起動したばかりの Claude Code で見た）。入力欄に残っていたらもう一度押す
+  if (agent === "codex" || agent === "claude") {
+    await sleep(SUBMIT_CHECK_MS);
+    if (sessions.get(id)?.status === "idle" && stillTyped(await screenText(id), agent, body)) await write(id, "\r");
   }
 }
 const CODEX_PASTE_MS = 250;
-const CODEX_SUBMIT_CHECK_MS = 900;
+const SUBMIT_CHECK_MS = 900;
+
+// エージェントの入力欄に、送ったはずの文がまだ残っているか。
+// Codex の入力欄は「›」で始まる最後の行、Claude Code の入力欄は区切りの線のすぐ下の「❯」の行。
+// Claude Code は長い貼り付けを「[Pasted text #1 +3 lines]」と縮めて出す
+function stillTyped(lines: string[], agent: string, body: string) {
+  const head = squash(body.split("\r")[0]).slice(0, 20);
+  if (!head) return false;
+  const rule = (t?: string) => /^\s*[─━]{3,}\s*$/.test(t ?? "");
+  const input =
+    agent === "codex"
+      ? lines.filter((l) => l.trim().startsWith("›")).pop()
+      : lines.filter((l, i) => /^\s*❯/.test(l) && rule(lines[i - 1])).pop();
+  if (!input) return false;
+  return squash(input).includes(head) || (agent === "claude" && /\[Pasted text #\d+/.test(input));
+}
 
 function interruptSession(id: string | null) {
   if (id) invoke("write_session", { id, data: "\x1b" }).catch(showError);
@@ -381,13 +394,35 @@ function parsePrompt(lines: string[]): PromptChoice | null {
   const question: string[] = [];
   for (let i = first - 1; i >= 0 && question.length < 6; i--) {
     const t = clean[i].trim();
-    if (/^[─━\-=_]{3,}$/.test(t)) break;
+    if (/^[─━\-=_]{3,}$/.test(t) || TABS_LINE.test(t)) break;
     // 実行するコマンドを囲む点線（Claude Code の許可の確認）は、区切りではなく飾りなので飛ばす
     if (/^[╌┄┈]{3,}$/.test(t)) continue;
     if (t) question.unshift(t);
     else if (question.length) break;
   }
   return { question: question.join("\n"), options };
+}
+
+// Claude Code で質問が複数あるときに上に出る「←  ☐ Color  ☐ Size  ✔ Submit  →」の行。今の質問は背景に色が付く
+const TABS_LINE = /^←\s.*[☐☒✔].*\s→$/;
+function parseTabs(spans: Span[][]): PromptChoice["tabs"] {
+  for (let i = spans.length - 1; i >= 0; i--) {
+    const text = spans[i].map((s) => s.t).join("");
+    if (!TABS_LINE.test(text.trim())) continue;
+    let pos = 0;
+    let hit = -1;
+    for (const s of spans[i]) {
+      if (hit < 0 && s.bg && s.t.trim()) hit = pos + s.t.search(/\S/);
+      pos += s.t.length;
+    }
+    const tabs: NonNullable<PromptChoice["tabs"]> = [];
+    for (const m of text.matchAll(/([☐☒✔])\s+(.+?)(?=\s+[☐☒✔→])/g)) {
+      const start = m.index ?? 0;
+      tabs.push({ mark: m[1], label: m[2].trim(), current: hit >= start && hit < start + m[0].length });
+    }
+    return tabs.length > 1 && tabs.some((t) => t.current) ? tabs : undefined;
+  }
+  return undefined;
 }
 
 // 入力待ちの間、画面から確認や選択肢を読み取って会話の表示にボタンで出す。
@@ -409,6 +444,7 @@ function watchPrompt(id: string) {
     const lines = await invoke<Span[][]>("session_tail", { id, lines: 40 }).catch(() => [] as Span[][]);
     if (attachedId !== id || sessions.get(id)?.status !== "waiting" || Date.now() < promptQuietUntil || termUntilRunning) return;
     const p = parsePrompt(lines.map((l) => l.map((x) => x.t).join("")));
+    if (p) p.tabs = parseTabs(lines);
     if (p) {
       termUntilRunning = false;
       log.showPrompt(p);
@@ -1501,7 +1537,18 @@ function showActivity(row: HTMLElement, s: Session, lines: Span[][] | null) {
   row.title = still ? "しばらく画面が変わっていません。ダブルクリックでターミナルを開いて確かめられます" : "";
 }
 
-function showFooter(pre: HTMLElement, lines: Span[][]) {
+// サブエージェントが動いている間、Claude Code は入力欄の下に「● main」「◯ general-purpose …」と並べる。
+// 会話の表示では上のタブで切り替えられるので、そこから下（と手前の空行）は出さない
+function withoutAgentList(lines: Span[][]) {
+  const text = (l: Span[]) => l.map((s) => s.t).join("");
+  let end = lines.findIndex((l) => /^\s*●\s*main\b/.test(text(l)));
+  if (end < 0) return lines;
+  while (end > 0 && !text(lines[end - 1]).trim()) end--;
+  return lines.slice(0, end);
+}
+
+function showFooter(pre: HTMLElement, all: Span[][]) {
+  const lines = withoutAgentList(all);
   const key = JSON.stringify(lines);
   if (pre.dataset.key === key) return;
   pre.dataset.key = key;
@@ -2121,7 +2168,16 @@ $("look-btn").onclick = () => settings.open();
 document.addEventListener("keydown", (e) => {
   if (view !== "session" || !attachedId || !$("term-wrap").hidden) return;
   if (e.ctrlKey || e.altKey || e.metaKey || e.defaultPrevented) return;
-  if ((e.target as HTMLElement).closest("input, textarea, select, dialog, button")) return;
+  // 選択肢の欄が出ているときは、入力欄からフォーカスが外れていても ↑↓←→ と Enter で選べるようにする
+  const target = e.target as HTMLElement;
+  const choiceKey = !e.shiftKey && /^(Arrow(Up|Down|Left|Right)|Enter)$/.test(e.key);
+  if (choiceKey && !target.closest("input, textarea, select, dialog") && !(e.key === "Enter" && target.closest("button"))) {
+    if (log.choiceKey(e.key)) {
+      e.preventDefault();
+      return;
+    }
+  }
+  if (target.closest("input, textarea, select, dialog, button")) return;
   if (e.key.length === 1) {
     e.preventDefault();
     log.typed(e.key);
@@ -2365,6 +2421,69 @@ listen<{ id: string; bytes: number; background: number }[]>("session-usage", ({ 
 });
 
 setInterval(render, 20_000);
+
+// エージェントごとの使用制限（5 時間の枠と 1 週間の枠）。Claude Code は Tower のセッションのステータスラインから、
+// Codex は会話の記録から、最後に見た値を出す
+interface LimitWindow {
+  used: number;
+  resets_at: number;
+}
+interface Limits {
+  five_hour: LimitWindow | null;
+  week: LimitWindow | null;
+}
+let limits: { claude: Limits | null; codex: Limits | null } = { claude: null, codex: null };
+const LIMITS_POLL_MS = 60_000;
+const WEEKDAYS = "日月火水木金土";
+
+async function loadLimits() {
+  limits = await invoke<typeof limits>("usage").catch(() => limits);
+  renderLimits();
+}
+
+function untilReset(at: number) {
+  const left = at * 1000 - Date.now();
+  if (left < 24 * 3600_000) {
+    const m = Math.max(1, Math.ceil(left / 60_000));
+    return `あと ${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}`;
+  }
+  const d = new Date(at * 1000);
+  return `${WEEKDAYS[d.getDay()]} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function renderLimits() {
+  const box = $("limits");
+  const rows: HTMLElement[] = [];
+  for (const [name, l] of [["Claude", limits.claude], ["Codex", limits.codex]] as const) {
+    if (!l) continue;
+    for (const [label, w] of [["5時間", l.five_hour], ["週", l.week]] as const) {
+      if (!w) continue;
+      // リセットの時刻を過ぎたら、次に見るまでは使っていないのと同じ
+      const reset = w.resets_at * 1000 <= Date.now();
+      const used = reset ? 0 : Math.round(w.used);
+      const row = el("div", "limit");
+      const bar = el("span", "limit-bar");
+      const fill = el("span", used >= 90 ? "high" : used >= 70 ? "mid" : "");
+      fill.style.width = `${Math.min(100, used)}%`;
+      bar.append(fill);
+      row.append(
+        el("span", "limit-agent", label === "5時間" ? name : ""),
+        el("span", "limit-label", label),
+        bar,
+        el("span", "limit-pct", `${used}%`),
+        el("span", "limit-reset", reset ? "" : untilReset(w.resets_at)),
+      );
+      row.title = `${name} の${label === "週" ? "1 週間" : "5 時間"}の枠: ${used}% 使用${reset ? "" : `（${new Date(w.resets_at * 1000).toLocaleString()} にリセット）`}`;
+      rows.push(row);
+    }
+  }
+  box.replaceChildren(...rows);
+  box.hidden = !rows.length;
+}
+
+listen("usage-changed", loadLimits);
+loadLimits();
+setInterval(loadLimits, LIMITS_POLL_MS);
 
 // ---------- 起動 ----------
 

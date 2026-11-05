@@ -12,6 +12,7 @@ mod theme;
 mod transcript;
 mod tray;
 mod update;
+mod usage;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -238,6 +239,12 @@ fn read_transcript(
 }
 
 /// Codex で前のメッセージを書き直したあと、分かれた新しい記録を会話の記録にする。見つかれば true
+/// Claude Code と Codex の使用制限（最後に見た値）
+#[tauri::command(async)]
+fn usage() -> usage::Usage {
+    usage::read()
+}
+
 #[tauri::command(async)]
 fn follow_codex_fork(app: AppHandle, state: State<'_, App>, id: String) -> Result<bool, String> {
     let Some(path) = state.manager.transcript(&id)? else { return Ok(false) };
@@ -374,6 +381,7 @@ pub fn run() {
             update::remove_old_binaries();
             let dir = app.path().app_data_dir()?;
             log_panics(dir.clone());
+            usage::init(&dir);
             let settings_path = dir.join("hooks-settings.json");
             let mut hooks_error = None;
             if let Err(e) = hooks::write_settings(&settings_path) {
@@ -415,6 +423,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_commands,
             follow_codex_fork,
+            usage,
             set_close_to_tray,
             set_tray_waiting,
             save_pasted_image,
