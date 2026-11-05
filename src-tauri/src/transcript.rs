@@ -137,7 +137,7 @@ pub fn subagents(main: &Path) -> Vec<Subagent> {
             })
         })
         .collect();
-    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out.sort_by_key(|a| std::cmp::Reverse(a.modified));
     out
 }
 
@@ -357,12 +357,96 @@ pub fn read(current: Option<PathBuf>, known: Option<String>, offset: u64, limit:
     if reset {
         lines = current_branch(lines);
     }
+    if start + begin as u64 == 0 {
+        if let Some(prefix) = lines.first().and_then(|first| fork_prefix(&path, first, 0)) {
+            lines.splice(0..0, prefix);
+        }
+    }
     let new_tip = lines.iter().rev().find_map(|v| uuid(v)).map(String::from).or(tip);
     let mut entries: Vec<Entry> = lines.iter().flat_map(entries_of).collect();
     let dropped = limit.map_or(0, |limit| entries.len().saturating_sub(limit));
     entries.drain(..dropped);
     let head = start + begin as u64;
     Ok(Chunk { path: Some(path_str), offset: start + end as u64, reset, entries, start: head, more: head > 0 || dropped > 0, tip: new_tip })
+}
+
+/// Codex で前のメッセージを書き直すと、会話は新しい記録ファイルに分かれる。分かれた記録は分かれる前の行を持たず、
+/// 最初の session_meta に元の記録の ID と、元の記録のどの行（ordinal）の手前で分かれたかだけを持つ
+fn forked_from(first: &Value) -> Option<(&str, u64)> {
+    if first.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let p = first.get("payload")?;
+    Some((p.get("forked_from_id")?.as_str()?, p.get("forked_from_ordinal_exclusive")?.as_u64()?))
+}
+
+const FORK_DEPTH: usize = 8;
+
+/// 分かれた記録の前に置く、元の記録の分かれる前の行（元の記録がさらに分かれたものなら、その元もたどる）
+fn fork_prefix(path: &Path, first: &Value, depth: usize) -> Option<Vec<Value>> {
+    let (id, before) = forked_from(first)?;
+    if depth >= FORK_DEPTH {
+        return None;
+    }
+    let file = codex_file(sessions_root(path)?, id)?;
+    let text = std::fs::read_to_string(&file).ok()?;
+    let mut lines: Vec<Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v.get("ordinal").and_then(Value::as_u64).is_some_and(|o| o < before))
+        .collect();
+    if let Some(prefix) = lines.first().and_then(|f| fork_prefix(&file, f, depth + 1)) {
+        lines.splice(0..0, prefix);
+    }
+    Some(lines)
+}
+
+/// Codex の記録は `sessions/年/月/日/rollout-…-<ID>.jsonl` に置かれる
+fn sessions_root(path: &Path) -> Option<&Path> {
+    let root = path.ancestors().nth(4)?;
+    (root.file_name()? == "sessions").then_some(root)
+}
+
+/// 日のフォルダ（新しい順）
+fn day_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut days: Vec<PathBuf> = read_dirs(root).iter().flat_map(|y| read_dirs(y)).flat_map(|m| read_dirs(&m)).collect();
+    days.sort();
+    days.reverse();
+    days
+}
+
+fn jsonl_in(dir: &Path) -> impl Iterator<Item = PathBuf> {
+    std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+}
+
+fn read_dirs(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
+}
+
+fn codex_file(root: &Path, id: &str) -> Option<PathBuf> {
+    let name = format!("-{id}.jsonl");
+    day_dirs(root).iter().flat_map(|d| jsonl_in(d)).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&name)))
+}
+
+fn first_line(path: &Path) -> Option<Value> {
+    use std::io::BufRead;
+    let mut line = String::new();
+    std::io::BufReader::new(std::fs::File::open(path).ok()?).read_line(&mut line).ok()?;
+    serde_json::from_str(&line).ok()
+}
+
+/// Codex の会話 path から分かれた記録のうち、いちばん新しいもの。書き直したあとの会話を追うのに使う。
+/// 分かれた記録は書き直した日に作られるので、新しい日から 2 日分だけ探す
+pub fn codex_fork(path: &Path) -> Option<PathBuf> {
+    let id = first_line(path)?.pointer("/payload/id")?.as_str()?.to_string();
+    let mut found: Vec<PathBuf> = day_dirs(sessions_root(path)?)
+        .iter()
+        .take(2)
+        .flat_map(|d| jsonl_in(d))
+        .filter(|p| first_line(p).as_ref().and_then(forked_from).is_some_and(|(from, _)| from == id))
+        .collect();
+    found.sort();
+    found.pop()
 }
 
 fn uuid(v: &Value) -> Option<&str> {
@@ -933,6 +1017,38 @@ mod tests {
         assert!(d.reset);
         assert!(!texts(&d).contains(&"三つ目".to_string()), "{:?}", texts(&d));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn codex_fork_reads_the_lines_before_the_fork() {
+        let root = std::env::temp_dir().join(format!("tower-codex-fork-{}", std::process::id())).join("sessions");
+        let day = root.join("2026").join("11").join("05");
+        std::fs::create_dir_all(&day).unwrap();
+        let meta = |o: u64, id: &str, from: Option<(&str, u64)>| {
+            let mut p = json!({"id": id});
+            if let Some((f, before)) = from {
+                p["forked_from_id"] = json!(f);
+                p["forked_from_ordinal_exclusive"] = json!(before);
+            }
+            json!({"ordinal": o, "type": "session_meta", "payload": p})
+        };
+        let msg = |o: u64, role: &str, t: &str| {
+            let kind = if role == "user" { "input_text" } else { "output_text" };
+            json!({"ordinal": o, "type": "response_item", "payload": {"type": "message", "role": role, "content": [{"type": kind, "text": t}]}})
+        };
+        let lines = |vs: &[Value]| vs.iter().map(|v| format!("{v}
+")).collect::<String>();
+        let parent = day.join("rollout-2026-11-05T11-09-07-aaa.jsonl");
+        std::fs::write(&parent, lines(&[meta(0, "aaa", None), msg(1, "user", "first"), msg(2, "assistant", "1"), msg(3, "user", "second"), msg(4, "assistant", "2")])).unwrap();
+        let fork = day.join("rollout-2026-11-05T11-11-39-bbb.jsonl");
+        std::fs::write(&fork, lines(&[meta(3, "bbb", Some(("aaa", 3))), msg(4, "user", "second again")])).unwrap();
+
+        assert_eq!(codex_fork(&parent), Some(fork.clone()));
+        assert_eq!(codex_fork(&fork), None);
+        let c = read(Some(fork.clone()), None, 0, None, false, None, None).unwrap();
+        let texts: Vec<_> = c.entries.iter().filter(|e| matches!(e.kind, Kind::User | Kind::Assistant)).map(|e| e.text.clone()).collect();
+        assert_eq!(texts, ["first", "1", "second again"]);
+        std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
     #[test]

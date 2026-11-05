@@ -540,6 +540,16 @@ impl Manager {
         }
     }
 
+    /// Codex で書き直して分かれた会話を追う。最初の会話から分かれると、Codex は元の会話の SessionEnd を送るが、
+    /// エージェントは終わっていない。分かれる前に届いて「シェル」にしていたら戻す（後から届くものは hooks の側で除く）
+    pub fn follow_fork<R: Runtime>(&self, app: &AppHandle<R>, id: &str, path: PathBuf) {
+        let Ok(session) = self.get(id) else { return };
+        *session.transcript.lock().unwrap() = Some(path);
+        if session.state.lock().unwrap().status == Status::Shell {
+            set_status(app, id, &session.state, Status::Idle, None);
+        }
+    }
+
     pub fn footer(&self, id: &str) -> Result<Vec<Vec<Span>>, String> {
         Ok(footer_lines(self.get(id)?.term.lock().unwrap().parser.screen()))
     }

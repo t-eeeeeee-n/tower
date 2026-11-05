@@ -110,7 +110,8 @@ pub fn codex_profile() -> String {
         let timeout = if matches!(*name, "SessionEnd" | "Interrupt") { 3 } else { 10 };
         out.push_str(&format!("\n[[hooks.{name}]]\n[[hooks.{name}.hooks]]\ntype = \"command\"\ntimeout = {timeout}\n"));
         // bash 版は '' を含むので、一重引用符を含められる複数行リテラル文字列にする
-        let with_body = *slug == "session_start";
+        // SessionEnd は、どの会話が終わったかを見るために中身も送る（Codex は書き直しで分かれた元の会話の終わりも知らせる）
+        let with_body = matches!(*slug, "session_start" | "session_end");
         out.push_str(&format!("command = '''{}'''\n", post_bash(slug, with_body)));
         out.push_str(&format!("commandWindows = '{}'\n", post_powershell(slug, with_body)));
     }
@@ -291,6 +292,15 @@ pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: App
                     if parts[2] == "session_start" {
                         if let Some(path) = crate::transcript::path_from_hook(&body) {
                             manager.set_transcript(&parts[1], path);
+                        }
+                    }
+                    // 今見ている会話とは別の会話の終わり（書き直して分かれる前の会話）なら、エージェントはまだ動いている
+                    if parts[2] == "session_end" {
+                        let ended = crate::transcript::path_from_hook(&body);
+                        let current = manager.transcript(&parts[1]).ok().flatten();
+                        if ended.is_some() && current.is_some() && ended != current {
+                            let _ = req.respond(tiny_http::Response::empty(204));
+                            continue;
                         }
                     }
                     manager.apply_hook(&app, &parts[1], &parts[2], None);

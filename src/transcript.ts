@@ -253,6 +253,8 @@ export interface TranscriptViewOptions {
   rewindAnswer: (key: string) => Promise<string>;
   /** 巻き戻しの確認をやめる */
   rewindCancel: () => void;
+  /** Codex の前のメッセージを直す画面を裏で進め、steps 個前の発言から書き直す。戻された発言を返す（進められなければ null） */
+  rewindCodex: (steps: number, text: string) => Promise<string | null>;
 }
 
 export function createTranscriptView(o: TranscriptViewOptions) {
@@ -302,9 +304,15 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   olderBtn.hidden = true;
   olderBtn.onclick = () => loadOlder();
   body.before(olderBtn);
-  // 上の端までさかのぼったら、続けて前の会話を読み足す
+  // 上の端までさかのぼったら、続けて前の会話を読み足す。読み足すたびに全体を描き直すので、
+  // 読み足したあとも上の端にいるだけでは続けて読まず、一度下へ離れてから戻ったときに読む
+  let olderArmed = true;
   body.addEventListener("scroll", () => {
-    if (body.scrollTop < 40 && more) loadOlder();
+    if (body.scrollTop >= 200) olderArmed = true;
+    else if (body.scrollTop < 40 && more && olderArmed && !loading) {
+      olderArmed = false;
+      loadOlder();
+    }
   });
   const showOlder = () => (olderBtn.hidden = !more || !!shell);
   function resetRange() {
@@ -994,7 +1002,33 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     rewindPanel("どのメッセージの前まで戻しますか（新しい順。↑↓ で選び Enter）", buttons);
   }
 
+  function dropFrom(node: HTMLElement) {
+    if (!node.isConnected) return;
+    while (node.nextSibling) node.nextSibling.remove();
+    node.remove();
+    pending.clear();
+    renderTurn();
+  }
+
+  function restoreInput(back: string) {
+    if (back) {
+      input.value = back;
+      fitInput();
+      applyStatus();
+    }
+    input.focus({ preventScroll: true });
+  }
+
   async function pickRewind(steps: number, text: string, node: HTMLElement) {
+    if (agentKind === "codex") {
+      rewindPanel("前のメッセージを直す画面を開いています…", []);
+      const back = await o.rewindCodex(steps, text).catch(() => null);
+      rewindBox.hidden = true;
+      if (back === null) return;
+      dropFrom(node);
+      restoreInput(back);
+      return;
+    }
     rewinding = true;
     rewindPanel("巻き戻しの画面を開いています…", []);
     const p = await o.rewindTo(steps, text).catch(() => null);
@@ -1012,18 +1046,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         rewindBox.hidden = true;
         const back = await o.rewindAnswer(opt.key).catch(() => "");
         // 会話を戻したら、記録が次の発言で書き換わるまでの間も、表示からその発言より後を消しておく
-        if (/conversation/i.test(opt.label) && !/never/i.test(opt.label) && node.isConnected) {
-          while (node.nextSibling) node.nextSibling.remove();
-          node.remove();
-          pending.clear();
-          renderTurn();
-        }
-        if (back) {
-          input.value = back;
-          fitInput();
-          applyStatus();
-        }
-        input.focus({ preventScroll: true });
+        if (/conversation/i.test(opt.label) && !/never/i.test(opt.label)) dropFrom(node);
+        restoreInput(back);
       };
       return b;
     });
@@ -1325,7 +1349,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     if (now - lastEscape < ESCAPE_TWICE_MS) {
       lastEscape = 0;
       applyStatus();
-      if (agentKind === "claude") openRewind();
+      if (agentKind === "claude" || agentKind === "codex") openRewind();
       else o.rewind();
       return;
     }
@@ -1425,7 +1449,7 @@ export type TranscriptView = ReturnType<typeof createTranscriptView>;
 
 /** セッション画面で、ターミナルの代わりに出す会話の表示 */
 export function createTranscriptPanel(
-  o: Pick<TranscriptViewOptions, "onError" | "send" | "interrupt" | "listCommands" | "openInTerminal" | "rewind" | "fold" | "findFiles" | "sendKeys" | "answer" | "answerInTerminal" | "rewindTo" | "rewindAnswer" | "rewindCancel">,
+  o: Pick<TranscriptViewOptions, "onError" | "send" | "interrupt" | "listCommands" | "openInTerminal" | "rewind" | "fold" | "findFiles" | "sendKeys" | "answer" | "answerInTerminal" | "rewindTo" | "rewindAnswer" | "rewindCancel" | "rewindCodex">,
 ) {
   return createTranscriptView({
     root: $("log"),

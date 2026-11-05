@@ -138,9 +138,20 @@ async function sendPrompt(id: string | null, text: string) {
   }
   await invoke("write_session", { id, data: `\x1b[200~${body}\x1b[201~` });
   // 貼り付けと同じ書き込みに Enter を続けると、貼り付けの一部として扱われることがある
-  await new Promise((r) => setTimeout(r, 80));
+  const codex = sessions.get(id)?.agent === "codex";
+  await sleep(codex ? CODEX_PASTE_MS : 80);
   await invoke("write_session", { id, data: "\r" });
+  // Codex は貼り付けのすぐ後の Enter を、間を空けても改行として入れることがある。入力欄に残っていたらもう一度押す
+  if (codex) {
+    await sleep(CODEX_SUBMIT_CHECK_MS);
+    const head = squash(body.split("\r")[0]).slice(0, 20);
+    const lines = await screenText(id);
+    const input = lines.filter((l) => l.trim().startsWith("›")).pop();
+    if (sessions.get(id)?.status === "idle" && input && head && squash(input).includes(head)) await write(id, "\r");
+  }
 }
+const CODEX_PASTE_MS = 250;
+const CODEX_SUBMIT_CHECK_MS = 900;
 
 function interruptSession(id: string | null) {
   if (id) invoke("write_session", { id, data: "\x1b" }).catch(showError);
@@ -196,6 +207,18 @@ const log = createTranscriptPanel({
   },
   rewindAnswer: (key) => (attachedId ? rewindAnswer(attachedId, key) : Promise.resolve("")),
   rewindCancel: () => attachedId && rewindCancel(attachedId),
+  rewindCodex: async (steps, text) => {
+    const id = attachedId;
+    if (!id) return null;
+    const back = await codexRewind(id, steps, text);
+    if (back === null && attachedId === id) {
+      termUntilRunning = true;
+      applyLogView();
+      term.focus();
+      showError("前のメッセージを直す画面を読み取れなかったので、ターミナルで続けてください");
+    }
+    return back;
+  },
 });
 
 function writeKeys(id: string, data: string) {
@@ -269,6 +292,62 @@ async function rewindAnswer(id: string, key: string) {
   return back;
 }
 
+// Codex の「前のメッセージを直す」（Esc 2 回）を、画面を切り替えずに裏で進める。Esc 2 回で会話の一覧が開いて最後の発言が
+// 反転で選ばれ、Esc を押すたびに 1 つ前の発言へ動く。選ばれている発言が狙ったものかを確かめてから Enter を押すと、
+// 会話がそこで新しい記録に分かれ、その発言が入力欄に戻される。戻された発言は会話の入力欄に移す。
+// 画面の形に頼るので、どこかで食い違えば null を返し、呼び出し側がターミナルで続きをしてもらう
+async function codexRewind(id: string, steps: number, text: string): Promise<string | null> {
+  const overlay = async () => (await screenText(id)).some((l) => /T R A N S C R I P T/.test(l));
+  await write(id, "\x1b");
+  await sleep(150);
+  await write(id, "\x1b");
+  await sleep(700);
+  if (!(await overlay())) return null;
+  for (let i = 1; i < steps; i++) {
+    await write(id, "\x1b");
+    await sleep(60);
+  }
+  await sleep(350);
+  const spans = await invoke<Span[][]>("session_tail", { id, lines: 60 });
+  const picked = spans.find((l) => l.some((s) => s.f & INVERSE_FLAG && s.t.includes("›")));
+  const shown = squash((picked ?? []).map((s) => s.t).join("").replace(/^\s*›/, ""));
+  const want = squash(text.trim().split("\n")[0]);
+  if (!shown || !want || !(want.startsWith(shown) || shown.startsWith(want.slice(0, 20)))) {
+    if (await overlay()) await write(id, "q");
+    return null;
+  }
+  await write(id, "\r");
+  await sleep(1200);
+  if (await overlay()) return null;
+  // 入力欄は「›」で始まる最後の行から、空行の手前まで
+  const after = await invoke<Span[][]>("session_tail", { id, lines: 45 });
+  const lines = after.map((l) => l.map((x) => x.t).join("").trimEnd());
+  let at = -1;
+  lines.forEach((l, i) => {
+    if (/^›/.test(l.trim())) at = i;
+  });
+  let back = "";
+  if (at >= 0) {
+    let end = lines.findIndex((l, i) => i > at && !l.trim());
+    if (end < 0) end = lines.length;
+    const typed = (l: Span[]) => l.map((s) => (faint(s) && !(s.f & CURSOR_FLAG) ? " ".repeat(s.t.length) : s.t)).join("");
+    back = after
+      .slice(at, end)
+      .map((l, i) => (i === 0 ? typed(l).trim().replace(/^›\s?/, "") : typed(l).trim()))
+      .join("\n")
+      .trim();
+    // 1 行ずつ、行の頭まで消して（Ctrl+U）前の行につなぐ
+    for (let i = 0; back && i < end - at; i++) {
+      await write(id, "\x15");
+      await sleep(30);
+      await write(id, "\x7f");
+      await sleep(30);
+    }
+  }
+  await invoke("follow_codex_fork", { id }).catch(() => false);
+  return back;
+}
+
 async function rewindCancel(id: string) {
   // 確認の画面から一覧へ、一覧から閉じる
   await write(id, "\x1b");
@@ -303,6 +382,8 @@ function parsePrompt(lines: string[]): PromptChoice | null {
   for (let i = first - 1; i >= 0 && question.length < 6; i--) {
     const t = clean[i].trim();
     if (/^[─━\-=_]{3,}$/.test(t)) break;
+    // 実行するコマンドを囲む点線（Claude Code の許可の確認）は、区切りではなく飾りなので飛ばす
+    if (/^[╌┄┈]{3,}$/.test(t)) continue;
     if (t) question.unshift(t);
     else if (question.length) break;
   }
@@ -1103,6 +1184,7 @@ function fitCards() {
 
 const RGB_FLAG = 1 << 24;
 const DIM_FLAG = 2;
+const INVERSE_FLAG = 16;
 const CURSOR_FLAG = 32;
 
 // 薄く描かれた文字（DIM か、灰色）
@@ -1273,6 +1355,11 @@ function makeCardConversation(id: string) {
     },
     rewindAnswer: (key) => rewindAnswer(id, key),
     rewindCancel: () => rewindCancel(id),
+    rewindCodex: async (steps, text) => {
+      const back = await codexRewind(id, steps, text);
+      if (back === null) showCardScreen(() => {});
+      return back;
+    },
   });
   function showCardScreen(run: () => void) {
     const card = cards.get(id);

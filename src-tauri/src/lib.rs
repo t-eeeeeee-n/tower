@@ -216,6 +216,8 @@ fn session_tail(state: State<'_, App>, id: String, lines: usize) -> Result<Vec<V
 }
 
 /// `agent` を渡すと、そのサブエージェントの会話を読む
+// 引数はフロントから名前付きで届く値なので、構造体にまとめない
+#[allow(clippy::too_many_arguments)]
 #[tauri::command(async)]
 fn read_transcript(
     state: State<'_, App>,
@@ -233,6 +235,15 @@ fn read_transcript(
         (_, main) => main,
     };
     transcript::read(target, path, offset, limit, agent.is_some(), from, tip)
+}
+
+/// Codex で前のメッセージを書き直したあと、分かれた新しい記録を会話の記録にする。見つかれば true
+#[tauri::command(async)]
+fn follow_codex_fork(app: AppHandle, state: State<'_, App>, id: String) -> Result<bool, String> {
+    let Some(path) = state.manager.transcript(&id)? else { return Ok(false) };
+    let Some(fork) = transcript::codex_fork(&path) else { return Ok(false) };
+    state.manager.follow_fork(&app, &id, fork);
+    Ok(true)
 }
 
 #[tauri::command]
@@ -339,7 +350,7 @@ fn log_panics(dir: std::path::PathBuf) {
             info.to_string().replace('\n', " / "),
         );
         // 書き足し続けて大きくならないよう、1 MB を超えたら作り直す
-        let large = std::fs::metadata(&path).map_or(false, |m| m.len() > 1 << 20);
+        let large = std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20);
         let file = std::fs::OpenOptions::new().create(true).append(!large).write(true).truncate(large).open(&path);
         if let Ok(mut f) = file {
             let _ = std::io::Write::write_all(&mut f, line.as_bytes());
@@ -403,6 +414,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_commands,
+            follow_codex_fork,
             set_close_to_tray,
             set_tray_waiting,
             save_pasted_image,
