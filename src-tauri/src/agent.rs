@@ -93,9 +93,12 @@ pub fn infer_status(screen: &str, quiet_ms: u64) -> Status {
             || l.contains("do you trust")
             // 選択肢の確定方法の案内（Claude Code・Codex・Copilot CLI・Antigravity CLI の確認画面に出る）
             || l.contains("enter to confirm")
+            || l.contains("enter to select")
             || l.contains("enter confirm")
             || l.contains("press enter to continue")
             || l.contains("confirm with number keys")
+            // Claude Code の複数の質問の最後の確認（案内の行が無い）
+            || l.contains("ready to submit your answers")
     });
     if asking {
         Status::Waiting
@@ -148,6 +151,10 @@ mod tests {
         assert_eq!(infer_status(agy_trust, 60_000), Status::Waiting);
         let agy_run = "Run this command?\n> 1. Yes, run command\n  4. No, cancel\n  ↑/↓ Navigate · tab Amend\nesc to cancel\n";
         assert_eq!(infer_status(agy_run, 60_000), Status::Waiting);
+        let question = "好きな色は？\n\n❯ 1. red\n  2. blue\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n";
+        assert_eq!(infer_status(question, 60_000), Status::Waiting);
+        let review = "Review your answers\n\n ● 好きな色は？\n   → red\n\nReady to submit your answers?\n\n❯ 1. Submit answers\n  2. Cancel\n";
+        assert_eq!(infer_status(review, 60_000), Status::Waiting);
         // 入力欄だけの待機画面は完了
         let agy_idle = "  OK\n────────\n>\n────────\n? for shortcuts      Gemini 3.8 Flash · high\n";
         assert_eq!(infer_status(agy_idle, 10_000), Status::Idle);

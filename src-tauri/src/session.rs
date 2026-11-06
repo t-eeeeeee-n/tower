@@ -159,6 +159,8 @@ pub struct Session {
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     /// hooks のイベントが一度でも届いたか。届くまでは画面から状態を推測する
     hooks_seen: Arc<AtomicBool>,
+    /// 確認に答えてから、次の hooks のイベントが届くまでの間か。その間も画面から推測する
+    answered: Arc<AtomicBool>,
     /// Claude Code の会話の記録（JSONL）。SessionStart の hook で届き、/clear や再開のたびに変わる
     transcript: Mutex<Option<PathBuf>>,
     _job: Option<Job>,
@@ -392,8 +394,10 @@ impl Manager {
         // hooks を使うエージェントも、最初のイベントが届くまでは推測する
         // （Codex は最初の指示を送るまで SessionStart を送らず、起動直後の確認画面にも hooks が無いため）
         let hooks_seen = Arc::new(AtomicBool::new(false));
+        let answered = Arc::new(AtomicBool::new(false));
         if agent != Agent::Shell {
             let hooks_seen = hooks_seen.clone();
+            let answered = answered.clone();
             let term = term.clone();
             let state = state.clone();
             let app = app.clone();
@@ -401,12 +405,20 @@ impl Manager {
             std::thread::spawn(move || {
                 let mut last = String::new();
                 let mut changed_at = now_ms();
+                let guessing = || agent.infers_status() || !hooks_seen.load(Ordering::Relaxed) || answered.load(Ordering::Relaxed);
+                let mut was_guessing = true;
                 loop {
                     std::thread::sleep(Duration::from_millis(700));
-                    if state.lock().unwrap().status == Status::Exited
-                        || (!agent.infers_status() && hooks_seen.load(Ordering::Relaxed))
-                    {
+                    if state.lock().unwrap().status == Status::Exited {
                         break;
+                    }
+                    if !guessing() {
+                        was_guessing = false;
+                        continue;
+                    }
+                    if !was_guessing {
+                        was_guessing = true;
+                        changed_at = now_ms();
                     }
                     let (screen, resized_at) = {
                         let t = term.lock().unwrap();
@@ -419,8 +431,8 @@ impl Manager {
                         }
                     }
                     let next = infer_status(&last, now_ms().saturating_sub(changed_at));
-                    if !agent.infers_status() && hooks_seen.load(Ordering::Relaxed) {
-                        break;
+                    if !guessing() {
+                        continue;
                     }
                     set_status(&app, &id, &state, next, None);
                 }
@@ -447,6 +459,7 @@ impl Manager {
             master: Mutex::new(pair.master),
             killer: Mutex::new(killer),
             hooks_seen,
+            answered,
             transcript: Mutex::new(None),
             _job: job,
         });
@@ -508,9 +521,22 @@ impl Manager {
 
     pub fn write(&self, id: &str, data: &str) -> Result<(), String> {
         let session = self.get(id)?;
-        let mut w = session.writer.lock().unwrap();
-        w.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-        w.flush().map_err(|e| e.to_string())
+        {
+            let mut w = session.writer.lock().unwrap();
+            w.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+            w.flush().map_err(|e| e.to_string())?;
+        }
+        // 確認に答えても、次の hooks のイベント（次のツールの PreToolUse か Stop）は、許可したコマンドが終わるまで届かないことがある。
+        // 次のイベントまでは画面から推測する。すぐ作業中にはしない（複数の質問では、答えても次の質問が出るだけのため）
+        let confirms = data.contains('\r') || (data.len() == 1 && data.as_bytes()[0].is_ascii_digit());
+        if confirms
+            && !session.agent.infers_status()
+            && session.hooks_seen.load(Ordering::Relaxed)
+            && session.state.lock().unwrap().status == Status::Waiting
+        {
+            session.answered.store(true, Ordering::Relaxed);
+        }
+        Ok(())
     }
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), String> {
@@ -567,6 +593,7 @@ impl Manager {
     pub fn apply_hook<R: Runtime>(&self, app: &AppHandle<R>, id: &str, event: &str, message: Option<String>) {
         let Ok(session) = self.get(id) else { return };
         session.hooks_seen.store(true, Ordering::Relaxed);
+        session.answered.store(false, Ordering::Relaxed);
         let next = match event {
             "session_start" | "stop" => Status::Idle,
             "user_prompt_submit" | "pre_tool_use" => Status::Running,
