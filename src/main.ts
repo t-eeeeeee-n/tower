@@ -2441,14 +2441,10 @@ async function loadLimits() {
   renderLimits();
 }
 
-function untilReset(at: number) {
-  const left = at * 1000 - Date.now();
-  if (left < 24 * 3600_000) {
-    const m = Math.max(1, Math.ceil(left / 60_000));
-    return `あと ${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}`;
-  }
+function resetTime(at: number) {
   const d = new Date(at * 1000);
-  return `${WEEKDAYS[d.getDay()]} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const time = `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return d.toDateString() === new Date().toDateString() ? time : `${WEEKDAYS[d.getDay()]} ${time}`;
 }
 
 function renderLimits() {
@@ -2471,7 +2467,7 @@ function renderLimits() {
         el("span", "limit-label", label),
         bar,
         el("span", "limit-pct", `${used}%`),
-        el("span", "limit-reset", reset ? "" : untilReset(w.resets_at)),
+        el("span", "limit-reset", reset ? "" : resetTime(w.resets_at)),
       );
       row.title = `${name} の${label === "週" ? "1 週間" : "5 時間"}の枠: ${used}% 使用${reset ? "" : `（${new Date(w.resets_at * 1000).toLocaleString()} にリセット）`}`;
       rows.push(row);

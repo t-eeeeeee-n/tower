@@ -17,6 +17,7 @@ interface Appearance {
   logSize: number;
   /** 飛行機やキャラを動かすか */
   motion: boolean;
+  limits: boolean;
 }
 export type RestoreMode = "ask" | "auto" | "never";
 export type OpenAs = "last" | "log" | "term";
@@ -40,7 +41,7 @@ interface History {
   overview: number;
 }
 
-const DEFAULT: Appearance = { theme: "tower", font: "Cascadia Mono", fontSize: 14, cursor: "block", blink: true, fold: "tools", logSize: 14, motion: true };
+const DEFAULT: Appearance = { theme: "tower", font: "Cascadia Mono", fontSize: 14, cursor: "block", blink: true, fold: "tools", logSize: 14, motion: true, limits: true };
 const LOG_SIZE_MIN = 11;
 const LOG_SIZE_MAX = 20;
 const SESSION_DEFAULT: SessionPrefs = { args: {}, restore: "ask", openAs: "last", worktreeDir: "", worktreeName: "", closeToTray: true };
@@ -142,6 +143,7 @@ function loadSettings(): Appearance {
     fold: v.fold in { none: 1, tools: 1, all: 1 } ? v.fold : DEFAULT.fold,
     logSize: Number.isFinite(v.logSize) ? clampInt(v.logSize, LOG_SIZE_MIN, LOG_SIZE_MAX) : DEFAULT.logSize,
     motion: v.motion !== false,
+    limits: v.limits !== false,
   };
 }
 
@@ -174,6 +176,7 @@ export function createSettings(
   const fFold = $<HTMLSelectElement>("look-fold");
   const fLogSize = $<HTMLInputElement>("look-log-size");
   const fMotion = $<HTMLInputElement>("look-motion");
+  const fLimits = $<HTMLInputElement>("look-limits");
   const fArgs = Object.fromEntries(ARG_AGENTS.map((a) => [a, $<HTMLInputElement>(`look-args-${a}`)]));
   const fRestore = $<HTMLSelectElement>("look-restore");
   const fOpenAs = $<HTMLSelectElement>("look-open-as");
@@ -221,6 +224,7 @@ export function createSettings(
     term.options.cursorBlink = settings.blink;
     root.setProperty("--log-text", `${settings.logSize}px`);
     document.documentElement.classList.toggle("no-motion", !settings.motion);
+    document.documentElement.classList.toggle("no-limits", !settings.limits);
     refit();
     if (settings.fold !== appliedFold) onFold((appliedFold = settings.fold));
   }
@@ -311,6 +315,7 @@ export function createSettings(
     fFold.value = settings.fold;
     fLogSize.value = String(settings.logSize);
     fMotion.checked = settings.motion;
+    fLimits.checked = settings.limits;
     for (const a of ARG_AGENTS) fArgs[a].value = session.args[a] ?? "";
     fRestore.value = session.restore;
     fOpenAs.value = session.openAs;
@@ -384,6 +389,7 @@ export function createSettings(
   };
   fLogSize.onchange = () => (fLogSize.value = String(settings.logSize));
   fMotion.onchange = () => update({ motion: fMotion.checked });
+  fLimits.onchange = () => update({ limits: fLimits.checked });
   fNotifyWaiting.onchange = () => (notify = { ...notify, waiting: fNotifyWaiting.checked });
   fNotifyDone.onchange = () => (notify = { ...notify, done: fNotifyDone.checked });
   // 打っている途中の値（「5」など）で丸めないよう、確定したときに範囲へ収める

@@ -301,6 +301,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .limits[hidden] { display: none; }
 .limit { display: grid; grid-template-columns: 46px 30px 1fr 32px auto; align-items: center; gap: 6px; }
 .limit-agent { color: var(--text); }
+.no-limits .limits { display: none; }
 .limit-label, .limit-reset { color: var(--faint); }
 .limit-pct { text-align: right; }
 .limit-bar { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
@@ -891,7 +892,7 @@ input:not([type]):focus, input[type="number"]:focus { border-color: var(--st-run
 .look-row.look-history { grid-template-columns: 1fr 1fr; }
 .look-row.look-conv { grid-template-columns: 1fr 120px; margin-top: 4px; }
 .look-row.look-two { grid-template-columns: 1fr 1fr; margin-bottom: 12px; }
-.look-motion { margin: 10px 0 0; }
+.look-motion, .look-limits { margin: 10px 0 0; }
 .look-args { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
 .look-args input { font-family: var(--mono); }
 .look-args + .hint { display: block; margin: 6px 0 16px; }
