@@ -15,13 +15,27 @@ pub struct Notifier {
 }
 
 impl Notifier {
-    pub fn show<R: Runtime>(&self, app: &AppHandle<R>, session: &str, title: &str, body: &str) -> Result<(), String> {
+    pub fn show<R: Runtime>(&self, app: &AppHandle<R>, session: &str, title: &str, body: &str, sound: &str) -> Result<(), String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         self.targets.lock().unwrap().insert(id, session.to_string());
         *self.last.lock().unwrap() = Some(session.to_string());
-        // 音を指定しないと、Windows では notify-rust が音なし（<audio silent="true"/>）のトーストにする
-        app.notification().builder().id(id).title(title).body(body).sound("Default").show().map_err(|e| e.to_string())
+        toast(app, id, title, body, sound)
     }
+}
+
+/// 設定画面で選んだ音を聞かせる。クリックしても何も開かない（id 0 は通知元のセッションが無い）
+pub fn test<R: Runtime>(app: &AppHandle<R>, sound: &str) -> Result<(), String> {
+    toast(app, 0, "Tower", "通知の音のテスト", sound)
+}
+
+fn toast<R: Runtime>(app: &AppHandle<R>, id: i32, title: &str, body: &str, sound: &str) -> Result<(), String> {
+    let mut b = app.notification().builder().id(id).title(title).body(body);
+    // 音を指定しないと、Windows では notify-rust が音なし（<audio silent="true"/>）のトーストにする。
+    // 知らない名前も音なしになる（tauri-winrt-notification の Sound に変換できないため）
+    if !sound.is_empty() {
+        b = b.sound(sound);
+    }
+    b.show().map_err(|e| e.to_string())
 }
 
 /// 通知のクリックを `notification-open`（セッションID）としてフロントへ送る。

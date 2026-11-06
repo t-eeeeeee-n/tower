@@ -2346,7 +2346,7 @@ document.addEventListener(
 const workStart = new Map<string, number>();
 
 function notify(id: string, title: string, body: string) {
-  invoke("notify", { id, title, body }).catch(() => {});
+  invoke("notify", { id, title, body, sound: settings.notify().sound }).catch(() => {});
 }
 
 function fmtDuration(ms: number) {

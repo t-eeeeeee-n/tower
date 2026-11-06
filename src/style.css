@@ -875,6 +875,7 @@ input:not([type]):focus, input[type="number"]:focus { border-color: var(--st-run
 .look-font-hint[hidden] { display: none; }
 .look-notify { margin: 0 0 8px; }
 .look-notify + .hint { display: block; margin-bottom: 16px; }
+.look-sound { margin-bottom: 16px; }
 .look-tabs { display: flex; gap: 4px; margin: -4px 0 14px; border-bottom: 1px solid var(--line); }
 .look-tabs button {
   margin-bottom: -1px;

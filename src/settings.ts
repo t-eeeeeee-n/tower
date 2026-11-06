@@ -35,6 +35,8 @@ export interface SessionPrefs {
 interface Notify {
   waiting: boolean;
   done: boolean;
+  /** Windows に用意されている通知の音の名前（tauri-winrt-notification の Sound）。空なら鳴らさない */
+  sound: string;
 }
 interface History {
   scrollback: number;
@@ -51,7 +53,7 @@ const FONTS = ["Cascadia Mono", "Cascadia Code", "Consolas", "BIZ UDGothic", "MS
 const FALLBACK = '"Cascadia Code", "BIZ UDGothic", Consolas, "MS Gothic", monospace';
 const MIN_SIZE = 8;
 const MAX_SIZE = 32;
-const NOTIFY_DEFAULT: Notify = { waiting: true, done: true };
+const NOTIFY_DEFAULT: Notify = { waiting: true, done: true, sound: "Default" };
 const HISTORY_DEFAULT: History = { scrollback: 2000, overview: 300 };
 // Rust 側の SCROLLBACK_RANGE と合わせる
 const SCROLLBACK_MIN = 1000;
@@ -112,7 +114,7 @@ function save(key: string, value: unknown) {
 
 function loadNotify(): Notify {
   const v = { ...NOTIFY_DEFAULT, ...loadJson<Notify>("notify") };
-  return { waiting: v.waiting !== false, done: v.done !== false };
+  return { waiting: v.waiting !== false, done: v.done !== false, sound: typeof v.sound === "string" ? v.sound : NOTIFY_DEFAULT.sound };
 }
 
 function clampInt(n: number, min: number, max: number) {
@@ -186,6 +188,7 @@ export function createSettings(
   const fFontHint = $("look-font-hint");
   const fNotifyWaiting = $<HTMLInputElement>("look-notify-waiting");
   const fNotifyDone = $<HTMLInputElement>("look-notify-done");
+  const fSound = $<HTMLSelectElement>("look-sound");
   const fScrollback = $<HTMLInputElement>("look-scrollback");
   const fOverview = $<HTMLInputElement>("look-overview");
 
@@ -324,6 +327,7 @@ export function createSettings(
     fWtName.value = session.worktreeName;
     fNotifyWaiting.checked = notify.waiting;
     fNotifyDone.checked = notify.done;
+    fSound.value = notify.sound;
     fScrollback.value = String(history.scrollback);
     fOverview.value = String(history.overview);
     checkFont();
@@ -392,6 +396,10 @@ export function createSettings(
   fLimits.onchange = () => update({ limits: fLimits.checked });
   fNotifyWaiting.onchange = () => (notify = { ...notify, waiting: fNotifyWaiting.checked });
   fNotifyDone.onchange = () => (notify = { ...notify, done: fNotifyDone.checked });
+  fSound.onchange = () => {
+    notify = { ...notify, sound: fSound.value };
+    if (notify.sound) invoke("notify_test", { sound: notify.sound }).catch(() => {});
+  };
   // 打っている途中の値（「5」など）で丸めないよう、確定したときに範囲へ収める
   for (const f of [fScrollback, fOverview]) {
     f.onchange = () => {

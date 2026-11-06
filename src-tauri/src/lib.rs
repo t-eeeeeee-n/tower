@@ -186,8 +186,13 @@ fn remove_worktree(state: State<'_, App>, cwd: String, delete_branch: bool) -> R
 }
 
 #[tauri::command]
-fn notify(app: AppHandle, notifier: State<'_, notify::Notifier>, id: String, title: String, body: String) -> Result<(), String> {
-    notifier.show(&app, &id, &title, &body)
+fn notify(app: AppHandle, notifier: State<'_, notify::Notifier>, id: String, title: String, body: String, sound: String) -> Result<(), String> {
+    notifier.show(&app, &id, &title, &body, &sound)
+}
+
+#[tauri::command]
+fn notify_test(app: AppHandle, sound: String) -> Result<(), String> {
+    notify::test(&app, &sound)
 }
 
 #[tauri::command]
@@ -445,6 +450,7 @@ pub fn run() {
             git_diff,
             trust_folder,
             notify,
+            notify_test,
             attach_session,
             peek_sessions,
             read_transcript,
