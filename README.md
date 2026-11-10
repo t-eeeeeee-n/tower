@@ -37,7 +37,7 @@ npm run tauri:dev
 npm run tauri build
 ```
 
-`src-tauri/target/release/bundle/nsis/` にインストーラ（.exe）、`bundle/msi/` に MSI ができます。
+`src-tauri/target/release/bundle/nsis/` にインストーラ（.exe）ができます。MSI は、動いている Tower を閉じて上書きする処理（`src-tauri/windows/installer-hooks.nsh`）を持てないので作りません。
 インストールせずに使うなら `src-tauri/target/release/tower.exe` を直接起動しても動きます。
 
 ### リリース（GitHub Actions）

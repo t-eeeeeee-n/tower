@@ -51,7 +51,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Tower ${{ github.ref_name }}
           releaseBody: |
-            Windows 用のインストーラです。`Tower_*_x64-setup.exe`（NSIS）か `Tower_*_x64_en-US.msi` を使ってください。
+            Windows 用のインストーラです。`Tower_*_x64-setup.exe` を使ってください。
             コード署名はしていないので、初回は Windows の SmartScreen に警告されます（「詳細情報」→「実行」で起動できます）。
           generateReleaseNotes: true
           releaseDraft: false
