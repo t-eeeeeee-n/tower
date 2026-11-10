@@ -129,6 +129,10 @@ async function sendPrompt(id: string | null, text: string) {
   const status = id ? sessions.get(id)?.status : undefined;
   if (!id || (status !== "idle" && status !== "running")) throw new Error("指示待ちか作業中のときだけ送れます");
   let body = text.replace(/\x1b/g, "").replace(/\r?\n/g, "\r");
+  const agent = sessions.get(id)?.agent;
+  // 起動したばかりで入力欄がまだ無いうちに書くと、シェルや起動中のエージェントに読まれて消える。
+  // 状態は画面が止まっただけで指示待ちになるので、入力欄が出るまで待つ
+  if (agent === "codex" || agent === "claude") await waitForInput(id, agent);
   // 「!」で始めるとシェルのコマンドとして実行する。エージェントは打った「!」でシェルのモードに切り替わり、
   // 貼り付けた「!」では切り替わらないので、「!」だけを打ってから残りを貼り付ける
   if (body.startsWith("!") && sessions.get(id)?.agent === "claude") {
@@ -138,30 +142,50 @@ async function sendPrompt(id: string | null, text: string) {
   }
   await invoke("write_session", { id, data: `\x1b[200~${body}\x1b[201~` });
   // 貼り付けと同じ書き込みに Enter を続けると、貼り付けの一部として扱われることがある
-  const agent = sessions.get(id)?.agent;
   await sleep(agent === "codex" ? CODEX_PASTE_MS : 80);
   await invoke("write_session", { id, data: "\r" });
   // 貼り付けのすぐ後の Enter は、間を空けても改行として入れられたり、読まれずに消えたりすることがある
-  // （Codex で、また起動したばかりの Claude Code で見た）。入力欄に残っていたらもう一度押す
+  // （Codex で、また起動したばかりの Claude Code で見た。起動直後は数秒続けて読まれないこともある）。入力欄に残っていたら押し直す
   if (agent === "codex" || agent === "claude") {
-    await sleep(SUBMIT_CHECK_MS);
-    if (sessions.get(id)?.status === "idle" && stillTyped(await screenText(id), agent, body)) await write(id, "\r");
+    for (let i = 0; i < SUBMIT_RETRIES; i++) {
+      await sleep(SUBMIT_CHECK_MS);
+      if (sessions.get(id)?.status !== "idle" || !stillTyped(await screenText(id), agent, body)) break;
+      await write(id, "\r");
+    }
   }
 }
+const SUBMIT_RETRIES = 10;
 const CODEX_PASTE_MS = 250;
 const SUBMIT_CHECK_MS = 900;
+const INPUT_WAIT_MS = 30_000;
+
+// 待っても入力欄が出なければ送らない。フォルダの信頼の確認などが出ていると、送る Enter がそれに答えてしまう
+async function waitForInput(id: string, agent: string) {
+  const until = Date.now() + INPUT_WAIT_MS;
+  while (Date.now() < until) {
+    if (sessions.get(id)?.status === "waiting") break;
+    if (inputLine(await screenText(id), agent) !== undefined) return;
+    await sleep(500);
+  }
+  throw new Error("入力欄が出ていないので送れませんでした。ターミナルの表示で確かめてください");
+}
+
+// Codex の入力欄は「›」で始まる最後の行、Claude Code の入力欄は区切りの線のすぐ下の「❯」の行。
+// 確認の選択肢（「› 1. Yes, continue」）も同じ印で始まるので除く
+function inputLine(lines: string[], agent: string) {
+  const rule = (t?: string) => /^\s*[─━]{3,}\s*$/.test(t ?? "");
+  const choice = (l: string) => /^\s*[›❯]\s*\d+\./.test(l);
+  return agent === "codex"
+    ? lines.filter((l) => l.trim().startsWith("›") && !choice(l)).pop()
+    : lines.filter((l, i) => /^\s*❯/.test(l) && !choice(l) && rule(lines[i - 1])).pop();
+}
 
 // エージェントの入力欄に、送ったはずの文がまだ残っているか。
-// Codex の入力欄は「›」で始まる最後の行、Claude Code の入力欄は区切りの線のすぐ下の「❯」の行。
 // Claude Code は長い貼り付けを「[Pasted text #1 +3 lines]」と縮めて出す
 function stillTyped(lines: string[], agent: string, body: string) {
   const head = squash(body.split("\r")[0]).slice(0, 20);
   if (!head) return false;
-  const rule = (t?: string) => /^\s*[─━]{3,}\s*$/.test(t ?? "");
-  const input =
-    agent === "codex"
-      ? lines.filter((l) => l.trim().startsWith("›")).pop()
-      : lines.filter((l, i) => /^\s*❯/.test(l) && rule(lines[i - 1])).pop();
+  const input = inputLine(lines, agent);
   if (!input) return false;
   return squash(input).includes(head) || (agent === "claude" && /\[Pasted text #\d+/.test(input));
 }
@@ -197,6 +221,7 @@ const log = createTranscriptPanel({
     if (!attachedId) return;
     // 答えが画面に出るまでの間に、同じ選択肢を出し直さない
     promptQuietUntil = Date.now() + PROMPT_QUIET_MS;
+    answeredAt = Date.now();
     writeKeys(attachedId, key);
   },
   answerInTerminal: () => {
@@ -430,6 +455,9 @@ function parseTabs(spans: Span[][]): PromptChoice["tabs"] {
 let promptTimer = 0;
 let promptQuietUntil = 0;
 const PROMPT_TRIES = 3;
+// 答えると選択肢は消えるが、入力待ちが解けるまで少しかかる。その間に選択肢が無いからとターミナルへ切り替えない
+let answeredAt = 0;
+const ANSWER_GRACE_MS = 10_000;
 const PROMPT_QUIET_MS = 2000;
 function watchPrompt(id: string) {
   clearInterval(promptTimer);
@@ -448,7 +476,7 @@ function watchPrompt(id: string) {
     if (p) {
       termUntilRunning = false;
       log.showPrompt(p);
-    } else if (++tries >= PROMPT_TRIES && !termUntilRunning) {
+    } else if (Date.now() - answeredAt > ANSWER_GRACE_MS && ++tries >= PROMPT_TRIES && !termUntilRunning) {
       termUntilRunning = true;
       log.showPrompt(null);
     }
