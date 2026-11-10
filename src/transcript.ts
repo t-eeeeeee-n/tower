@@ -204,6 +204,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
 const PLACEHOLDER: Record<string, string> = {
   idle: "指示を入力（Enter で送信、Shift+Enter で改行）",
   running: "作業中です。送ると、作業の区切りでエージェントに渡ります（Esc で中断）",
+  awaiting: "裏で動かしたサブエージェントなどの結果を待っています。送るとすぐに渡ります",
   waiting: "確認や選択肢に答えるのを待っています（上のボタンか、ターミナルで答えます）",
 };
 
@@ -311,7 +312,31 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   // 上の端までさかのぼったら、続けて前の会話を読み足す。読み足すたびに全体を描き直すので、
   // 読み足したあとも上の端にいるだけでは続けて読まず、一度下へ離れてから戻ったときに読む
   let olderArmed = true;
+  // 送った直後に作業中の行（一覧のカード）や入力欄の高さが変わって欄が縮むと、いちばん下の発言が隠れる。
+  // 縮む前にいちばん下を見ていたら、下に付いたままにする
+  let pinned = true;
+  // さかのぼって読んでいる間だけ、いちばん下へ戻るボタンを会話の右下に出す。
+  // 会話の欄の中身は描き直しで入れ替わるので、欄のすぐ後ろの高さ 0 の枠に置いて、欄の下の端に重ねる
+  const toBottomBox = el("div", "lg-to-bottom-box");
+  const toBottom = el("button", "lg-to-bottom", "↓ 最新へ");
+  toBottom.type = "button";
+  toBottom.title = "いちばん下（最新）へ";
+  toBottom.hidden = true;
+  toBottom.onclick = () => {
+    body.scrollTop = body.scrollHeight;
+    input.focus({ preventScroll: true });
+  };
+  toBottomBox.append(toBottom);
+  body.after(toBottomBox);
+  const TO_BOTTOM_PX = 200;
+  const showToBottom = () => (toBottom.hidden = body.scrollHeight - body.scrollTop - body.clientHeight < TO_BOTTOM_PX);
+  new ResizeObserver(() => {
+    if (pinned) body.scrollTop = body.scrollHeight;
+    showToBottom();
+  }).observe(body);
   body.addEventListener("scroll", () => {
+    pinned = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    showToBottom();
     if (body.scrollTop >= 200) olderArmed = true;
     else if (body.scrollTop < 40 && more && olderArmed && !loading) {
       olderArmed = false;
@@ -390,8 +415,19 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         n.append(bubble);
         return n;
       }
-      case "command":
-        return el("div", "lg-command", e.text);
+      case "command": {
+        if (e.tool !== "Skill") return el("div", "lg-command", e.text);
+        // 打ったスキルは、直前の「/名前」の行をスキルの印に変える（その行が表示の範囲外なら印だけを出す）
+        const last = body.lastElementChild;
+        // プラグインのスキルは「/プラグイン:名前」で打つ
+        const word = last?.classList.contains("lg-command") ? (last.textContent ?? "").split(" ")[0] : "";
+        const typed = word === `/${e.text}` || word.endsWith(`:${e.text}`) ? last : null;
+        const n = el("div", "lg-command lg-skill");
+        n.append(el("span", "lg-skill-tag", "スキル"), el("span", "lg-skill-name", typed?.textContent ?? `/${e.text}`));
+        if (!typed) return n;
+        typed.replaceWith(n);
+        return null;
+      }
       case "assistant": {
         const n = el("div", "lg-assistant md-preview");
         if (e.at) n.dataset.at = e.at;
@@ -400,7 +436,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       }
       case "tool": {
         // ツールの呼び出しは畳まず、時系列の線の上に 1 行ずつ並べる。押すと結果を開く
-        const li = el("li", "lg-step");
+        const li = el("li", e.tool === "Skill" ? "lg-step lg-skill" : "lg-step");
         const d = el("details");
         const s = el("summary");
         s.append(el("span", "lg-step-kind", stepKind(e.tool)), el("span", "lg-step-target", shortTarget(e.text)), el("span", "lg-step-out"));
@@ -709,18 +745,27 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     });
   }
 
+  // 畳んでも使ったスキルが分かるよう、畳んだ行の頭にスキルの名前を出す
+  function workSummary(work: HTMLElement, text: string) {
+    const names = [...new Set([...work.querySelectorAll(".lg-step.lg-skill .lg-step-target")].map((t) => t.textContent ?? ""))];
+    const summary = work.querySelector(":scope > summary") ?? el("summary");
+    summary.replaceChildren(...names.flatMap((n) => [el("span", "lg-skill-tag", "スキル"), el("span", "lg-skill-name", n)]), text);
+    summary.classList.toggle("lg-skill-summary", names.length > 0);
+    return summary;
+  }
+
   function foldSteps(steps: HTMLElement) {
     const kinds = new Map<string, number>();
-    for (const k of steps.querySelectorAll(".lg-step-kind")) kinds.set(k.textContent ?? "", (kinds.get(k.textContent ?? "") ?? 0) + 1);
+    for (const k of steps.querySelectorAll(".lg-step:not(.lg-skill) .lg-step-kind")) kinds.set(k.textContent ?? "", (kinds.get(k.textContent ?? "") ?? 0) + 1);
     const failed = steps.querySelectorAll(".lg-step.lg-error").length;
     const work = el("details", "lg-work");
-    const summary = el("summary", "", [...[...kinds].map(([k, n]) => `${k} ${n}`), failed ? `失敗 ${failed}` : ""].filter(Boolean).join(" · "));
     steps.before(work);
-    work.append(summary, steps);
+    work.append(steps);
+    work.prepend(workSummary(work, [...[...kinds].map(([k, n]) => `${k} ${n}`), failed ? `失敗 ${failed}` : ""].filter(Boolean).join(" · ")));
   }
 
   function foldAll(seg: HTMLElement[], lastWork: number, all: HTMLElement[]) {
-    const keep = (k: HTMLElement) => k.classList.contains("lg-user") || k.classList.contains("lg-who") || k.classList.contains("lg-work");
+    const keep = (k: HTMLElement) => ["lg-user", "lg-who", "lg-work", "lg-skill"].some((c) => k.classList.contains(c));
     const moving = seg.slice(0, lastWork + 1).filter((k) => !keep(k));
     if (!moving.length) return;
     let work = seg.find((k) => k.classList.contains("lg-work")) as HTMLDetailsElement | undefined;
@@ -737,7 +782,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       .map((k) => Date.parse(k.dataset.at ?? ""))
       .filter(Number.isFinite);
     const took = times.length > 1 ? fmtDuration(Math.max(...times) - Math.min(...times)) : "";
-    work.querySelector("summary")!.textContent = [`作業 ${steps} ステップ`, failed ? `失敗 ${failed}` : "", took].filter(Boolean).join(" · ");
+    workSummary(work, [`作業 ${steps} ステップ`, failed ? `失敗 ${failed}` : "", took].filter(Boolean).join(" · "));
   }
 
   /** 畳んだものを全部開いて元の並びに戻す（畳み方を変えたとき） */
@@ -862,7 +907,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     sendBtn.disabled = away || !canSend() || sending || !input.value.trim();
   }
 
-  const canSend = () => status === "idle" || status === "running";
+  const canSend = () => status === "idle" || status === "running" || status === "awaiting";
 
   // エージェントが入力欄に薄く出している次の指示の候補（Claude Code の返事のあと）。入力欄が空のときに薄く出し、Tab か → で入れる
   let suggestion: string | null = null;

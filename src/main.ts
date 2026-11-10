@@ -17,7 +17,7 @@ import { createTemplates } from "./templates";
 import { createSettings } from "./settings";
 import { createMarks, MARK_COLORS, type MarkColor } from "./marks";
 
-type Status = "shell" | "starting" | "idle" | "running" | "waiting" | "exited";
+type Status = "shell" | "starting" | "idle" | "running" | "awaiting" | "waiting" | "exited";
 type Agent = "shell" | "claude" | "codex" | "copilot" | "antigravity";
 
 interface StatusInfo {
@@ -54,7 +54,6 @@ interface WorktreeState {
 interface Session extends SessionInfo {
   bytes?: number;
   /** エージェントが裏で動かしていて、まだ終わっていないシェルの数 */
-  background?: number;
 }
 /** 画面の 1 行のうち、同じ色と飾りが続く文字のまとまり（session.rs の Span） */
 interface Span {
@@ -100,15 +99,13 @@ const STATUS_LABEL: Record<Status, string> = {
   starting: "起動中",
   idle: "完了",
   running: "作業中",
+  awaiting: "結果待ち",
   waiting: "入力待ち",
   exited: "終了",
 };
 
-// 裏のシェルを待って再開するのか（デプロイなど）、置いたままなのか（サーバーなど）は記録から分からないので、
-// 「完了」は変えずに、動いているという事実だけを添える
 function statusLabel(s: Session) {
-  const n = s.status === "idle" ? (s.background ?? 0) : 0;
-  return n ? `${STATUS_LABEL.idle}・裏で ${n} 件実行中` : STATUS_LABEL[s.status];
+  return STATUS_LABEL[s.status];
 }
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -127,7 +124,7 @@ const files = createFilesPanel({
 // 終わりの印（ESC[201~）が中に混ざると後ろが打ち込んだ文字になるので、ESC は取り除く
 async function sendPrompt(id: string | null, text: string) {
   const status = id ? sessions.get(id)?.status : undefined;
-  if (!id || (status !== "idle" && status !== "running")) throw new Error("指示待ちか作業中のときだけ送れます");
+  if (!id || (status !== "idle" && status !== "running" && status !== "awaiting")) throw new Error("指示待ちか作業中のときだけ送れます");
   let body = text.replace(/\x1b/g, "").replace(/\r?\n/g, "\r");
   const agent = sessions.get(id)?.agent;
   // 起動したばかりで入力欄がまだ無いうちに書くと、シェルや起動中のエージェントに読まれて消える。
@@ -149,7 +146,8 @@ async function sendPrompt(id: string | null, text: string) {
   if (agent === "codex" || agent === "claude") {
     for (let i = 0; i < SUBMIT_RETRIES; i++) {
       await sleep(SUBMIT_CHECK_MS);
-      if (sessions.get(id)?.status !== "idle" || !stillTyped(await screenText(id), agent, body)) break;
+      const st = sessions.get(id)?.status;
+        if ((st !== "idle" && st !== "awaiting") || !stillTyped(await screenText(id), agent, body)) break;
       await write(id, "\r");
     }
   }
@@ -484,6 +482,39 @@ function watchPrompt(id: string) {
   };
   check();
   promptTimer = window.setInterval(check, 1000);
+}
+
+// 一覧のカードも、入力待ちの間は会話の表示のまま選択肢をボタンで出す（会話の表示の watchPrompt と同じ）。
+// カードは画面を定期的に取り込んでいるので、取り込むたびに読み直す。読み取れないまま続いたら画面の表示にする
+interface CardPrompt {
+  quietUntil: number;
+  answeredAt: number;
+  missSince: number;
+  term: boolean;
+}
+const cardPrompts = new Map<string, CardPrompt>();
+const PROMPT_MISS_MS = 3000;
+
+function cardPromptShown(id: string, conv: TranscriptView, lines: Span[][]): boolean {
+  let st = cardPrompts.get(id);
+  if (!st) cardPrompts.set(id, (st = { quietUntil: 0, answeredAt: 0, missSince: 0, term: false }));
+  if (st.term) return false;
+  const now = Date.now();
+  if (now < st.quietUntil) return true;
+  const recent = lines.slice(-40);
+  const p = parsePrompt(recent.map((l) => l.map((x) => x.t).join("")));
+  if (p) {
+    p.tabs = parseTabs(recent);
+    st.missSince = 0;
+    conv.showPrompt(p);
+    return true;
+  }
+  conv.showPrompt(null);
+  if (now - st.answeredAt < ANSWER_GRACE_MS) return true;
+  st.missSince ||= now;
+  if (now - st.missSince < PROMPT_MISS_MS) return true;
+  st.term = true;
+  return false;
 }
 
 // 前のメッセージに戻る画面を開く。Claude Code は /rewind で開く（Esc 2 回と同じ画面）。
@@ -1410,8 +1441,22 @@ function makeCardConversation(id: string) {
     rewind: () => showCardScreen(() => rewindIn(id)),
     findFiles: (query) => invoke<string[]>("find_files", { id, query }),
     sendKeys: (data) => writeKeys(id, data),
-    answer: (key) => writeKeys(id, key),
-    answerInTerminal: () => {},
+    answer: (key) => {
+      const st = cardPrompts.get(id);
+      if (st) {
+        st.quietUntil = Date.now() + PROMPT_QUIET_MS;
+        st.answeredAt = Date.now();
+      }
+      writeKeys(id, key);
+    },
+    answerInTerminal: () => {
+      const st = cardPrompts.get(id);
+      if (st) st.term = true;
+      tv.showPrompt(null);
+      const card = cards.get(id);
+      if (card) updateCard(card, sessions.get(id)!);
+      focusCard(id);
+    },
     rewindTo: async (steps, text) => {
       const p = await rewindTo(id, steps, text);
       if (!p) showCardScreen(() => {});
@@ -1644,12 +1689,18 @@ function updateCard(card: HTMLElement, s: Session) {
 
   const exited = s.status === "exited";
   const conv = cardViews.get(s.id);
-  const conversing = !!conv && s.status !== "waiting" && !slashCards.has(s.id);
+  let conversing = !!conv && !slashCards.has(s.id);
+  if (conv && s.status === "waiting") {
+    if (conversing) conversing = cardPromptShown(s.id, conv, lines);
+  } else if (conv && cardPrompts.delete(s.id)) {
+    conv.showPrompt(null);
+  }
   if (conv) {
     conv.setStatus(s.status);
     conv.show(conversing);
     showActivity(q(".c-activity"), s, conversing ? lines : null);
-    showFooter(q(".c-footer"), conversing ? (peek?.footer ?? []) : []);
+    // 入力待ちの画面の下の端は選択肢と操作の案内で、ボタンと同じことを繰り返すうえカードからはみ出す
+    showFooter(q(".c-footer"), conversing && s.status !== "waiting" ? (peek?.footer ?? []) : []);
   }
   tail.hidden = conversing;
   // 会話の表示に切り替わったあとも画面用の欄にフォーカスが残っていると、打った文字が見えないままセッションに届く
@@ -1664,6 +1715,41 @@ function updateCard(card: HTMLElement, s: Session) {
   origin.hidden = !origin.textContent;
   origin.title = head?.origin ? `worktree の元のフォルダ: ${head.origin.root}` : "";
   q(".c-mem").textContent = fmtBytes(s.bytes);
+}
+
+// 一覧に一度に並べる数。自動は窓の幅に合わせる
+const OV_LAYOUTS = ["auto", "2", "4", "6"];
+function applyOverviewLayout(layout: string) {
+  const grid = $("ov-grid");
+  if (layout === "auto") delete grid.dataset.layout;
+  else grid.dataset.layout = layout;
+  for (const b of $("ov-layout").querySelectorAll<HTMLButtonElement>("button")) {
+    b.setAttribute("aria-pressed", String(b.dataset.layout === layout));
+  }
+}
+{
+  let saved = "auto";
+  try {
+    saved = localStorage.getItem("ovLayout") ?? "auto";
+  } catch {
+    /* 読めなければ自動 */
+  }
+  applyOverviewLayout(OV_LAYOUTS.includes(saved) ? saved : "auto");
+  $("ov-layout").onclick = (ev) => {
+    const layout = (ev.target as HTMLElement).closest<HTMLButtonElement>("button")?.dataset.layout;
+    if (!layout) return;
+    // 幅が変わると折り返しが変わり、いちばん下を見ていた画面がさかのぼって読んでいるとみなされて止まるので、下に付け直す
+    const tails = [...$("ov-grid").querySelectorAll<HTMLElement>(".c-tail")];
+    const following = tails.filter((t) => t.scrollHeight - t.scrollTop - t.clientHeight < 16);
+    applyOverviewLayout(layout);
+    for (const t of following) t.scrollTop = t.scrollHeight;
+    fitCards();
+    try {
+      localStorage.setItem("ovLayout", layout);
+    } catch {
+      /* 保存できなくても切り替えは効く */
+    }
+  };
 }
 
 function renderOverview(waitingCount: number, total: number) {
@@ -2403,9 +2489,9 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
   // 起動中は hook が届くまで画面の変化から作業中と推測するので、作業の始まりは指示待ちからのときだけ数える
   if (payload.status === "running" && s.status === "idle") workStart.set(s.id, payload.since);
   const started = workStart.get(s.id);
-  const finished = started !== undefined && payload.status === "idle" && (s.status === "running" || s.status === "waiting");
+  const finished = started !== undefined && payload.status === "idle" && (s.status === "running" || s.status === "awaiting" || s.status === "waiting");
   const ranFor = finished ? payload.since - started : 0;
-  if (payload.status !== "running" && payload.status !== "waiting") workStart.delete(s.id);
+  if (payload.status !== "running" && payload.status !== "awaiting" && payload.status !== "waiting") workStart.delete(s.id);
   Object.assign(s, { status: payload.status, since: payload.since, message: payload.message });
   // また動き出したり入力待ちになったりしたら、終わった印は外す（入力待ちは別の印で目立たせる）
   if (payload.status !== "idle") unseen.delete(s.id);
@@ -2431,8 +2517,7 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
     appWindow.requestUserAttention(UserAttentionType.Informational).catch(() => {});
     notify(s.id, `${s.name}: 入力待ち`, s.message ?? "入力を待っています");
   } else if (settings.notify().done) {
-    const rest = s.background ? `。裏で ${s.background} 件のシェルが実行中です` : "";
-    notify(s.id, `${s.name}: 完了`, `作業が終わりました（${fmtDuration(ranFor)}）${rest}`);
+    notify(s.id, `${s.name}: 完了`, `作業が終わりました（${fmtDuration(ranFor)}）`);
   }
 });
 
@@ -2440,10 +2525,10 @@ listen<string>("notification-open", ({ payload }) => {
   if (sessions.has(payload)) activate(payload);
 });
 
-listen<{ id: string; bytes: number; background: number }[]>("session-usage", ({ payload }) => {
+listen<{ id: string; bytes: number }[]>("session-usage", ({ payload }) => {
   for (const u of payload) {
     const s = sessions.get(u.id);
-    if (s) Object.assign(s, { bytes: u.bytes, background: u.background });
+    if (s) Object.assign(s, { bytes: u.bytes });
   }
   render();
 });

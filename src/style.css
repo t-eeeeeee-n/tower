@@ -10,6 +10,7 @@
   --faint: #5d6879;
 
   --st-running: #5fb3c8;
+  --st-awaiting: #8ea2d8;
   --st-waiting: #e9b04b;
   --st-idle: #8cc48a;
   --st-starting: #a99be0;
@@ -510,6 +511,11 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .log-compose { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px var(--log-gutter) 12px; border-top: 1px solid var(--line); position: relative; }
 /* 予定（ToDo）。まだ終わっていない予定があるとき、入力欄の上に出す */
 /* 作業中に送って、エージェントが受け取るのを待っている指示 */
+.lg-to-bottom-box { position: relative; flex: none; height: 0; z-index: 5; }
+.lg-to-bottom { position: absolute; right: 16px; bottom: 10px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--raise); color: var(--text); font-size: 12px; box-shadow: 0 2px 8px rgb(0 0 0 / 0.3); cursor: pointer; }
+.lg-to-bottom:hover { background: var(--raise-2); }
+.lg-to-bottom[hidden] { display: none; }
+.c-conv .lg-to-bottom { right: 12px; bottom: 6px; padding: 2px 8px; font-size: 11px; }
 .lg-queue { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-height: 132px; overflow: auto; padding: 6px var(--log-gutter); }
 .lg-queue[hidden] { display: none; }
 .lg-queued { display: flex; align-items: baseline; gap: 8px; max-width: 80%; padding: 6px 12px; border: 1px dashed var(--line); border-radius: 14px; color: var(--muted); font-size: 13px; }
@@ -601,6 +607,13 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .lg-step.lg-error .lg-step-out, .lg-step.lg-error .lg-step-kind { color: var(--danger); }
 [data-status="running"] .lg-step.lg-pending .lg-step-out { color: var(--st-running); }
 .lg-step .lg-result-images { margin: 4px 6px 6px; }
+/* スキルは、ほかのツールやコマンドに埋もれないよう色を付ける（ターミナルでも目立つ表示になっている） */
+.lg-step.lg-skill .lg-step-kind, .lg-skill-tag { color: var(--mark-purple); font-weight: 600; }
+.lg-step.lg-skill .lg-step-target { font-weight: 600; }
+.lg-command.lg-skill { display: flex; align-items: baseline; gap: 8px; color: var(--text); }
+.lg-skill-tag { padding: 0 6px; border: 1px solid currentColor; border-radius: 4px; font-size: 11px; }
+.lg-work > summary .lg-skill-name { color: var(--text); }
+.lg-skill-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lg-result { margin: 2px 6px 6px; padding: 6px 8px; max-height: 240px; overflow: auto; background: var(--panel); border-radius: 4px; color: var(--muted); font: 11.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 pre.lg-result.lg-error { color: var(--danger); }
 
@@ -703,6 +716,15 @@ pre.lg-result.lg-error { color: var(--danger); }
 /* 高さを固定して、中身が伸び縮みしてもカードの並びが動かないようにする（動くとスクロールしたい場所がずれる）。
    2 段がちょうど一覧に収まる高さにする。窓が低いときは、読める高さを保ってスクロールさせる */
 .card { height: max(260px, calc((100cqh - 10px) / 2)); }
+.ov-grid[data-layout="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ov-grid[data-layout="2"] .card { height: max(260px, 100cqh); }
+.ov-grid[data-layout="4"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ov-grid[data-layout="6"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.ov-layout { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.ov-layout button { min-width: 30px; padding: 2px 9px; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; cursor: pointer; }
+.ov-layout button + button { border-left: 1px solid var(--line); }
+.ov-layout button:hover { background: var(--raise); color: var(--text); }
+.ov-layout button[aria-pressed="true"] { background: var(--raise-2); color: var(--text); }
 .card:hover { border-color: var(--raise-2); }
 .card[data-status="waiting"] { border-color: var(--st-waiting); }
 .card[data-status="exited"] { opacity: 0.55; }
@@ -732,6 +754,9 @@ pre.lg-result.lg-error { color: var(--danger); }
   cursor: auto;
 }
 .c-tail[hidden], .c-conv[hidden] { display: none; }
+/* カードの中をスクロールして端に着いても、一覧全体をスクロールさせない（中を読んでいるうちに一覧が流れるため）。
+   中身が短くてスクロールしない欄の上では、これまでどおり一覧がスクロールする */
+.card * { overscroll-behavior: contain; }
 .c-conv { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; margin: 0 8px; background: var(--ink); border-radius: 4px; cursor: auto; }
 .c-log.log-body { padding: 8px 4px 10px; font-size: 12.5px; }
 .c-log .lg-user { margin: 8px 6px 4px 24px; }
@@ -989,6 +1014,7 @@ textarea:focus { border-color: var(--st-running); outline: none; }
 
 /* 状態ごとの色 */
 [data-status="running"] { --st: var(--st-running); }
+[data-status="awaiting"] { --st: var(--st-awaiting); }
 [data-status="waiting"] { --st: var(--st-waiting); }
 [data-status="idle"] { --st: var(--st-idle); }
 [data-status="starting"] { --st: var(--st-starting); }

@@ -26,6 +26,8 @@ pub enum Status {
     Idle,
     /// 作業中
     Running,
+    /// メインの応答は終わったが、裏で動かしたサブエージェントなどの結果を待っている（終わると続きを始める）
+    Awaiting,
     /// 承認や入力を待っている
     Waiting,
     /// プロセス終了
@@ -597,10 +599,14 @@ impl Manager {
         session.answered.store(false, Ordering::Relaxed);
         let next = match event {
             "session_start" | "stop" => Status::Idle,
-            "user_prompt_submit" | "pre_tool_use" | "subagents_running" => Status::Running,
+            "user_prompt_submit" | "pre_tool_use" => Status::Running,
+            "awaiting" => Status::Awaiting,
+            // フォアグラウンドのサブエージェントなら、メインも作業中のまま
+            "subagent_tool" if session.state.lock().unwrap().status == Status::Awaiting => return,
+            "subagent_tool" => Status::Running,
             "notification" => Status::Waiting,
             // 許可の確認を待っている間にも届くことがあるので、入力待ちは指示待ちに下げない
-            "idle_prompt" if session.state.lock().unwrap().status == Status::Running => Status::Idle,
+            "idle_prompt" if matches!(session.state.lock().unwrap().status, Status::Running | Status::Awaiting) => Status::Idle,
             "session_end" => Status::Shell,
             _ => return,
         };

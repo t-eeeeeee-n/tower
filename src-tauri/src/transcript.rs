@@ -574,7 +574,7 @@ fn current_branch(lines: Vec<Value>) -> Vec<Value> {
 
 fn entries_of(v: &Value) -> Vec<Entry> {
     if v.get("isMeta").and_then(Value::as_bool).unwrap_or(false) {
-        return Vec::new();
+        return typed_skill(v).into_iter().collect();
     }
     // 文脈が足りなくなったときの要約（compact）は人の発言として残るが、Claude Code が書いたものなので区切りだけを出す
     if v.get("isCompactSummary").and_then(Value::as_bool).unwrap_or(false) {
@@ -706,6 +706,24 @@ fn codex_entries(p: &Value) -> Vec<Entry> {
         }
         _ => Vec::new(),
     }
+}
+
+/// 「/名前」で打ったスキルは、記録ではほかのスラッシュコマンドと同じ形で残り、続けて Claude Code がスキルの中身を
+/// 「Base directory for this skill: <フォルダ>」で始まる isMeta の行として差し込む。この行で、前のコマンドがスキルだと分かる。
+/// エージェントが Skill ツールで呼んだときも同じ行が入るが、sourceToolUseID が付き、ツールの行で分かるので出さない
+fn typed_skill(v: &Value) -> Option<Entry> {
+    const PREFIX: &str = "Base directory for this skill:";
+    if v.get("sourceToolUseID").is_some() {
+        return None;
+    }
+    let text = match v.pointer("/message/content")? {
+        Value::String(s) => s.as_str(),
+        Value::Array(blocks) => blocks.first()?.get("text")?.as_str()?,
+        _ => return None,
+    };
+    let dir = text.strip_prefix(PREFIX)?.lines().next()?.trim();
+    let name = dir.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().filter(|n| !n.is_empty())?;
+    Some(Entry { tool: Some("Skill".into()), ..entry(Kind::Command, name.to_string()) })
 }
 
 fn entry(kind: Kind, text: String) -> Entry {
@@ -910,6 +928,17 @@ mod tests {
         assert_eq!(kinds(json!({"type":"user","message":{"content":"直して"}})), vec![(Kind::User, "直して".into())]);
         assert!(kinds(json!({"type":"user","message":{"content":"<local-command-stdout></local-command-stdout>"}})).is_empty());
         assert!(kinds(json!({"type":"user","isMeta":true,"message":{"content":"meta"}})).is_empty());
+        // 打ったスキルの中身の行は、スキルの名前だけにする。Skill ツールで呼んだもの（sourceToolUseID 付き）は出さない
+        let skill = |src: Option<&str>| {
+            let mut v = json!({"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"Base directory for this skill: C:\\Users\\a\\.claude\\skills\\handoff\n\nWrite a handoff"}]}});
+            if let Some(s) = src {
+                v["sourceToolUseID"] = json!(s);
+            }
+            entries_of(&v)
+        };
+        let typed = skill(None);
+        assert_eq!((typed.len(), typed[0].text.as_str(), typed[0].tool.as_deref()), (1, "handoff", Some("Skill")));
+        assert!(skill(Some("toolu_1")).is_empty());
         // 作業中に送って区切りで渡された指示は出し、裏のシェルの知らせは出さない
         let queued = |prompt: &str, kind: &str| json!({"type":"attachment","attachment":{"type":"queued_command","prompt":prompt,"commandMode":"prompt","origin":{"kind":kind}}});
         assert_eq!(kinds(queued("こっちも直して", "human")), vec![(Kind::User, "こっちも直して".into())]);

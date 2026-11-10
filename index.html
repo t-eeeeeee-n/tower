@@ -82,7 +82,15 @@
         <section id="overview" class="overview" hidden>
           <header class="main-head">
             <div class="main-title"><span>一覧</span></div>
-            <div id="ov-sum" class="ov-sum"></div>
+            <div class="main-actions">
+              <div id="ov-sum" class="ov-sum"></div>
+              <div id="ov-layout" class="ov-layout" role="group" aria-label="一度に並べるセッションの数">
+                <button type="button" data-layout="auto" title="窓の幅に合わせて並べる">自動</button>
+                <button type="button" data-layout="2" title="2 つを横に並べる">2</button>
+                <button type="button" data-layout="4" title="2 列 × 2 段で並べる">4</button>
+                <button type="button" data-layout="6" title="3 列 × 2 段で並べる">6</button>
+              </div>
+            </div>
           </header>
           <div id="ov-grid" class="ov-grid"></div>
         </section>

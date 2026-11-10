@@ -37,7 +37,7 @@ pub struct Endpoint {
 /// bash で受信口に POST するコマンド。
 /// hook の入力（コマンドやファイル内容を含む）は送らない。例外は入力待ちのメッセージ表示に使う notification と、
 /// 会話の記録ファイルの場所を知るための Claude Code と Codex の SessionStart（中身は ID・パス・起動の種類・モデルなど）と、
-/// バックグラウンドの sub agent が動いているかを知るための Claude Code の Stop（background_tasks 以外は Tower で捨てる）。
+/// 裏で動かしたものの結果を待っているかを知るための Claude Code の Stop（background_tasks と session_crons 以外は Tower で捨てる）。
 /// Tower が落ちていてもエージェントの動作は止めない（--max-time と || true）。
 fn post_bash(event: &str, with_body: bool) -> String {
     let (drain, body) = if with_body { ("", "--data-binary @-") } else { ("cat >/dev/null; ", "-d ''") };
@@ -83,6 +83,10 @@ pub fn write_settings(path: &Path) -> std::io::Result<()> {
         let mut entry = json!({ "hooks": [{ "type": "command", "command": post_bash(slug, matches!(*slug, "notification" | "session_start" | "stop")) }] });
         if *name == "PreToolUse" {
             entry["matcher"] = json!("*");
+            // サブエージェントのツールの呼び出しにも届く（入力に agent_id が付く）。結果待ちの間に作業中へ戻さないよう、
+            // 別のイベントとして送る。入力は送らず、ここで見分けるだけにする
+            let pick = "input=$(cat); ev=pre_tool_use; case \"$input\" in *'\"agent_id\"'*) ev=subagent_tool;; esac; ";
+            entry["hooks"][0]["command"] = json!(format!("{pick}{}", post_bash("$ev", false)));
         }
         hooks.insert((*name).to_string(), json!([entry]));
     }
@@ -290,17 +294,20 @@ fn read_notification(body: &str) -> Notice {
     }
 }
 
-/// Claude Code は、バックグラウンドで起動した sub agent が動いている間もメインの応答が終われば Stop を送る。
-/// そのときは background_tasks に `{"type":"subagent","status":"running"}` が入る。
-/// バックグラウンドのシェル（開発用サーバーなど）は終わらないことがあるので数えない
-fn subagents_running(body: &str) -> bool {
+/// Claude Code は、裏で動かしたものが終わっていなくてもメインの応答が終われば Stop を送る。
+/// そのときは background_tasks に `{"type":"subagent","status":"running"}` のように入り、
+/// 時間をおいて起きる予定（ScheduleWakeup など）は session_crons に入る。
+/// サブエージェント・ワークフロー・Monitor・起きる予定は、終われば続きを始めるので結果待ちとみなす。
+/// シェルは、結果を待っているのか、開発用サーバーのように置いたままなのかが入力から分からないので数えない
+fn awaiting_results(body: &str) -> bool {
     let Ok(v) = serde_json::from_str::<Value>(body.trim_start_matches('\u{feff}')) else { return false };
-    v.get("background_tasks").and_then(Value::as_array).is_some_and(|tasks| {
+    let tasks = v.get("background_tasks").and_then(Value::as_array).is_some_and(|tasks| {
         tasks.iter().any(|t| {
-            matches!(t.get("type").and_then(Value::as_str), Some("subagent" | "workflow" | "teammate"))
+            matches!(t.get("type").and_then(Value::as_str), Some("subagent" | "workflow" | "teammate" | "monitor"))
                 && t.get("status").and_then(Value::as_str) == Some("running")
         })
-    })
+    });
+    tasks || v.get("session_crons").and_then(Value::as_array).is_some_and(|c| !c.is_empty())
 }
 
 pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: AppHandle<R>, manager: Arc<Manager>) {
@@ -342,7 +349,7 @@ pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: App
                             continue;
                         }
                     }
-                    let event = if parts[2] == "stop" && subagents_running(&body) { "subagents_running" } else { &parts[2] };
+                    let event = if parts[2] == "stop" && awaiting_results(&body) { "awaiting" } else { &parts[2] };
                     manager.apply_hook(&app, &parts[1], event, None);
                 }
             }
@@ -371,12 +378,17 @@ mod tests {
     #[test]
     fn stop_with_background_subagents() {
         let running = r#"{"background_tasks":[{"id":"a1","type":"subagent","status":"running","agent_type":"general-purpose"}]}"#;
-        assert!(subagents_running(running));
+        assert!(awaiting_results(running));
+        let monitor = r#"{"background_tasks":[{"id":"m1","type":"monitor","status":"running"}],"session_crons":[]}"#;
+        assert!(awaiting_results(monitor));
+        assert!(awaiting_results(r#"{"background_tasks":[],"session_crons":[{"id":"c1"}]}"#));
         let shell = r#"{"background_tasks":[{"id":"b1","type":"shell","status":"running","command":"npm run dev"}]}"#;
-        assert!(!subagents_running(shell));
-        assert!(!subagents_running(r#"{"background_tasks":[]}"#));
+        assert!(!awaiting_results(shell));
+        let done = r#"{"background_tasks":[{"id":"a1","type":"subagent","status":"completed"}],"session_crons":[]}"#;
+        assert!(!awaiting_results(done));
+        assert!(!awaiting_results(r#"{"background_tasks":[]}"#));
         // Codex と Copilot CLI の Stop は中身を送らない
-        assert!(!subagents_running(""));
+        assert!(!awaiting_results(""));
     }
 
     #[test]
