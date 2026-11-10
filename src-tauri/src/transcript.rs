@@ -848,6 +848,12 @@ fn assistant_block(b: &Value) -> Option<Entry> {
             let s = b.get("text")?.as_str()?.trim();
             (!s.is_empty()).then(|| entry(Kind::Assistant, truncate(s, MAX_TEXT)))
         }
+        // Claude Code は思考そのものを空で記録し、利用者向けに書いた途中経過だけを thinking に入れて、
+        // ターミナルでは「· summary」を添えた返事として出す。中身があるものだけ返事として出す
+        "thinking" => {
+            let s = b.get("thinking")?.as_str()?.trim();
+            (!s.is_empty()).then(|| entry(Kind::Assistant, truncate(s, MAX_TEXT)))
+        }
         "tool_use" => {
             let name = b.get("name")?.as_str()?.to_string();
             let text = tool_summary(b.get("input").unwrap_or(&Value::Null));
@@ -1078,13 +1084,17 @@ mod tests {
     #[test]
     fn assistant_and_tools() {
         let v = json!({"type":"assistant","message":{"content":[
-            {"type":"thinking","thinking":"..."},
+            {"type":"thinking","thinking":""},
+            {"type":"thinking","thinking":"設定を確認します。
+
+"},
             {"type":"text","text":"見ます"},
             {"type":"tool_use","name":"Bash","input":{"command":"ls","description":"一覧"}}
         ]}});
         let e = entries_of(&v);
-        assert_eq!(e.len(), 2);
-        assert_eq!((&e[1].kind, e[1].tool.as_deref(), e[1].text.as_str()), (&Kind::Tool, Some("Bash"), "ls"));
+        assert_eq!(e.len(), 3);
+        assert_eq!((&e[0].kind, e[0].text.as_str()), (&Kind::Assistant, "設定を確認します。"));
+        assert_eq!((&e[2].kind, e[2].tool.as_deref(), e[2].text.as_str()), (&Kind::Tool, Some("Bash"), "ls"));
         let r = json!({"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"err"}],"is_error":true}]}});
         let e = entries_of(&r);
         assert!(e[0].error && e[0].kind == Kind::Result && e[0].text == "err");
