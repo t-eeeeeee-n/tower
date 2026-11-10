@@ -17,7 +17,7 @@ import { createTemplates } from "./templates";
 import { createSettings } from "./settings";
 import { createMarks, MARK_COLORS, type MarkColor } from "./marks";
 
-type Status = "shell" | "starting" | "idle" | "running" | "awaiting" | "waiting" | "exited";
+type Status = "shell" | "starting" | "idle" | "running" | "waiting" | "exited";
 type Agent = "shell" | "claude" | "codex" | "copilot" | "antigravity";
 
 interface StatusInfo {
@@ -99,7 +99,6 @@ const STATUS_LABEL: Record<Status, string> = {
   starting: "起動中",
   idle: "完了",
   running: "作業中",
-  awaiting: "結果待ち",
   waiting: "入力待ち",
   exited: "終了",
 };
@@ -124,7 +123,7 @@ const files = createFilesPanel({
 // 終わりの印（ESC[201~）が中に混ざると後ろが打ち込んだ文字になるので、ESC は取り除く
 async function sendPrompt(id: string | null, text: string) {
   const status = id ? sessions.get(id)?.status : undefined;
-  if (!id || (status !== "idle" && status !== "running" && status !== "awaiting")) throw new Error("指示待ちか作業中のときだけ送れます");
+  if (!id || (status !== "idle" && status !== "running")) throw new Error("指示待ちか作業中のときだけ送れます");
   let body = text.replace(/\x1b/g, "").replace(/\r?\n/g, "\r");
   const agent = sessions.get(id)?.agent;
   // 起動したばかりで入力欄がまだ無いうちに書くと、シェルや起動中のエージェントに読まれて消える。
@@ -146,8 +145,7 @@ async function sendPrompt(id: string | null, text: string) {
   if (agent === "codex" || agent === "claude") {
     for (let i = 0; i < SUBMIT_RETRIES; i++) {
       await sleep(SUBMIT_CHECK_MS);
-      const st = sessions.get(id)?.status;
-        if ((st !== "idle" && st !== "awaiting") || !stillTyped(await screenText(id), agent, body)) break;
+      if (sessions.get(id)?.status !== "idle" || !stillTyped(await screenText(id), agent, body)) break;
       await write(id, "\r");
     }
   }
@@ -2765,9 +2763,9 @@ listen<{ id: string } & StatusInfo>("session-status", async ({ payload }) => {
   // 起動中は hook が届くまで画面の変化から作業中と推測するので、作業の始まりは指示待ちからのときだけ数える
   if (payload.status === "running" && s.status === "idle") workStart.set(s.id, payload.since);
   const started = workStart.get(s.id);
-  const finished = started !== undefined && payload.status === "idle" && (s.status === "running" || s.status === "awaiting" || s.status === "waiting");
+  const finished = started !== undefined && payload.status === "idle" && (s.status === "running" || s.status === "waiting");
   const ranFor = finished ? payload.since - started : 0;
-  if (payload.status !== "running" && payload.status !== "awaiting" && payload.status !== "waiting") workStart.delete(s.id);
+  if (payload.status !== "running" && payload.status !== "waiting") workStart.delete(s.id);
   Object.assign(s, { status: payload.status, since: payload.since, message: payload.message });
   // また動き出したり入力待ちになったりしたら、終わった印は外す（入力待ちは別の印で目立たせる）
   if (payload.status !== "idle") unseen.delete(s.id);

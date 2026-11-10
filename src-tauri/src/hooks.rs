@@ -36,8 +36,7 @@ pub struct Endpoint {
 
 /// bash で受信口に POST するコマンド。
 /// hook の入力（コマンドやファイル内容を含む）は送らない。例外は入力待ちのメッセージ表示に使う notification と、
-/// 会話の記録ファイルの場所を知るための Claude Code と Codex の SessionStart（中身は ID・パス・起動の種類・モデルなど）と、
-/// 裏で動かしたものの結果を待っているかを知るための Claude Code の Stop（background_tasks と session_crons 以外は Tower で捨てる）。
+/// 会話の記録ファイルの場所を知るための Claude Code と Codex の SessionStart（中身は ID・パス・起動の種類・モデルなど）。
 /// Tower が落ちていてもエージェントの動作は止めない（--max-time と || true）。
 fn post_bash(event: &str, with_body: bool) -> String {
     let (drain, body) = if with_body { ("", "--data-binary @-") } else { ("cat >/dev/null; ", "-d ''") };
@@ -80,11 +79,11 @@ pub fn write_settings(path: &Path) -> std::io::Result<()> {
     ];
     let mut hooks = serde_json::Map::new();
     for (name, slug) in EVENTS {
-        let mut entry = json!({ "hooks": [{ "type": "command", "command": post_bash(slug, matches!(*slug, "notification" | "session_start" | "stop")) }] });
+        let mut entry = json!({ "hooks": [{ "type": "command", "command": post_bash(slug, matches!(*slug, "notification" | "session_start")) }] });
         if *name == "PreToolUse" {
             entry["matcher"] = json!("*");
-            // サブエージェントのツールの呼び出しにも届く（入力に agent_id が付く）。結果待ちの間に作業中へ戻さないよう、
-            // 別のイベントとして送る。入力は送らず、ここで見分けるだけにする
+            // サブエージェントのツールの呼び出しにも届く（入力に agent_id が付く）。メインの応答が終わったあとに裏の
+            // サブエージェントが動いても作業中へ戻さないよう、別のイベントとして送る。入力は送らず、ここで見分けるだけにする
             let pick = "input=$(cat); ev=pre_tool_use; case \"$input\" in *'\"agent_id\"'*) ev=subagent_tool;; esac; ";
             entry["hooks"][0]["command"] = json!(format!("{pick}{}", post_bash("$ev", false)));
         }
@@ -210,6 +209,16 @@ pub fn copilot_hooks() -> Value {
     json!({ "version": 1, "hooks": hooks })
 }
 
+/// 利用者の設定（~/.claude/settings.json）の `tui` が "fullscreen" か。
+/// Claude Code はフルスクリーンの起動に失敗したと数えると（~/.claude.json の fullscreenAutoDisabled）`tui` を無視して
+/// 入力欄が下に固定されない描画に戻すが、環境変数 CLAUDE_CODE_NO_FLICKER は効いたままになる
+/// （https://code.claude.com/docs/en/fullscreen.md）。設定どおりに描かせるため、起動時にこの変数を付けるのに使う
+pub fn claude_wants_fullscreen() -> bool {
+    let Some(b) = home_dir("CLAUDE_CONFIG_DIR", ".claude").and_then(|d| std::fs::read(d.join("settings.json")).ok()) else { return false };
+    let v: Value = serde_json::from_slice(&b).unwrap_or(Value::Null);
+    v.get("tui").and_then(Value::as_str) == Some("fullscreen")
+}
+
 pub(crate) fn home_dir(env: &str, default: &str) -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(env) {
         return Some(PathBuf::from(dir));
@@ -294,33 +303,6 @@ fn read_notification(body: &str) -> Notice {
     }
 }
 
-/// Claude Code は、裏で動かしたものが終わっていなくてもメインの応答が終われば Stop を送る。
-/// そのときは background_tasks に `{"type":"subagent","status":"running"}` のように入り、
-/// 時間をおいて起きる予定（ScheduleWakeup など）は session_crons に入る。
-/// サブエージェント・ワークフロー・Monitor・起きる予定は、終われば続きを始めるので結果待ちとみなす。
-/// シェルは、結果を待っているのか、開発用サーバーのように置いたままなのかが入力から分からないので数えない
-fn awaiting_results(body: &str) -> Option<&'static str> {
-    let Ok(v) = serde_json::from_str::<Value>(body.trim_start_matches('\u{feff}')) else { return None };
-    let running: Vec<&str> = v
-        .get("background_tasks")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|t| t.get("status").and_then(Value::as_str) == Some("running"))
-        .filter_map(|t| t.get("type").and_then(Value::as_str))
-        .filter(|t| matches!(*t, "subagent" | "workflow" | "teammate" | "monitor"))
-        .collect();
-    let crons = v.get("session_crons").and_then(Value::as_array).is_some_and(|c| !c.is_empty());
-    // 待っているのがサブエージェントだけなら、記録で終わったと分かった時点で指示待ちに戻せる（Manager::settle_awaiting）
-    if !crons && !running.is_empty() && running.iter().all(|t| *t == "subagent") {
-        Some("awaiting_agents")
-    } else if crons || !running.is_empty() {
-        Some("awaiting")
-    } else {
-        None
-    }
-}
-
 static TRANSCRIPT_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// 会話の記録ファイルの切り替わりを書き残す場所（アプリのデータのフォルダ）
@@ -398,18 +380,7 @@ pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: App
                             continue;
                         }
                     }
-                    let event = if parts[2] == "stop" {
-                        match awaiting_results(&body) {
-                            // Claude Code の内部の観察用エージェントも subagent として入り、会話に出ないまま動き続けることがあるので、
-                            // 会話の記録で自分で裏に回したサブエージェントが動いているときだけ結果待ちにする
-                            Some("awaiting_agents") if !manager.running_subagents(&parts[1]) => "stop",
-                            Some(e) => e,
-                            None => "stop",
-                        }
-                    } else {
-                        &parts[2]
-                    };
-                    manager.apply_hook(&app, &parts[1], event, None);
+                    manager.apply_hook(&app, &parts[1], &parts[2], None);
                 }
             }
             let _ = req.respond(tiny_http::Response::empty(204));
@@ -432,22 +403,6 @@ mod tests {
         assert_eq!(read_notification(""), Notice::Waiting(None));
         // BOM 付きでも読める
         assert_eq!(read_notification("\u{feff}{\"notification_type\":\"agent_idle\"}"), Notice::Other);
-    }
-
-    #[test]
-    fn stop_with_background_subagents() {
-        let running = r#"{"background_tasks":[{"id":"a1","type":"subagent","status":"running","agent_type":"general-purpose"}]}"#;
-        assert_eq!(awaiting_results(running), Some("awaiting_agents"));
-        let monitor = r#"{"background_tasks":[{"id":"m1","type":"monitor","status":"running"},{"id":"a1","type":"subagent","status":"running"}],"session_crons":[]}"#;
-        assert_eq!(awaiting_results(monitor), Some("awaiting"));
-        assert_eq!(awaiting_results(r#"{"background_tasks":[],"session_crons":[{"id":"c1"}]}"#), Some("awaiting"));
-        let shell = r#"{"background_tasks":[{"id":"b1","type":"shell","status":"running","command":"npm run dev"}]}"#;
-        assert_eq!(awaiting_results(shell), None);
-        let done = r#"{"background_tasks":[{"id":"a1","type":"subagent","status":"completed"}],"session_crons":[]}"#;
-        assert_eq!(awaiting_results(done), None);
-        assert_eq!(awaiting_results(r#"{"background_tasks":[]}"#), None);
-        // Codex と Copilot CLI の Stop は中身を送らない
-        assert_eq!(awaiting_results(""), None);
     }
 
     #[test]

@@ -231,7 +231,6 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
 const PLACEHOLDER: Record<string, string> = {
   idle: "指示を入力（Enter で送信、Shift+Enter で改行）",
   running: "作業中です。送ると、作業の区切りでエージェントに渡ります（Esc で中断）",
-  awaiting: "裏で動かしたサブエージェントなどの結果を待っています。送るとすぐに渡ります",
   waiting: "確認や選択肢に答えるのを待っています（上のボタンか、ターミナルで答えます）",
 };
 
@@ -1084,7 +1083,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     sendBtn.disabled = away || !canSend() || sending || !input.value.trim();
   }
 
-  const canSend = () => status === "idle" || status === "running" || status === "awaiting";
+  const canSend = () => status === "idle" || status === "running";
 
   // エージェントが入力欄に薄く出している次の指示の候補（Claude Code の返事のあと）。入力欄が空のときに薄く出し、Tab か → で入れる
   let suggestion: string | null = null;

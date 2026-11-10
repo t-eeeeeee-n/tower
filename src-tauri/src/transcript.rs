@@ -757,6 +757,11 @@ fn user_text(s: &str) -> Option<Entry> {
     }
     let s = without_paste_tags(s);
     let s = s.trim();
+    // Esc で止めると、Claude Code は「[Request interrupted by user]」「[Request interrupted by user for tool use]」を
+    // 人の発言として記録に書く。打ったものではないので、区切りとして出す
+    if s.starts_with("[Request interrupted by user") && s.ends_with(']') {
+        return Some(entry(Kind::Command, "中断しました".into()));
+    }
     (!s.is_empty() && !s.starts_with('<')).then(|| entry(Kind::User, truncate(s, MAX_TEXT)))
 }
 
@@ -945,6 +950,8 @@ mod tests {
         assert_eq!(kinds(json!({"type":"user","message":{"content":cmd}})), vec![(Kind::Command, "/model opus".into())]);
         assert_eq!(kinds(json!({"type":"user","message":{"content":"直して"}})), vec![(Kind::User, "直して".into())]);
         assert!(kinds(json!({"type":"user","message":{"content":"<local-command-stdout></local-command-stdout>"}})).is_empty());
+        let interrupted = json!({"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}});
+        assert_eq!(kinds(interrupted), vec![(Kind::Command, "中断しました".into())]);
         assert!(kinds(json!({"type":"user","isMeta":true,"message":{"content":"meta"}})).is_empty());
         // 打ったスキルの中身の行は、スキルの名前だけにする。Skill ツールで呼んだもの（sourceToolUseID 付き）は出さない
         let skill = |src: Option<&str>| {
@@ -1010,7 +1017,7 @@ mod tests {
             std::fs::write(sub.join(format!("agent-{agent}.jsonl")), "").unwrap();
             std::fs::write(sub.join(format!("agent-{agent}.meta.json")), json!({"toolUseId": tool}).to_string()).unwrap();
         }
-        // a1: 結果待ち、a2・a3: 裏で動かした、a4: 結果が届いた
+        // a1: 呼び出しの結果がまだ無い、a2・a3: 裏で動かした、a4: 結果が届いた
         std::fs::write(
             &main,
             lines(&[

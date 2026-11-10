@@ -10,7 +10,6 @@
   --faint: #5d6879;
 
   --st-running: #5fb3c8;
-  --st-awaiting: #8ea2d8;
   --st-waiting: #e9b04b;
   --st-idle: #8cc48a;
   --st-starting: #a99be0;
@@ -1031,7 +1030,6 @@ textarea:focus { border-color: var(--st-running); outline: none; }
 
 /* 状態ごとの色 */
 [data-status="running"] { --st: var(--st-running); }
-[data-status="awaiting"] { --st: var(--st-awaiting); }
 [data-status="waiting"] { --st: var(--st-waiting); }
 [data-status="idle"] { --st: var(--st-idle); }
 [data-status="starting"] { --st: var(--st-starting); }

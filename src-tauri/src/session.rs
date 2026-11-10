@@ -26,8 +26,6 @@ pub enum Status {
     Idle,
     /// 作業中
     Running,
-    /// メインの応答は終わったが、裏で動かしたサブエージェントなどの結果を待っている（終わると続きを始める）
-    Awaiting,
     /// 承認や入力を待っている
     Waiting,
     /// プロセス終了
@@ -163,8 +161,6 @@ pub struct Session {
     hooks_seen: Arc<AtomicBool>,
     /// 確認に答えてから、次の hooks のイベントが届くまでの間か。その間も画面から推測する
     answered: Arc<AtomicBool>,
-    /// 結果待ちで、待っているのが裏のサブエージェントだけか（Manager::settle_awaiting）
-    awaiting_agents: AtomicBool,
     /// Claude Code の会話の記録（JSONL）。SessionStart の hook で届き、/clear や再開のたびに変わる
     transcript: Mutex<Option<PathBuf>>,
     _job: Option<Job>,
@@ -300,6 +296,9 @@ impl Manager {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        if agent == Agent::Claude && crate::hooks::claude_wants_fullscreen() {
+            cmd.env("CLAUDE_CODE_NO_FLICKER", "1");
+        }
         // Git Bash の --login がホームに cd しないようにする
         cmd.env("CHERE_INVOKING", "1");
         // Tower 自体が Claude Code の中から起動されると、親セッションの目印が引き継がれ、
@@ -472,7 +471,6 @@ impl Manager {
             killer: Mutex::new(killer),
             hooks_seen,
             answered,
-            awaiting_agents: AtomicBool::new(false),
             transcript: Mutex::new(None),
             _job: job,
         });
@@ -611,40 +609,16 @@ impl Manager {
         let next = match event {
             "session_start" | "stop" => Status::Idle,
             "user_prompt_submit" | "pre_tool_use" => Status::Running,
-            "awaiting" | "awaiting_agents" => Status::Awaiting,
-            // フォアグラウンドのサブエージェントなら、メインも作業中のまま
-            "subagent_tool" if session.state.lock().unwrap().status == Status::Awaiting => return,
+            // メインの応答が終わったあとに裏のサブエージェントが動いても、指示待ちのままにする
+            "subagent_tool" if session.state.lock().unwrap().status == Status::Idle => return,
             "subagent_tool" => Status::Running,
             "notification" => Status::Waiting,
             // 許可の確認を待っている間にも届くことがあるので、入力待ちは指示待ちに下げない
-            "idle_prompt" if matches!(session.state.lock().unwrap().status, Status::Running | Status::Awaiting) => Status::Idle,
+            "idle_prompt" if session.state.lock().unwrap().status == Status::Running => Status::Idle,
             "session_end" => Status::Shell,
             _ => return,
         };
-        session.awaiting_agents.store(event == "awaiting_agents", Ordering::Relaxed);
         set_status(app, id, &session.state, next, message);
-    }
-
-    /// 会話の記録で、裏に回したサブエージェントが動いているか。記録がまだ分からなければ動いているとみなす
-    pub fn running_subagents(&self, id: &str) -> bool {
-        let Ok(Some(path)) = self.transcript(id) else { return true };
-        crate::transcript::subagents(&path).iter().any(|a| a.running == Some(true))
-    }
-
-    /// 裏のサブエージェントだけを待っている結果待ちを、記録で全部終わった（止められたものも含む）と分かったら指示待ちに戻す。
-    /// 止められたときなど、Claude Code が続きの応答を始めず Stop が届かないことがあり、そのままだと結果待ちが残るため
-    pub fn settle_awaiting<R: Runtime>(&self, app: &AppHandle<R>) {
-        for s in self.all() {
-            let since = { let st = s.state.lock().unwrap(); (st.status == Status::Awaiting).then_some(st.since) };
-            let Some(since) = since else { continue };
-            // Stop の直後は、呼び出しの結果がまだ記録に書かれていないことがある
-            if !s.awaiting_agents.load(Ordering::Relaxed) || now_ms().saturating_sub(since) < 5000 {
-                continue;
-            }
-            if !self.running_subagents(&s.id) {
-                set_status(app, &s.id, &s.state, Status::Idle, None);
-            }
-        }
     }
 }
 
