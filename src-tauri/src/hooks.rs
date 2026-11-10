@@ -36,7 +36,8 @@ pub struct Endpoint {
 
 /// bash で受信口に POST するコマンド。
 /// hook の入力（コマンドやファイル内容を含む）は送らない。例外は入力待ちのメッセージ表示に使う notification と、
-/// 会話の記録ファイルの場所を知るための Claude Code と Codex の SessionStart（中身は ID・パス・起動の種類・モデルなど）。
+/// 会話の記録ファイルの場所を知るための Claude Code と Codex の SessionStart（中身は ID・パス・起動の種類・モデルなど）と、
+/// バックグラウンドの sub agent が動いているかを知るための Claude Code の Stop（background_tasks 以外は Tower で捨てる）。
 /// Tower が落ちていてもエージェントの動作は止めない（--max-time と || true）。
 fn post_bash(event: &str, with_body: bool) -> String {
     let (drain, body) = if with_body { ("", "--data-binary @-") } else { ("cat >/dev/null; ", "-d ''") };
@@ -79,7 +80,7 @@ pub fn write_settings(path: &Path) -> std::io::Result<()> {
     ];
     let mut hooks = serde_json::Map::new();
     for (name, slug) in EVENTS {
-        let mut entry = json!({ "hooks": [{ "type": "command", "command": post_bash(slug, matches!(*slug, "notification" | "session_start")) }] });
+        let mut entry = json!({ "hooks": [{ "type": "command", "command": post_bash(slug, matches!(*slug, "notification" | "session_start" | "stop")) }] });
         if *name == "PreToolUse" {
             entry["matcher"] = json!("*");
         }
@@ -289,6 +290,19 @@ fn read_notification(body: &str) -> Notice {
     }
 }
 
+/// Claude Code は、バックグラウンドで起動した sub agent が動いている間もメインの応答が終われば Stop を送る。
+/// そのときは background_tasks に `{"type":"subagent","status":"running"}` が入る。
+/// バックグラウンドのシェル（開発用サーバーなど）は終わらないことがあるので数えない
+fn subagents_running(body: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(body.trim_start_matches('\u{feff}')) else { return false };
+    v.get("background_tasks").and_then(Value::as_array).is_some_and(|tasks| {
+        tasks.iter().any(|t| {
+            matches!(t.get("type").and_then(Value::as_str), Some("subagent" | "workflow" | "teammate"))
+                && t.get("status").and_then(Value::as_str) == Some("running")
+        })
+    })
+}
+
 pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: AppHandle<R>, manager: Arc<Manager>) {
     std::thread::spawn(move || {
         for mut req in server.incoming_requests() {
@@ -328,7 +342,8 @@ pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: App
                             continue;
                         }
                     }
-                    manager.apply_hook(&app, &parts[1], &parts[2], None);
+                    let event = if parts[2] == "stop" && subagents_running(&body) { "subagents_running" } else { &parts[2] };
+                    manager.apply_hook(&app, &parts[1], event, None);
                 }
             }
             let _ = req.respond(tiny_http::Response::empty(204));
@@ -351,6 +366,17 @@ mod tests {
         assert_eq!(read_notification(""), Notice::Waiting(None));
         // BOM 付きでも読める
         assert_eq!(read_notification("\u{feff}{\"notification_type\":\"agent_idle\"}"), Notice::Other);
+    }
+
+    #[test]
+    fn stop_with_background_subagents() {
+        let running = r#"{"background_tasks":[{"id":"a1","type":"subagent","status":"running","agent_type":"general-purpose"}]}"#;
+        assert!(subagents_running(running));
+        let shell = r#"{"background_tasks":[{"id":"b1","type":"shell","status":"running","command":"npm run dev"}]}"#;
+        assert!(!subagents_running(shell));
+        assert!(!subagents_running(r#"{"background_tasks":[]}"#));
+        // Codex と Copilot CLI の Stop は中身を送らない
+        assert!(!subagents_running(""));
     }
 
     #[test]

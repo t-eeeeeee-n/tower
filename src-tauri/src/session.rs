@@ -596,7 +596,7 @@ impl Manager {
         session.answered.store(false, Ordering::Relaxed);
         let next = match event {
             "session_start" | "stop" => Status::Idle,
-            "user_prompt_submit" | "pre_tool_use" => Status::Running,
+            "user_prompt_submit" | "pre_tool_use" | "subagents_running" => Status::Running,
             "notification" => Status::Waiting,
             // 許可の確認を待っている間にも届くことがあるので、入力待ちは指示待ちに下げない
             "idle_prompt" if session.state.lock().unwrap().status == Status::Running => Status::Idle,
