@@ -9,7 +9,7 @@
     <div class="app">
       <aside class="sidebar">
         <header class="sidebar-head">
-          <button id="overview-btn" class="nav-btn" title="一覧（Ctrl+0）"><span>一覧</span><span class="shortcut">Ctrl+0</span></button>
+          <button id="overview-btn" class="icon-btn nav-icon" title="一覧（Ctrl+0）" aria-label="一覧"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><rect x="1.5" y="1.5" width="4.5" height="4.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="1.5" width="4.5" height="4.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="1.5" y="8" width="4.5" height="4.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="8" y="8" width="4.5" height="4.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
           <button id="new-btn" class="icon-btn" title="新しいセッション（Ctrl+Shift+N）" aria-label="新しいセッション"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.5v11M1.5 7h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
           <button id="keys-btn" class="icon-btn" title="ショートカット（F1）" aria-label="ショートカット">?</button>
           <button id="look-btn" class="icon-btn" title="設定（Ctrl+,）" aria-label="設定"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.3v1.6M7 11.1v1.6M1.3 7h1.6M11.1 7h1.6M2.97 2.97l1.13 1.13M9.9 9.9l1.13 1.13M2.97 11.03l1.13-1.13M9.9 4.1l1.13-1.13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="7" cy="7" r="2.9" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
@@ -121,6 +121,7 @@
       <div class="pick-head">
         <h2 id="pick-title">プロジェクトを開く</h2>
         <div class="pick-actions">
+          <button type="button" id="pick-history" class="text-btn" title="過去の会話の続きから開く（Ctrl+Shift+H）">過去の会話</button>
           <button type="button" id="pick-browse" class="text-btn">参照…</button>
           <button type="button" id="pick-new" class="primary-btn">新しく作る</button>
           <button type="button" id="pick-close" class="icon-btn" title="閉じる（Esc）" aria-label="閉じる">×</button>
@@ -130,6 +131,20 @@
       <ul id="pick-list" class="pick-list" role="listbox" aria-label="最近開いたプロジェクト"></ul>
       <p id="pick-empty" class="pick-empty" hidden>見つかりません</p>
       <p class="pick-hint">クリックか Enter で前回のエージェントで開く　Shift を押しながらだと、エージェントや worktree を選んで開く</p>
+    </dialog>
+
+    <dialog id="hist-dialog" class="dialog pick-dialog" aria-labelledby="hist-title">
+      <div class="pick-head">
+        <h2 id="hist-title">過去の会話</h2>
+        <div class="pick-actions">
+          <button type="button" id="hist-close" class="icon-btn" title="閉じる（Esc）" aria-label="閉じる">×</button>
+        </div>
+      </div>
+      <select id="hist-dir" class="hist-dir" aria-label="プロジェクト"></select>
+      <input id="hist-search" class="pick-search" placeholder="題名と最初の指示で検索" autocomplete="off" aria-label="過去の会話を検索" aria-controls="hist-list" />
+      <ul id="hist-list" class="pick-list" role="listbox" aria-label="過去の会話"></ul>
+      <p id="hist-empty" class="pick-empty" hidden>見つかりません</p>
+      <p class="pick-hint">クリックか Enter で、その会話の続きから新しいセッションで開く（Claude Code と Codex）</p>
     </dialog>
 
     <dialog id="new-dialog" class="dialog">

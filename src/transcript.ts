@@ -21,6 +21,8 @@ interface Entry {
   change?: { path: string; added: number; removed: number };
   /** 予定のツール（TodoWrite・TaskCreate・TaskUpdate）の入力 */
   todo?: { todos?: { content?: string; status?: string }[]; subject?: string; taskId?: string | number; status?: string };
+  /** この返事でプロンプトキャッシュに書いた分の有効時間（秒）。読んだだけなら 0 */
+  cache_ttl?: number;
 }
 
 interface Todo {
@@ -155,6 +157,17 @@ function plainOutput(text: string) {
 
 const fmtSince = (ms: number) => fmtDuration(Date.now() - ms);
 const AGENT_TOOLS = ["Agent", "Task"];
+const BACKGROUND_TOOLS = ["Bash", ...AGENT_TOOLS];
+/** Claude Code の /effort に渡せる値（2.1.322 の画面の並び） */
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+/** Claude Code の許可のモード。値は permission mode の名前で、main.ts の modeOf が画面の表示から同じ名前を返す */
+const MODES: [string, string][] = [
+  ["default", "毎回確認"],
+  ["acceptEdits", "編集は自動で許可"],
+  ["plan", "プラン"],
+  ["auto", "自動（判定に任せる）"],
+  ["bypassPermissions", "確認なし"],
+];
 
 // 会話の記録の場所を SessionStart の hook で受け取れるエージェント
 export const TRANSCRIPT_AGENTS = ["claude", "codex"];
@@ -192,6 +205,20 @@ function imageStrip(images: string[]) {
     box.append(img);
   }
   return box;
+}
+
+// 貼り付けた画像やドロップした画像ファイルは、場所の文字としてエージェントに渡している（main.ts の insertPaths）ので、
+// 記録にも文字で残る。発言の中の画像ファイルの場所を読んで、発言の下に出す
+const IMAGE_PATH = /"([A-Za-z]:\\[^"\r\n]+?\.(?:png|jpe?g|gif|webp))"|([A-Za-z]:\\[^\s"']+?\.(?:png|jpe?g|gif|webp))(?=[\s"']|$)/gi;
+const MAX_PATH_IMAGES = 4;
+
+function showImagePaths(bubble: HTMLElement, text: string) {
+  const paths = [...new Set([...text.matchAll(IMAGE_PATH)].map((m) => m[1] ?? m[2]))].slice(0, MAX_PATH_IMAGES);
+  if (!paths.length) return;
+  Promise.all(paths.map((path) => invoke<string>("read_image", { path }).catch(() => null))).then((urls) => {
+    const found = urls.filter((u): u is string => !!u);
+    if (found.length && bubble.isConnected) bubble.append(imageStrip(found));
+  });
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string) {
@@ -260,6 +287,18 @@ export interface TranscriptViewOptions {
   rewindCancel: () => void;
   /** Codex の前のメッセージを直す画面を裏で進め、steps 個前の発言から書き直す。戻された発言を返す（進められなければ null） */
   rewindCodex: (steps: number, text: string) => Promise<string | null>;
+  copy: (text: string) => void;
+  /**
+   * 許可のモードを mode（Claude Code の permission mode の名前）にする。Shift+Tab で順に回しながら画面で確かめるので、
+   * 起動の設定で使えないモードなら一周して元に戻り、false を返す
+   */
+  switchMode: (mode: string) => Promise<boolean>;
+  /** 裏で動いているサブエージェントやコマンドを、名前（説明）で選んで止める。選べなければ false */
+  stopTask: (label: string) => Promise<boolean>;
+  /** モデルを選ぶ画面を裏で開き、選択肢を返す（読み取れなければ閉じて null） */
+  modelChoices: () => Promise<PromptChoice | null>;
+  modelAnswer: (key: string) => Promise<void>;
+  modelCancel: () => Promise<void>;
 }
 
 export function createTranscriptView(o: TranscriptViewOptions) {
@@ -304,6 +343,80 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   const turnBar = el("div", "lg-turn");
   turnBar.hidden = true;
   body.before(turnBar);
+
+  // 入力欄の下の行：許可のモードと、プロンプトキャッシュの残り時間（どちらも Claude Code のとき）
+  const metaRow = el("div", "lg-meta");
+  const modeSelect = el("select", "lg-mode");
+  modeSelect.title = "許可のモード（Shift+Tab でも切り替えられます）";
+  modeSelect.setAttribute("aria-label", "許可のモード");
+  for (const [value, label] of MODES) {
+    const opt = el("option", "", label);
+    opt.value = value;
+    modeSelect.append(opt);
+  }
+  let mode: string | null = null;
+  let switching = false;
+  modeSelect.onchange = async () => {
+    const want = modeSelect.value;
+    switching = true;
+    modeSelect.disabled = true;
+    const ok = await o.switchMode(want).catch(() => false);
+    switching = false;
+    modeSelect.disabled = false;
+    if (!ok) o.onError(`「${MODES.find(([v]) => v === want)?.[1]}」はこのセッションでは選べません（起動の引数や設定で有効にする必要があります）`);
+    renderMeta();
+  };
+  const cacheChip = el("span", "lg-cache");
+  const modelBtn = el("button", "lg-model", "モデル");
+  modelBtn.type = "button";
+  modelBtn.title = "モデルを選ぶ（/model。選んだモデルは新しいセッションの既定にもなります）";
+  modelBtn.onclick = () => openModelPanel();
+  const effortSelect = el("select", "lg-mode lg-effort");
+  effortSelect.title = "考える深さ（/effort）";
+  effortSelect.setAttribute("aria-label", "effort");
+  for (const v of EFFORTS) {
+    const opt = el("option", "", `effort: ${v}`);
+    opt.value = v;
+    effortSelect.append(opt);
+  }
+  let effort: string | null = null;
+  /** モデルを選ぶ画面を裏で開いている間 */
+  let picking = false;
+  effortSelect.onchange = () => {
+    const want = effortSelect.value;
+    if (status !== "idle") {
+      o.onError("effort は指示待ちのときに変えられます");
+      renderMeta();
+      return;
+    }
+    effort = want;
+    o.send(`/effort ${want}`).catch(o.onError);
+  };
+  metaRow.append(modelBtn, effortSelect, modeSelect, cacheChip);
+  /** 本体の会話で最後にプロンプトキャッシュを使った時刻と、その有効時間（秒） */
+  let cache: { at: number; ttl: number } | null = null;
+
+  function renderMeta() {
+    const claude = agentKind === "claude" && !agent && !shell;
+    modelBtn.hidden = !claude || status === "exited";
+    modelBtn.disabled = status !== "idle" || picking;
+    effortSelect.hidden = !claude || effort === null || status === "exited";
+    if (!effortSelect.hidden && effort) effortSelect.value = effort;
+    modeSelect.hidden = !claude || mode === null || status === "waiting" || status === "exited";
+    if (!modeSelect.hidden && !switching && mode) modeSelect.value = mode;
+    // 作業中はエージェントが使い続けているので出さない。切れたあとに送ると会話の全体を読み直すので、遅く・使用量が多くなる
+    const left = cache?.ttl ? cache.at + cache.ttl * 1000 - Date.now() : null;
+    cacheChip.hidden = !claude || left === null || status === "running";
+    if (!cacheChip.hidden && left !== null) {
+      cacheChip.classList.toggle("lg-cache-gone", left <= 0);
+      cacheChip.textContent = left <= 0 ? "キャッシュ切れ" : `キャッシュ 残り ${left >= 60_000 ? `${Math.ceil(left / 60_000)}分` : `${Math.ceil(left / 1000)}秒`}`;
+      cacheChip.title =
+        left <= 0
+          ? "プロンプトキャッシュが切れています。次に送ると会話の全体を読み直すので、返事が遅く、使用量が多くなります"
+          : `プロンプトキャッシュが切れるまで（有効時間 ${cache!.ttl >= 3600 ? "1 時間" : "5 分"}）。切れる前に送ると、会話の読み直しが速く・安く済みます`;
+    }
+    metaRow.hidden = modelBtn.hidden && effortSelect.hidden && modeSelect.hidden && cacheChip.hidden;
+  }
   const olderBtn = el("button", "lg-older", "前の会話を読む");
   olderBtn.type = "button";
   olderBtn.hidden = true;
@@ -352,6 +465,31 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     showOlder();
   }
 
+  // 時間のかかるコマンドやサブエージェントに「裏に回す」を出す（Claude Code の Ctrl+B）。VS Code 拡張と同じく、始まって 2 秒たってから
+  function renderBackground() {
+    const can = status === "running" && agentKind === "claude" && !agent && !shell;
+    for (const step of pending.values()) {
+      const at = Date.parse(step.dataset.at ?? "");
+      const show = can && !step.dataset.bg && BACKGROUND_TOOLS.includes(step.dataset.tool ?? "") && Date.now() - at > 2000;
+      const btn = step.querySelector(".lg-bg");
+      if (show && !btn) {
+        const b = el("button", "lg-bg", "裏に回す");
+        b.type = "button";
+        b.title = "終わるのを待たずに次へ進ませる（Ctrl+B）";
+        b.onclick = (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          o.sendKeys("\x02");
+          step.dataset.bg = "sent";
+          b.remove();
+        };
+        step.querySelector("summary")?.append(b);
+      } else if (!show && btn) {
+        btn.remove();
+      }
+    }
+  }
+
   function renderTurn() {
     // 結果を待っているツールの行に、実行中の経過時間を出す（中断されたものは結果が残らないので、作業中の間だけ）
     for (const step of pending.values()) {
@@ -368,6 +506,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     if (files.length > 2) chips.push(el("span", "lg-chip", `ほか ${files.length - 2} ファイル`));
     turnBar.hidden = !!shell || !turn.start || !chips.length;
     turnBar.replaceChildren(...chips);
+    renderBackground();
+    renderMeta();
   }
 
   const visible = () => !root.hidden && !!sessionId && o.visible();
@@ -400,6 +540,10 @@ export function createTranscriptView(o: TranscriptViewOptions) {
 
   function render(e: Entry): HTMLElement | null {
     if (e.at) turn.end = e.at;
+    // サブエージェントのキャッシュは本体とは別なので、本体の会話のときだけ数える
+    if (e.cache_ttl !== undefined && e.at && !agent && !shell) {
+      cache = { at: Date.parse(e.at), ttl: e.cache_ttl || cache?.ttl || 0 };
+    }
     // どのエージェントの返事か分かるよう、依頼ごとに最初の返事か操作の前に名前を出す
     if ((e.kind === "assistant" || e.kind === "tool") && !turn.labeled) {
       turn.labeled = true;
@@ -412,7 +556,11 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         if (e.at) n.dataset.at = e.at;
         const bubble = el("div", "lg-user-text", e.text);
         if (e.images?.length) bubble.append(imageStrip(e.images));
-        n.append(bubble);
+        else showImagePaths(bubble, e.text);
+        const edit = el("button", "lg-edit", "ここから直す");
+        edit.type = "button";
+        edit.title = "この発言の前まで戻して、発言を入力欄に入れる";
+        n.append(edit, bubble);
         return n;
       }
       case "command": {
@@ -432,6 +580,11 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         const n = el("div", "lg-assistant md-preview");
         if (e.at) n.dataset.at = e.at;
         n.innerHTML = markdownHtml(e.text);
+        const copy = el("button", "lg-copy", "コピー");
+        copy.type = "button";
+        copy.title = "この返事を Markdown のままコピー";
+        copy.onclick = () => o.copy(e.text);
+        n.append(copy);
         return n;
       }
       case "tool": {
@@ -450,6 +603,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
           pending.set(e.id, li);
           li.classList.add("lg-pending");
           if (e.at) li.dataset.at = e.at;
+          if (e.tool) li.dataset.tool = e.tool;
         }
         const last = body.lastElementChild;
         if (last?.classList.contains("lg-steps")) {
@@ -570,6 +724,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       };
       const parts: HTMLElement[] = [main];
       let tail: HTMLElement | null = null;
+      let stopBtn: HTMLElement | null = null;
       for (const { g, list } of groups) {
         const picked = list.find((i) => i.selected);
         const live = list.filter((i) => i.state === "running").length;
@@ -581,6 +736,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
           current.title = picked.title;
           current.prepend(el("span", "lg-item-mark"));
           tail = current;
+          if (picked.state === "running" && agentKind === "claude") stopBtn = stopButton(picked.label);
         }
         b.dataset.group = g;
         b.classList.toggle("lg-live", live > 0);
@@ -592,10 +748,29 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         parts.push(el("span", "lg-seg-sep"), b);
       }
       if (tail) parts.push(tail);
+      if (stopBtn) parts.push(stopBtn);
       bar.replaceChildren(...parts);
       renderMenu();
     }
     for (const t of menu.querySelectorAll<HTMLElement & { tick?: () => string }>(".lg-item-time")) t.textContent = t.tick?.() ?? "";
+  }
+
+  // 見ているサブエージェントやコマンドを止める。Claude Code の /tasks の画面を裏で操作する（main.ts の stopTask）
+  function stopButton(label: string) {
+    const b = el("button", "lg-stop", "止める");
+    b.type = "button";
+    b.title = "このサブエージェント（コマンド）だけを止める";
+    b.onclick = async () => {
+      b.disabled = true;
+      b.textContent = "止めています…";
+      const ok = await o.stopTask(label).catch(() => false);
+      if (!ok) {
+        o.onError("止められませんでした。ターミナルで /tasks から止めてください");
+        b.disabled = false;
+        b.textContent = "止める";
+      }
+    };
+    return b;
   }
 
   function renderMenu() {
@@ -897,6 +1072,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   function applyStatus() {
     const away = !!agent || !!shell;
     input.disabled = away;
+    // 「ここから直す」を出せるか（style.css）。書きかけの文は戻した発言で上書きしてしまうので、空のときだけにする
+    root.dataset.editable = String(!away && status === "idle" && !input.value && (agentKind === "claude" || agentKind === "codex"));
     input.placeholder = agent
       ? "サブエージェントの会話を表示しています（上の「メイン」に戻すと指示を送れます）"
       : shell
@@ -961,6 +1138,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   // 予定（ToDo）。ターミナルと同じく、まだ終わっていない予定があれば入力欄の上に出す。
   // 会話の記録の予定のツールを、出てきた順に当てはめて組み立てる
   const compose = input.parentElement!;
+  compose.after(metaRow);
   const todoBox = el("div", "lg-todos");
   todoBox.hidden = true;
   compose.before(todoBox);
@@ -1040,7 +1218,10 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   let rewinding = false;
   function closeRewind(cancel: boolean) {
     if (cancel && rewinding) o.rewindCancel();
+    if (cancel && picking) o.modelCancel().catch(o.onError);
     rewinding = false;
+    picking = false;
+    renderMeta();
     rewindBox.hidden = true;
     input.focus({ preventScroll: true });
   }
@@ -1114,6 +1295,46 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     });
     rewindPanel(p.question || "どこまで戻しますか", buttons);
   }
+
+  // モデルを選ぶ。/model の画面を裏で開き、選択肢を巻き戻しと同じ欄にボタンで出す
+  async function openModelPanel() {
+    if (status !== "idle" || picking || rewinding) return;
+    picking = true;
+    renderMeta();
+    rewindPanel("モデルの一覧を読んでいます…", []);
+    const p = await o.modelChoices().catch(() => null);
+    if (!picking) return;
+    if (!p) {
+      picking = false;
+      rewindBox.hidden = true;
+      renderMeta();
+      o.onError("モデルを選ぶ画面を読み取れませんでした。ターミナルで /model を使ってください");
+      return;
+    }
+    const buttons = p.options.map((opt) => {
+      const b = el("button", "lg-prompt-opt", `${opt.key}. ${opt.label}`);
+      b.type = "button";
+      b.onclick = async () => {
+        picking = false;
+        rewindBox.hidden = true;
+        await o.modelAnswer(opt.key).catch(o.onError);
+        renderMeta();
+        input.focus({ preventScroll: true });
+      };
+      return b;
+    });
+    rewindPanel("モデルを選ぶ（選んだモデルは、新しいセッションの既定にもなります）", buttons);
+  }
+
+  // 発言の「ここから直す」。Esc 2 回の戻り先の一覧を飛ばし、その発言を選んだのと同じ流れに入る
+  body.addEventListener("click", (ev) => {
+    const btn = (ev.target as Element).closest(".lg-edit");
+    if (!btn || root.dataset.editable !== "true" || rewinding || picking) return;
+    const past = sentMessages();
+    const k = past.findIndex((m) => m.node === btn.closest(".lg-user"));
+    if (k < 0) return;
+    pickRewind(past.length - k, past[k].text, past[k].node);
+  });
 
   // 入力待ちの画面に出ている確認や選択肢を、ボタンで答えられるようにする
   const promptBox = el("div", "lg-prompt");
@@ -1383,7 +1604,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       input.value = "";
       fitInput();
       applyStatus();
-      o.openInTerminal(`/${c.name}`);
+      if (c.name === "model" && agentKind === "claude" && status === "idle") openModelPanel();
+      else o.openInTerminal(`/${c.name}`);
       return;
     }
     input.value = `/${c.name}`;
@@ -1458,17 +1680,18 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       submit();
-    } else if (e.key === "Escape" && status === "running") {
+    } else if (e.key === "Escape" && escapeKey()) {
       e.preventDefault();
-      o.interrupt();
-    } else if (e.key === "Escape" && !rewindBox.hidden) {
-      e.preventDefault();
-      closeRewind(true);
-    } else if (e.key === "Escape" && status === "idle" && !input.value && !agent && !shell) {
-      e.preventDefault();
-      escapeTwice();
     }
   });
+
+  function escapeKey() {
+    if (status === "running") o.interrupt();
+    else if (!rewindBox.hidden) closeRewind(true);
+    else if (status === "idle" && !input.value && !agent && !shell) escapeTwice();
+    else return false;
+    return true;
+  }
 
   function choiceKey(key: string) {
     const choices = input.value ? [] : panelChoices();
@@ -1557,6 +1780,24 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       input.focus({ preventScroll: true });
       return true;
     },
+    /** エージェントの画面から読み取った、今の effort（読み取れないときは null） */
+    setEffort(next: string | null) {
+      if (next === effort) return;
+      effort = next;
+      renderMeta();
+    },
+    /** エージェントの画面から読み取った、今の許可のモード（読み取れないときは null） */
+    setMode(next: string | null) {
+      if (next === mode) return;
+      mode = next;
+      renderMeta();
+    },
+    /** 入力欄の外で押した Esc を、入力欄で押したのと同じように扱う。扱ったら true */
+    escape() {
+      if (!escapeKey()) return false;
+      input.focus({ preventScroll: true });
+      return true;
+    },
     /** 入力欄の外で打った文字を、入力欄で打ったのと同じように扱う */
     typed(ch: string) {
       // サブエージェントを見ている間に打った文字は、メインへの指示として扱う
@@ -1612,7 +1853,11 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       dropQueue();
       dropSent();
       turn = newTurn(null);
+      cache = null;
+      mode = null;
+      effort = null;
       renderBar();
+      renderMeta();
       applyStatus();
       if (!id) return void body.replaceChildren();
       if (!supported) return note("会話の表示は Claude Code と Codex のセッションだけに対応しています。");
@@ -1629,7 +1874,7 @@ export type TranscriptView = ReturnType<typeof createTranscriptView>;
 
 /** セッション画面で、ターミナルの代わりに出す会話の表示 */
 export function createTranscriptPanel(
-  o: Pick<TranscriptViewOptions, "onError" | "send" | "interrupt" | "listCommands" | "openInTerminal" | "rewind" | "fold" | "findFiles" | "sendKeys" | "answer" | "answerInTerminal" | "rewindTo" | "rewindAnswer" | "rewindCancel" | "rewindCodex">,
+  o: Pick<TranscriptViewOptions, "onError" | "send" | "interrupt" | "listCommands" | "openInTerminal" | "rewind" | "fold" | "findFiles" | "sendKeys" | "answer" | "answerInTerminal" | "rewindTo" | "rewindAnswer" | "rewindCancel" | "rewindCodex" | "copy" | "switchMode" | "stopTask" | "modelChoices" | "modelAnswer" | "modelCancel">,
 ) {
   return createTranscriptView({
     root: $("log"),

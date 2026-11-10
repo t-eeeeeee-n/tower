@@ -215,6 +215,12 @@ const log = createTranscriptPanel({
   },
   findFiles: (query) => (attachedId ? invoke<string[]>("find_files", { id: attachedId, query }) : Promise.resolve([])),
   sendKeys: (data) => attachedId && writeKeys(attachedId, data),
+  copy: copyText,
+  switchMode: (mode) => (attachedId ? switchMode(attachedId, mode) : Promise.resolve(false)),
+  stopTask: (label) => (attachedId ? stopTask(attachedId, label) : Promise.resolve(false)),
+  modelChoices: () => (attachedId ? openModelPicker(attachedId) : Promise.resolve(null)),
+  modelAnswer: (key) => (attachedId ? pickModel(attachedId, key) : Promise.resolve()),
+  modelCancel: () => (attachedId ? closeModelPicker(attachedId) : Promise.resolve()),
   answer: (key) => {
     if (!attachedId) return;
     // 答えが画面に出るまでの間に、同じ選択肢を出し直さない
@@ -791,8 +797,8 @@ async function activate(id: string) {
 
 // ---------- セッション操作 ----------
 
-async function createSession(name: string, cwd: string, agent: Agent, resume = false) {
-  const info = await invoke<SessionInfo>("create_session", { name, cwd, agent, resume, args: settings.session().args[agent] ?? "" });
+async function createSession(name: string, cwd: string, agent: Agent, resume = false, resumeId: string | null = null) {
+  const info = await invoke<SessionInfo>("create_session", { name, cwd, agent, resume, resumeId, args: settings.session().args[agent] ?? "" });
   sessions.set(info.id, info);
   order.push(info.id);
   refreshHeads();
@@ -1441,6 +1447,12 @@ function makeCardConversation(id: string) {
     rewind: () => showCardScreen(() => rewindIn(id)),
     findFiles: (query) => invoke<string[]>("find_files", { id, query }),
     sendKeys: (data) => writeKeys(id, data),
+    copy: copyText,
+    switchMode: (mode) => switchMode(id, mode),
+    stopTask: (label) => stopTask(id, label),
+    modelChoices: () => openModelPicker(id),
+    modelAnswer: (key) => pickModel(id, key),
+    modelCancel: () => closeModelPicker(id),
     answer: (key) => {
       const st = cardPrompts.get(id);
       if (st) {
@@ -1620,6 +1632,111 @@ function withoutAgentList(lines: Span[][]) {
   return lines.slice(0, end);
 }
 
+// Claude Code の入力欄の下に出る許可のモード（「⏵⏵ accept edits on」など）。何も出ていなければ毎回確認（default）。
+// 文言は Claude Code 2.1 の画面のもの。入力欄の下の行が読めない（画面が別の表示の）ときは null
+function modeOf(footer: Span[][]): string | null {
+  if (!footer.length) return null;
+  const text = footer.map((l) => l.map((s) => s.t).join("")).join("\n");
+  if (/bypass permissions on/i.test(text)) return "bypassPermissions";
+  if (/auto mode on/i.test(text)) return "auto";
+  if (/plan mode on/i.test(text)) return "plan";
+  if (/accept edits on/i.test(text)) return "acceptEdits";
+  return "default";
+}
+
+// Shift+Tab で 1 つずつ回し、画面に狙ったモードが出たら止める。使えないモードは回る順に入っていないので、
+// 一周して元のモードに戻ったら諦める（回る順は起動の設定で変わるので、こちらでは決め打ちしない）
+async function switchMode(id: string, want: string) {
+  const read = async () => modeOf(await invoke<Span[][]>("session_footer", { id }));
+  const start = await read();
+  if (start === want) return true;
+  if (start === null) return false;
+  for (let i = 0; i < 6; i++) {
+    await write(id, "\x1b[Z");
+    await sleep(350);
+    const now = await read();
+    if (now === want) return true;
+    if (now === start || now === null) return false;
+  }
+  return false;
+}
+
+// 裏で動いているサブエージェントやコマンドを 1 つ止める（Claude Code の /tasks の画面を裏で操作する）。
+// 画面は「Background」の見出しの一覧で、選ばれている行に「❯」が付き、行の上で x を押すと止まる（2.1.322 の画面で確かめた形）。
+// 狙った行を選べなければ何も押さずに閉じて false を返す
+async function stopTask(id: string, label: string) {
+  const want = squash(label).slice(0, 20);
+  const open = (lines: string[]) => lines.findIndex((l) => l.trim() === "Background");
+  await write(id, "/tasks");
+  await sleep(150);
+  await write(id, "\r");
+  await sleep(1200);
+  let lines = await screenText(id);
+  if (open(lines) < 0) return false;
+  let found = false;
+  for (let i = 0; i < 20 && !found; i++) {
+    const picked = lines.slice(open(lines)).find((l) => l.trim().startsWith("❯"));
+    found = !!want && squash(picked ?? "").includes(want);
+    if (found) break;
+    await write(id, "\x1b[B");
+    await sleep(150);
+    lines = await screenText(id);
+    if (open(lines) < 0) return false;
+  }
+  if (found) {
+    await write(id, "x");
+    await sleep(800);
+  }
+  // 止めたあとに詳しい表示へ移ることがあるので、一覧が消えるまで閉じる
+  for (let i = 0; i < 3 && open(await screenText(id)) >= 0; i++) {
+    await write(id, "\x1b");
+    await sleep(400);
+  }
+  return found;
+}
+
+// モデルを選ぶ画面（/model）を裏で開き、番号付きの選択肢を読み取る。読み取れなければ閉じて null
+async function openModelPicker(id: string): Promise<PromptChoice | null> {
+  await write(id, "/model");
+  await sleep(150);
+  await write(id, "\r");
+  await sleep(1200);
+  const lines = await screenText(id);
+  const p = lines.some((l) => l.trim() === "Select model") ? parsePrompt(lines) : null;
+  if (!p) await closeModelPicker(id);
+  return p;
+}
+
+async function closeModelPicker(id: string) {
+  for (let i = 0; i < 2 && (await screenText(id)).some((l) => l.trim() === "Select model"); i++) {
+    await write(id, "\x1b");
+    await sleep(400);
+  }
+}
+
+// 番号のキーで選ぶ。選んだだけで閉じない版のために、まだ開いていれば Enter で決める
+async function pickModel(id: string, key: string) {
+  await write(id, key);
+  await sleep(700);
+  if ((await screenText(id)).some((l) => l.trim() === "Select model")) {
+    await write(id, "\r");
+    await sleep(500);
+  }
+}
+
+// 入力欄の上の「◐ medium · /effort」から、今の effort を読む
+function effortOf(lines: Span[][]): string | null {
+  for (const l of lines) {
+    const m = /\b(low|medium|high|xhigh|max)\s*·\s*\/effort/.exec(l.map((s) => s.t).join(""));
+    if (m) return m[1];
+  }
+  return null;
+}
+
+function copyText(text: string) {
+  writeText(text).then(() => showToast([...text].length > 4000 ? "コピーしました（長い返事は途中までです。全文は /copy で）" : "コピーしました", 2000), showError);
+}
+
 function showFooter(pre: HTMLElement, all: Span[][]) {
   const lines = withoutAgentList(all);
   const key = JSON.stringify(lines);
@@ -1637,7 +1754,9 @@ setInterval(() => {
   if (!id || view !== "session" || !log.shown || document.hidden) return;
   invoke<Span[][]>("session_footer", { id })
     .then((lines) => {
-      if (id === attachedId) showFooter($("log-footer"), lines);
+      if (id !== attachedId) return;
+      showFooter($("log-footer"), lines);
+      log.setMode(sessions.get(id)?.agent === "claude" ? modeOf(lines) : null);
     })
     .catch(() => {});
   invoke<Span[][]>("session_tail", { id, lines: 15 })
@@ -1649,6 +1768,7 @@ setInterval(() => {
       logTailKey = key;
       showActivity($("log-activity"), s, lines);
       log.setSuggestion(s.status === "idle" ? inputSuggestion(lines) : null);
+      log.setEffort(s.agent === "claude" ? effortOf(lines) : null);
     })
     .catch(() => {});
 }, 1000);
@@ -1701,6 +1821,8 @@ function updateCard(card: HTMLElement, s: Session) {
     showActivity(q(".c-activity"), s, conversing ? lines : null);
     // 入力待ちの画面の下の端は選択肢と操作の案内で、ボタンと同じことを繰り返すうえカードからはみ出す
     showFooter(q(".c-footer"), conversing && s.status !== "waiting" ? (peek?.footer ?? []) : []);
+    conv.setMode(s.agent === "claude" && peek?.footer ? modeOf(peek.footer) : null);
+    conv.setEffort(s.agent === "claude" ? effortOf(lines.slice(-12)) : null);
   }
   tail.hidden = conversing;
   // 会話の表示に切り替わったあとも画面用の欄にフォーカスが残っていると、打った文字が見えないままセッションに届く
@@ -2158,6 +2280,146 @@ pickDialog.onclick = (ev) => {
   if (!inside) pickDialog.close();
 };
 
+// ---------- 過去の会話 ----------
+// フォルダごとに、Claude Code と Codex の過去の会話を新しい順に出し、選んだ会話の続きから新しいセッションで開く
+
+interface PastConversation {
+  agent: "claude" | "codex";
+  id: string;
+  title: string | null;
+  prompt: string;
+  modified: number;
+}
+
+const histDialog = $<HTMLDialogElement>("hist-dialog");
+const histSearch = $<HTMLInputElement>("hist-search");
+const histDir = $<HTMLSelectElement>("hist-dir");
+let histAll: PastConversation[] = [];
+let histItems: PastConversation[] = [];
+let histIndex = 0;
+
+function ago(ms: number) {
+  const m = Math.floor((Date.now() - ms) / 60_000);
+  if (m < 1) return "今";
+  if (m < 60) return `${m}分前`;
+  if (m < 60 * 24) return `${Math.floor(m / 60)}時間前`;
+  if (m < 60 * 24 * 30) return `${Math.floor(m / 60 / 24)}日前`;
+  return new Date(ms).toLocaleDateString();
+}
+
+function openHistory() {
+  if (histDialog.open || dialog.open) return;
+  pickDialog.close();
+  const current = activeId ? sessions.get(activeId)?.cwd : undefined;
+  const dirs = [...new Set([current, ...recents().map((r) => r.cwd)].filter((d): d is string => !!d))];
+  if (!dirs.length) {
+    showError("開いたことのあるプロジェクトがありません");
+    return;
+  }
+  histDir.replaceChildren(
+    ...dirs.map((d) => {
+      const o = el("option", "", d);
+      o.value = d;
+      return o;
+    }),
+  );
+  histDir.value = dirs[0];
+  histSearch.value = "";
+  histDialog.showModal();
+  histSearch.focus();
+  loadHistory();
+}
+
+async function loadHistory() {
+  const cwd = histDir.value;
+  histAll = [];
+  histIndex = 0;
+  renderHistory("読んでいます…");
+  try {
+    const list = await invoke<PastConversation[]>("past_conversations", { cwd });
+    if (cwd !== histDir.value) return;
+    histAll = list;
+    renderHistory("過去の会話がありません");
+  } catch (e) {
+    renderHistory("読めませんでした");
+    showError(e);
+  }
+}
+
+function renderHistory(emptyText = "見つかりません") {
+  const q = histSearch.value.trim().toLowerCase();
+  histItems = histAll.filter((p) => !q || `${p.title ?? ""}\n${p.prompt}`.toLowerCase().includes(q));
+  histIndex = Math.max(0, Math.min(histIndex, histItems.length - 1));
+  $("hist-list").replaceChildren(
+    ...histItems.map((p, i) => {
+      const li = el("li", "recent hist-item");
+      li.setAttribute("role", "option");
+      li.setAttribute("aria-selected", String(i === histIndex));
+      const first = p.prompt.split("\n")[0];
+      li.append(
+        el("span", "hist-title", p.title ?? first),
+        el("span", "hist-meta", `${AGENT_LABEL[p.agent] ?? p.agent} · ${ago(p.modified)}`),
+      );
+      if (p.title) li.append(el("span", "hist-prompt", first));
+      li.title = p.prompt;
+      li.onmousemove = () => {
+        if (histIndex === i) return;
+        histIndex = i;
+        renderHistory();
+      };
+      li.onclick = () => resumePast(p);
+      return li;
+    }),
+  );
+  $("hist-list").querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+  $("hist-empty").textContent = histAll.length ? "見つかりません" : emptyText;
+  $("hist-empty").hidden = histItems.length > 0;
+}
+
+async function resumePast(p: PastConversation) {
+  const cwd = histDir.value;
+  histDialog.close();
+  await refreshInstalled();
+  if (!installedAgents.has(p.agent)) {
+    showError(`${AGENT_LABEL[p.agent] ?? p.agent} が見つかりません`);
+    return;
+  }
+  try {
+    const id = await createSession(baseName(cwd), cwd, p.agent, false, p.id);
+    rememberRecent(cwd, p.agent);
+    await activate(id);
+  } catch (e) {
+    showError(e);
+  }
+}
+
+histDir.onchange = loadHistory;
+histSearch.oninput = () => {
+  histIndex = 0;
+  renderHistory();
+};
+histSearch.onkeydown = (ev) => {
+  if (ev.isComposing) return;
+  if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+    ev.preventDefault();
+    const n = histItems.length;
+    if (n) histIndex = (histIndex + (ev.key === "ArrowDown" ? 1 : n - 1)) % n;
+    renderHistory();
+  } else if (ev.key === "Enter") {
+    ev.preventDefault();
+    const p = histItems[histIndex];
+    if (p) resumePast(p);
+  }
+};
+$("hist-close").onclick = () => histDialog.close();
+$("pick-history").onclick = openHistory;
+histDialog.onclick = (ev) => {
+  if (ev.target !== histDialog) return;
+  const r = histDialog.getBoundingClientRect();
+  const inside = ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom;
+  if (!inside) histDialog.close();
+};
+
 // 前回のエージェントがわからないか、もう入っていなければ、ダイアログで選んでもらう
 async function openRecent(r: Recent) {
   await refreshInstalled();
@@ -2291,6 +2553,11 @@ document.addEventListener("keydown", (e) => {
       return;
     }
   }
+  // 会話の部分をクリックした後などで入力欄からフォーカスが外れていても、Esc で作業を止められるようにする
+  if (e.key === "Escape" && !target.closest("input, textarea, select, dialog, .lg-menu, #files")) {
+    if (log.escape()) e.preventDefault();
+    return;
+  }
   if (target.closest("input, textarea, select, dialog, button")) return;
   if (e.key.length === 1) {
     e.preventDefault();
@@ -2343,6 +2610,7 @@ const KEY_GROUPS: { title: string; keys: { k: string; d: string; first?: boolean
     title: "全体",
     keys: [
       { k: "Ctrl+Shift+N", d: "新しいセッション", first: true },
+      { k: "Ctrl+Shift+H", d: "過去の会話の続きから開く", first: true },
       { k: "Ctrl+0", d: "一覧 / 直前のセッションへ切り替え", first: true },
       { k: "Ctrl+1〜9", d: "サイドバーの番号のセッションへ切り替え", first: true },
       { k: "Ctrl+Shift+A", d: "次の入力待ちのセッションへ移動", first: true },
@@ -2404,6 +2672,12 @@ function showKeys() {
 }
 $("keys-btn").onclick = showKeys;
 $("keys-close").onclick = () => keysDialog.close();
+keysDialog.onclick = (ev) => {
+  if (ev.target !== keysDialog) return;
+  const r = keysDialog.getBoundingClientRect();
+  const inside = ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom;
+  if (!inside) keysDialog.close();
+};
 
 // キャプチャ段階で拾うので、ターミナルにフォーカスがあっても先に処理される
 
@@ -2427,6 +2701,8 @@ document.addEventListener(
       insertTemplate();
     } else if (e.ctrlKey && e.shiftKey && k === "n") {
       openProjectPicker();
+    } else if (e.ctrlKey && e.shiftKey && k === "h") {
+      openHistory();
     } else if (e.ctrlKey && e.shiftKey && k === "a") {
       nextWaiting();
     } else if (e.ctrlKey && e.shiftKey && k === "b") {

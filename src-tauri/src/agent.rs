@@ -15,14 +15,18 @@ pub enum Agent {
     Antigravity,
 }
 
+fn extra_args(extra: &str) -> String {
+    let extra: String = extra.chars().filter(|c| !c.is_control()).collect();
+    if extra.trim().is_empty() { String::new() } else { format!(" {}", extra.trim()) }
+}
+
 impl Agent {
     /// bash に入力する起動コマンド。`claude_settings` は Claude Code に渡す hooks 設定のパス。
     /// `extra` は設定で足す引数（`--model sonnet` など）。利用者が書いたものをそのまま渡すが、
     /// 改行が入ると bash がそこで別のコマンドとして実行するので、制御文字は取り除く。
     /// 再開は、再開する会話が無いと失敗する（終了コード 1）ので、そのときは新しく始める。
     pub fn launch_line(self, claude_settings: &str, resume: bool, extra: &str) -> Option<String> {
-        let extra: String = extra.chars().filter(|c| !c.is_control()).collect();
-        let x = if extra.trim().is_empty() { String::new() } else { format!(" {}", extra.trim()) };
+        let x = extra_args(extra);
         let (start, cont) = match self {
             Agent::Shell => return None,
             Agent::Claude => (
@@ -35,6 +39,18 @@ impl Agent {
             Agent::Antigravity => (format!("agy{x}"), format!("agy{x} --continue")),
         };
         Some(if resume { format!("{cont} || {start}\r") } else { format!("{start}\r") })
+    }
+
+    /// 指定した会話の続きから開く起動コマンド（過去の会話の一覧から選んだとき）。
+    /// 選んだ会話が開けなければ、新しく始めずにエージェントのエラーをそのまま見せる。
+    /// `id` は呼び出し側で history::valid_id を通したもの
+    pub fn resume_line(self, claude_settings: &str, id: &str, extra: &str) -> Option<String> {
+        let x = extra_args(extra);
+        match self {
+            Agent::Claude => Some(format!("claude{x} --resume {id} --settings '{claude_settings}'\r")),
+            Agent::Codex => Some(format!("codex -p tower{x} resume {id}\r")),
+            _ => None,
+        }
     }
 
     /// hooks を使えないので、画面の内容から状態を推測するか
@@ -126,6 +142,13 @@ mod tests {
         assert_eq!(Agent::Codex.launch_line("", true, "-m o4").unwrap(), "codex -p tower -m o4 resume --last || codex -p tower -m o4\r");
         // 改行で別のコマンドを走らせない
         assert_eq!(Agent::Copilot.launch_line("", false, "--x\rrm -rf ~\n").unwrap(), "copilot --xrm -rf ~\r");
+    }
+
+    #[test]
+    fn resume_a_chosen_conversation() {
+        assert_eq!(Agent::Claude.resume_line("s.json", "abc-1", "--model sonnet").unwrap(), "claude --model sonnet --resume abc-1 --settings 's.json'\r");
+        assert_eq!(Agent::Codex.resume_line("", "abc-1", "").unwrap(), "codex -p tower resume abc-1\r");
+        assert!(Agent::Copilot.resume_line("", "abc-1", "").is_none());
     }
 
     #[test]

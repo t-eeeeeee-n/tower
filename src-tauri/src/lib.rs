@@ -2,6 +2,7 @@ pub mod agent;
 mod commands;
 mod files;
 mod git;
+mod history;
 mod trust;
 pub mod hooks;
 mod job;
@@ -68,9 +69,15 @@ fn create_session(
     cwd: String,
     agent: Agent,
     resume: bool,
+    resume_id: Option<String>,
     args: Option<String>,
 ) -> Result<SessionInfo, String> {
-    state.manager.create(&app, name, cwd, agent, resume, args.as_deref().unwrap_or(""))
+    state.manager.create(&app, name, cwd, agent, resume, resume_id.as_deref(), args.as_deref().unwrap_or(""))
+}
+
+#[tauri::command(async)]
+fn past_conversations(cwd: String) -> Vec<history::Past> {
+    history::list(&cwd, hooks::home_dir("CLAUDE_CONFIG_DIR", ".claude").as_deref(), hooks::home_dir("CODEX_HOME", ".codex").as_deref())
 }
 
 fn session_root(state: &App, id: &str) -> Result<std::path::PathBuf, String> {
@@ -341,6 +348,42 @@ fn save_pasted_image(bytes: Vec<u8>, mime: String) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// 発言に書かれた画像ファイル（貼り付けた画像は場所の文字で渡しているので、記録にも文字で残る）を、表示用の data URL にする
+#[tauri::command(async)]
+fn read_image(path: String) -> Result<String, String> {
+    let p = std::path::Path::new(&path);
+    let ext = p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => return Err("画像ではありません".into()),
+    };
+    if !p.is_absolute() {
+        return Err("場所が絶対パスではありません".into());
+    }
+    let size = std::fs::metadata(p).map_err(|e| e.to_string())?.len();
+    // 会話の表示が重くならないよう、スクリーンショットほどの大きさまで
+    if size > 3 << 20 {
+        return Err("画像が大きすぎます".into());
+    }
+    let bytes = std::fs::read(p).map_err(|e| e.to_string())?;
+    Ok(format!("data:{mime};base64,{}", base64(&bytes)))
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            out.push(if i <= c.len() { T[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
 #[tauri::command]
 fn set_tray_waiting(app: AppHandle, count: usize) {
     tray::set_waiting(&app, count);
@@ -387,6 +430,7 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             log_panics(dir.clone());
             usage::init(&dir);
+            hooks::init_log(&dir);
             let settings_path = dir.join("hooks-settings.json");
             let mut hooks_error = None;
             if let Err(e) = hooks::write_settings(&settings_path) {
@@ -432,6 +476,7 @@ pub fn run() {
             set_close_to_tray,
             set_tray_waiting,
             save_pasted_image,
+            read_image,
             session_heads,
             worktree_state,
             merge_worktree,
@@ -454,6 +499,7 @@ pub fn run() {
             attach_session,
             peek_sessions,
             read_transcript,
+            past_conversations,
             session_footer,
             session_tail,
             list_subagents,
@@ -468,4 +514,17 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tower");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn base64_matches_the_standard_encoding() {
+        assert_eq!(super::base64(b""), "");
+        assert_eq!(super::base64(b"f"), "Zg==");
+        assert_eq!(super::base64(b"fo"), "Zm8=");
+        assert_eq!(super::base64(b"foo"), "Zm9v");
+        assert_eq!(super::base64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(super::base64(&[0xff, 0xfe, 0xfd]), "//79");
+    }
 }

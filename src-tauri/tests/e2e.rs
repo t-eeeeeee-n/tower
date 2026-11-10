@@ -36,7 +36,7 @@ fn session_end_to_end() {
         handle.listen_any("session-status", move |e| events.lock().unwrap().push(e.payload().to_string()));
     }
 
-    let info = manager.create(&handle, "test".into(), dir.to_string_lossy().into(), Agent::Shell, false, "").unwrap();
+    let info = manager.create(&handle, "test".into(), dir.to_string_lossy().into(), Agent::Shell, false, None, "").unwrap();
     let id = info.id.clone();
 
     let received: Arc<Mutex<String>> = Arc::default();
@@ -119,7 +119,7 @@ fn session_end_to_end() {
     assert!(wait_until(15000, || serde_json::to_string(&manager.get(&id).unwrap().info()).unwrap().contains("\"idle\"")));
 
     // 表示していないセッションでも、ConPTY の問い合わせで止まらずに動く（前回のセッションの再開で使う）
-    let bg = manager.create(&handle, "bg".into(), dir.to_string_lossy().into(), Agent::Shell, false, "").unwrap().id;
+    let bg = manager.create(&handle, "bg".into(), dir.to_string_lossy().into(), Agent::Shell, false, None, "").unwrap().id;
     manager.write(&bg, "echo 裏で動作-$DASH_SESSION_ID\r").unwrap();
     assert!(
         wait_until(15000, || manager

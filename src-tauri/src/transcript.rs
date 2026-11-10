@@ -53,6 +53,10 @@ pub struct Entry {
     /// 予定のツール（TodoWrite・TaskCreate・TaskUpdate）の入力。会話の表示が予定の一覧を組み立てる
     #[serde(skip_serializing_if = "Option::is_none")]
     pub todo: Option<Value>,
+    /// この返事でプロンプトキャッシュに書いた分の有効時間（秒）。1 時間なら 3600、5 分なら 300、読んだだけなら 0。
+    /// 返事の行（Claude Code の message.usage.cache_creation）の最初の項目だけに付く
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_ttl: Option<u32>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -483,7 +487,7 @@ fn codex_file(root: &Path, id: &str) -> Option<PathBuf> {
     day_dirs(root).iter().flat_map(|d| jsonl_in(d)).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&name)))
 }
 
-fn first_line(path: &Path) -> Option<Value> {
+pub(crate) fn first_line(path: &Path) -> Option<Value> {
     use std::io::BufRead;
     let mut line = String::new();
     std::io::BufReader::new(std::fs::File::open(path).ok()?).read_line(&mut line).ok()?;
@@ -572,7 +576,7 @@ fn current_branch(lines: Vec<Value>) -> Vec<Value> {
     keep
 }
 
-fn entries_of(v: &Value) -> Vec<Entry> {
+pub(crate) fn entries_of(v: &Value) -> Vec<Entry> {
     if v.get("isMeta").and_then(Value::as_bool).unwrap_or(false) {
         return typed_skill(v).into_iter().collect();
     }
@@ -607,7 +611,21 @@ fn entries_of(v: &Value) -> Vec<Entry> {
             (e.outcome, e.change) = outcome_of(d);
         }
     }
+    if let (Some(first), Some(usage)) = (entries.first_mut(), v.pointer("/message/usage")) {
+        first.cache_ttl = Some(cache_ttl(usage));
+    }
     entries
+}
+
+fn cache_ttl(usage: &Value) -> u32 {
+    let tokens = |k: &str| usage.pointer(&format!("/cache_creation/{k}")).and_then(Value::as_u64).unwrap_or(0);
+    if tokens("ephemeral_1h_input_tokens") > 0 {
+        3600
+    } else if tokens("ephemeral_5m_input_tokens") > 0 {
+        300
+    } else {
+        0
+    }
 }
 
 /// Claude Code の toolUseResult から、結果の短い要約と、ファイルの変更を作る。
@@ -690,7 +708,7 @@ fn codex_entries(p: &Value) -> Vec<Entry> {
                 Ok(v @ Value::Object(_)) => tool_summary(&v),
                 _ => truncate(raw.trim(), MAX_TOOL_INPUT),
             };
-            vec![Entry { kind: Kind::Tool, text, tool: Some(name), id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None }]
+            vec![Entry { kind: Kind::Tool, text, tool: Some(name), id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None, cache_ttl: None }]
         }
         Some("function_call_output" | "custom_tool_call_output") => {
             let text = match p.get("output") {
@@ -702,7 +720,7 @@ fn codex_entries(p: &Value) -> Vec<Entry> {
                 Some(v) => v.get("content").and_then(Value::as_str).map(String::from).unwrap_or_else(|| v.to_string()),
                 None => String::new(),
             };
-            vec![Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None }]
+            vec![Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None, cache_ttl: None }]
         }
         _ => Vec::new(),
     }
@@ -727,7 +745,7 @@ fn typed_skill(v: &Value) -> Option<Entry> {
 }
 
 fn entry(kind: Kind, text: String) -> Entry {
-    Entry { kind, text, tool: None, id: None, error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None }
+    Entry { kind, text, tool: None, id: None, error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None, cache_ttl: None }
 }
 
 /// 人が打った発言。スラッシュコマンドは名前だけにし、Claude Code が差し込むタグ付きの文は出さない
@@ -795,7 +813,7 @@ fn user_block(b: &Value) -> Option<Entry> {
             };
             let error = b.get("is_error").and_then(Value::as_bool).unwrap_or(false);
             let id = b.get("tool_use_id").and_then(Value::as_str).map(String::from);
-            Some(Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id, error, images, at: None, outcome: None, change: None, todo: None })
+            Some(Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id, error, images, at: None, outcome: None, change: None, todo: None, cache_ttl: None })
         }
         _ => None,
     }
@@ -830,7 +848,7 @@ fn assistant_block(b: &Value) -> Option<Entry> {
             let text = tool_summary(b.get("input").unwrap_or(&Value::Null));
             let id = b.get("id").and_then(Value::as_str).map(String::from);
             let todo = TODO_TOOLS.contains(&name.as_str()).then(|| b.get("input").cloned()).flatten();
-            Some(Entry { kind: Kind::Tool, text, tool: Some(name), id, error: false, images: Vec::new(), at: None, outcome: None, change: None, todo })
+            Some(Entry { kind: Kind::Tool, text, tool: Some(name), id, error: false, images: Vec::new(), at: None, outcome: None, change: None, todo, cache_ttl: None })
         }
         _ => None,
     }
@@ -1063,6 +1081,16 @@ mod tests {
         let r = json!({"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"err"}],"is_error":true}]}});
         let e = entries_of(&r);
         assert!(e[0].error && e[0].kind == Kind::Result && e[0].text == "err");
+    }
+
+    #[test]
+    fn cache_ttl_from_usage() {
+        let say = |usage: Value| json!({"type":"assistant","message":{"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}],"usage":usage}});
+        let ttl = |usage: Value| entries_of(&say(usage)).iter().map(|e| e.cache_ttl).collect::<Vec<_>>();
+        assert_eq!(ttl(json!({"cache_creation":{"ephemeral_1h_input_tokens":5,"ephemeral_5m_input_tokens":0}})), vec![Some(3600), None]);
+        assert_eq!(ttl(json!({"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":5}})), vec![Some(300), None]);
+        assert_eq!(ttl(json!({"cache_read_input_tokens":9})), vec![Some(0), None]);
+        assert_eq!(entries_of(&json!({"type":"assistant","message":{"content":[{"type":"text","text":"a"}]}}))[0].cache_ttl, None);
     }
 
     #[test]

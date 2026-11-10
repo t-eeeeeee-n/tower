@@ -22,6 +22,7 @@ pub fn start<R: Runtime>(app: AppHandle<R>, manager: Arc<Manager>) {
         let mut sys = System::new();
         loop {
             std::thread::sleep(Duration::from_millis(2500));
+            manager.settle_awaiting(&app);
             let sessions = manager.all();
             if sessions.is_empty() {
                 continue;

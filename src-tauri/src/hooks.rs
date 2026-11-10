@@ -299,15 +299,61 @@ fn read_notification(body: &str) -> Notice {
 /// 時間をおいて起きる予定（ScheduleWakeup など）は session_crons に入る。
 /// サブエージェント・ワークフロー・Monitor・起きる予定は、終われば続きを始めるので結果待ちとみなす。
 /// シェルは、結果を待っているのか、開発用サーバーのように置いたままなのかが入力から分からないので数えない
-fn awaiting_results(body: &str) -> bool {
-    let Ok(v) = serde_json::from_str::<Value>(body.trim_start_matches('\u{feff}')) else { return false };
-    let tasks = v.get("background_tasks").and_then(Value::as_array).is_some_and(|tasks| {
-        tasks.iter().any(|t| {
-            matches!(t.get("type").and_then(Value::as_str), Some("subagent" | "workflow" | "teammate" | "monitor"))
-                && t.get("status").and_then(Value::as_str) == Some("running")
-        })
-    });
-    tasks || v.get("session_crons").and_then(Value::as_array).is_some_and(|c| !c.is_empty())
+fn awaiting_results(body: &str) -> Option<&'static str> {
+    let Ok(v) = serde_json::from_str::<Value>(body.trim_start_matches('\u{feff}')) else { return None };
+    let running: Vec<&str> = v
+        .get("background_tasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|t| t.get("status").and_then(Value::as_str) == Some("running"))
+        .filter_map(|t| t.get("type").and_then(Value::as_str))
+        .filter(|t| matches!(*t, "subagent" | "workflow" | "teammate" | "monitor"))
+        .collect();
+    let crons = v.get("session_crons").and_then(Value::as_array).is_some_and(|c| !c.is_empty());
+    // 待っているのがサブエージェントだけなら、記録で終わったと分かった時点で指示待ちに戻せる（Manager::settle_awaiting）
+    if !crons && !running.is_empty() && running.iter().all(|t| *t == "subagent") {
+        Some("awaiting_agents")
+    } else if crons || !running.is_empty() {
+        Some("awaiting")
+    } else {
+        None
+    }
+}
+
+static TRANSCRIPT_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// 会話の記録ファイルの切り替わりを書き残す場所（アプリのデータのフォルダ）
+pub fn init_log(app_dir: &Path) {
+    let _ = TRANSCRIPT_LOG.set(app_dir.join("transcript-switch.log"));
+}
+
+/// SessionStart・SessionEnd で届いた記録ファイルを、そのときの状態と一緒に transcript-switch.log に書き足す。
+/// 作業中に会話の表示が空になることがあり、どの source の SessionStart で別のファイルへ切り替わったかを調べるため。
+/// 書くのはファイルの場所と状態だけで、会話の中身は書かない
+fn log_transcript_event(manager: &Manager, id: &str, event: &str, body: &str, path: Option<&Path>) {
+    let Some(log) = TRANSCRIPT_LOG.get() else { return };
+    let v: Value = serde_json::from_str(body.trim_start_matches('\u{feff}')).unwrap_or(Value::Null);
+    let field = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("-").to_string();
+    let current = manager.transcript(id).ok().flatten();
+    let status = manager.get(id).ok().map(|s| serde_json::to_string(&s.info().state.status).unwrap_or_default()).unwrap_or_default();
+    let show = |p: Option<&Path>| p.map_or("-".to_string(), |p| p.display().to_string());
+    let line = format!(
+        "{} [{}] session={id} event={event} source={} agent_type={} status={status} changed={} exists={}\n  now: {}\n  new: {}\n",
+        crate::session::now_ms(),
+        env!("CARGO_PKG_VERSION"),
+        field("source"),
+        field("agent_type"),
+        path.is_some() && current.as_deref() != path,
+        path.is_some_and(Path::exists),
+        show(current.as_deref()),
+        show(path),
+    );
+    // 書き足し続けて大きくならないよう、1 MB を超えたら作り直す
+    let large = std::fs::metadata(log).is_ok_and(|m| m.len() > 1 << 20);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(!large).write(true).truncate(large).open(log) {
+        let _ = std::io::Write::write_all(&mut f, line.as_bytes());
+    }
 }
 
 pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: AppHandle<R>, manager: Arc<Manager>) {
@@ -336,20 +382,33 @@ pub fn serve<R: Runtime>(server: tiny_http::Server, endpoint: Endpoint, app: App
                     }
                 } else {
                     if parts[2] == "session_start" {
-                        if let Some(path) = crate::transcript::path_from_hook(&body) {
+                        let path = crate::transcript::path_from_hook(&body);
+                        log_transcript_event(&manager, &parts[1], "session_start", &body, path.as_deref());
+                        if let Some(path) = path {
                             manager.set_transcript(&parts[1], path);
                         }
                     }
                     // 今見ている会話とは別の会話の終わり（書き直して分かれる前の会話）なら、エージェントはまだ動いている
                     if parts[2] == "session_end" {
                         let ended = crate::transcript::path_from_hook(&body);
+                        log_transcript_event(&manager, &parts[1], "session_end", &body, ended.as_deref());
                         let current = manager.transcript(&parts[1]).ok().flatten();
                         if ended.is_some() && current.is_some() && ended != current {
                             let _ = req.respond(tiny_http::Response::empty(204));
                             continue;
                         }
                     }
-                    let event = if parts[2] == "stop" && awaiting_results(&body) { "awaiting" } else { &parts[2] };
+                    let event = if parts[2] == "stop" {
+                        match awaiting_results(&body) {
+                            // Claude Code の内部の観察用エージェントも subagent として入り、会話に出ないまま動き続けることがあるので、
+                            // 会話の記録で自分で裏に回したサブエージェントが動いているときだけ結果待ちにする
+                            Some("awaiting_agents") if !manager.running_subagents(&parts[1]) => "stop",
+                            Some(e) => e,
+                            None => "stop",
+                        }
+                    } else {
+                        &parts[2]
+                    };
                     manager.apply_hook(&app, &parts[1], event, None);
                 }
             }
@@ -378,17 +437,17 @@ mod tests {
     #[test]
     fn stop_with_background_subagents() {
         let running = r#"{"background_tasks":[{"id":"a1","type":"subagent","status":"running","agent_type":"general-purpose"}]}"#;
-        assert!(awaiting_results(running));
-        let monitor = r#"{"background_tasks":[{"id":"m1","type":"monitor","status":"running"}],"session_crons":[]}"#;
-        assert!(awaiting_results(monitor));
-        assert!(awaiting_results(r#"{"background_tasks":[],"session_crons":[{"id":"c1"}]}"#));
+        assert_eq!(awaiting_results(running), Some("awaiting_agents"));
+        let monitor = r#"{"background_tasks":[{"id":"m1","type":"monitor","status":"running"},{"id":"a1","type":"subagent","status":"running"}],"session_crons":[]}"#;
+        assert_eq!(awaiting_results(monitor), Some("awaiting"));
+        assert_eq!(awaiting_results(r#"{"background_tasks":[],"session_crons":[{"id":"c1"}]}"#), Some("awaiting"));
         let shell = r#"{"background_tasks":[{"id":"b1","type":"shell","status":"running","command":"npm run dev"}]}"#;
-        assert!(!awaiting_results(shell));
+        assert_eq!(awaiting_results(shell), None);
         let done = r#"{"background_tasks":[{"id":"a1","type":"subagent","status":"completed"}],"session_crons":[]}"#;
-        assert!(!awaiting_results(done));
-        assert!(!awaiting_results(r#"{"background_tasks":[]}"#));
+        assert_eq!(awaiting_results(done), None);
+        assert_eq!(awaiting_results(r#"{"background_tasks":[]}"#), None);
         // Codex と Copilot CLI の Stop は中身を送らない
-        assert!(!awaiting_results(""));
+        assert_eq!(awaiting_results(""), None);
     }
 
     #[test]

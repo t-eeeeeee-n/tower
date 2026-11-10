@@ -163,6 +163,8 @@ pub struct Session {
     hooks_seen: Arc<AtomicBool>,
     /// 確認に答えてから、次の hooks のイベントが届くまでの間か。その間も画面から推測する
     answered: Arc<AtomicBool>,
+    /// 結果待ちで、待っているのが裏のサブエージェントだけか（Manager::settle_awaiting）
+    awaiting_agents: AtomicBool,
     /// Claude Code の会話の記録（JSONL）。SessionStart の hook で届き、/clear や再開のたびに変わる
     transcript: Mutex<Option<PathBuf>>,
     _job: Option<Job>,
@@ -272,8 +274,12 @@ impl Manager {
         cwd: String,
         agent: Agent,
         resume: bool,
+        resume_id: Option<&str>,
         extra_args: &str,
     ) -> Result<SessionInfo, String> {
+        if resume_id.is_some_and(|id| !crate::history::valid_id(id)) {
+            return Err("会話の ID として使えません".into());
+        }
         if !Path::new(&cwd).is_dir() {
             return Err(format!("フォルダが見つかりません: {cwd}"));
         }
@@ -442,7 +448,11 @@ impl Manager {
         }
 
         let settings = self.hooks_settings.to_string_lossy().replace('\\', "/");
-        if let Some(line) = agent.launch_line(&settings, resume, extra_args) {
+        let line = match resume_id {
+            Some(id) => agent.resume_line(&settings, id, extra_args),
+            None => agent.launch_line(&settings, resume, extra_args),
+        };
+        if let Some(line) = line {
             let mut w = writer.lock().unwrap();
             let _ = w.write_all(line.as_bytes());
             let _ = w.flush();
@@ -462,6 +472,7 @@ impl Manager {
             killer: Mutex::new(killer),
             hooks_seen,
             answered,
+            awaiting_agents: AtomicBool::new(false),
             transcript: Mutex::new(None),
             _job: job,
         });
@@ -600,7 +611,7 @@ impl Manager {
         let next = match event {
             "session_start" | "stop" => Status::Idle,
             "user_prompt_submit" | "pre_tool_use" => Status::Running,
-            "awaiting" => Status::Awaiting,
+            "awaiting" | "awaiting_agents" => Status::Awaiting,
             // フォアグラウンドのサブエージェントなら、メインも作業中のまま
             "subagent_tool" if session.state.lock().unwrap().status == Status::Awaiting => return,
             "subagent_tool" => Status::Running,
@@ -610,7 +621,30 @@ impl Manager {
             "session_end" => Status::Shell,
             _ => return,
         };
+        session.awaiting_agents.store(event == "awaiting_agents", Ordering::Relaxed);
         set_status(app, id, &session.state, next, message);
+    }
+
+    /// 会話の記録で、裏に回したサブエージェントが動いているか。記録がまだ分からなければ動いているとみなす
+    pub fn running_subagents(&self, id: &str) -> bool {
+        let Ok(Some(path)) = self.transcript(id) else { return true };
+        crate::transcript::subagents(&path).iter().any(|a| a.running == Some(true))
+    }
+
+    /// 裏のサブエージェントだけを待っている結果待ちを、記録で全部終わった（止められたものも含む）と分かったら指示待ちに戻す。
+    /// 止められたときなど、Claude Code が続きの応答を始めず Stop が届かないことがあり、そのままだと結果待ちが残るため
+    pub fn settle_awaiting<R: Runtime>(&self, app: &AppHandle<R>) {
+        for s in self.all() {
+            let since = { let st = s.state.lock().unwrap(); (st.status == Status::Awaiting).then_some(st.since) };
+            let Some(since) = since else { continue };
+            // Stop の直後は、呼び出しの結果がまだ記録に書かれていないことがある
+            if !s.awaiting_agents.load(Ordering::Relaxed) || now_ms().saturating_sub(since) < 5000 {
+                continue;
+            }
+            if !self.running_subagents(&s.id) {
+                set_status(app, &s.id, &s.state, Status::Idle, None);
+            }
+        }
     }
 }
 
