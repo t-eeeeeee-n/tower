@@ -1,4 +1,5 @@
 // 指示のテンプレート。選ぶと入力欄に入れるだけで、送信はしない
+import { storage } from "./store";
 interface Template {
   name: string;
   text: string;
@@ -22,7 +23,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
 
 function load(): Template[] {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = storage.getItem(KEY);
     // 初めて使うときだけ例を入れておく（全部消したあとは空のまま）
     if (raw === null) return SAMPLES.map((t) => ({ ...t }));
     const v = JSON.parse(raw);
@@ -34,7 +35,7 @@ function load(): Template[] {
 
 function save(list: Template[]) {
   try {
-    localStorage.setItem(KEY, JSON.stringify(list));
+    storage.setItem(KEY, JSON.stringify(list));
   } catch {
     /* 保存できなくても動作には影響しない */
   }

@@ -16,6 +16,7 @@ import type { SlashCommand } from "./slash";
 import { createTemplates } from "./templates";
 import { createSettings } from "./settings";
 import { createMarks, MARK_COLORS, type MarkColor } from "./marks";
+import { storage } from "./store";
 
 type Status = "shell" | "starting" | "idle" | "running" | "waiting" | "exited";
 type Agent = "shell" | "claude" | "codex" | "copilot" | "antigravity";
@@ -128,7 +129,10 @@ async function sendPrompt(id: string | null, text: string) {
   const agent = sessions.get(id)?.agent;
   // 起動したばかりで入力欄がまだ無いうちに書くと、シェルや起動中のエージェントに読まれて消える。
   // 状態は画面が止まっただけで指示待ちになるので、入力欄が出るまで待つ
-  if (agent === "codex" || agent === "claude") await waitForInput(id, agent);
+  if (agent === "codex" || agent === "claude") {
+    await waitForInput(id, agent);
+    await refuseDraft(id);
+  }
   // 「!」で始めるとシェルのコマンドとして実行する。エージェントは打った「!」でシェルのモードに切り替わり、
   // 貼り付けた「!」では切り替わらないので、「!」だけを打ってから残りを貼り付ける
   if (body.startsWith("!") && sessions.get(id)?.agent === "claude") {
@@ -186,8 +190,50 @@ function stillTyped(lines: string[], agent: string, body: string) {
   return squash(input).includes(head) || (agent === "claude" && /\[Pasted text #\d+/.test(input));
 }
 
+// エージェントの入力欄に書きかけの文（ターミナルで打ったものなど）。薄く出ている次の指示の候補は除く。
+// 1 行目だけを見る
+async function draftIn(id: string): Promise<string> {
+  const agent = sessions.get(id)?.agent;
+  if (agent !== "claude" && agent !== "codex") return "";
+  const spans = await invoke<Span[][]>("session_tail", { id, lines: 45 }).catch(() => [] as Span[][]);
+  const texts = spans.map((l) => l.map((x) => x.t).join("").trimEnd());
+  const line = inputLine(texts, agent);
+  if (!line) return "";
+  const typed = spans[texts.lastIndexOf(line)].map((s) => (faint(s) && !(s.f & CURSOR_FLAG) ? "" : s.t)).join("");
+  return typed.replace(/^\s*[❯›]\s?/, "").trim();
+}
+
+// 書きかけの文があると、送る文やコマンドがその後ろにつながって送られてしまうので、送らずに知らせる
+async function refuseDraft(id: string) {
+  const draft = await draftIn(id);
+  if (draft) throw new Error(`エージェントの入力欄に書きかけの文があります（「${draft.slice(0, 40)}」）。ターミナルの表示で消すか送ってから、もう一度送ってください`);
+}
+
+// 選んだファイルの場所を入力欄に入れる（エージェントは場所から読む。画像も同じ）
+async function attachFiles(id: string) {
+  const picked = await open({ multiple: true, directory: false, defaultPath: sessions.get(id)?.cwd }).catch(showError);
+  if (picked) insertPaths(id, Array.isArray(picked) ? picked : [picked]);
+}
+
 function interruptSession(id: string | null) {
-  if (id) invoke("write_session", { id, data: "\x1b" }).catch(showError);
+  if (!id) return;
+  invoke("write_session", { id, data: "\x1b" })
+    .then(() => restoreInterrupted(id))
+    .catch(showError);
+}
+
+// 作業中に止めると、Claude Code は送った指示（作業中に送って待っていたものも）を自分の入力欄に戻す。
+// そのままだと次に会話の入力欄から送った文がその後ろにつながるので、会話の入力欄に移す（ターミナルで止めたときと同じに見える）
+const INTERRUPT_SETTLE_MS = 900;
+async function restoreInterrupted(id: string) {
+  if (sessions.get(id)?.agent !== "claude") return;
+  const at = Date.now();
+  await sleep(INTERRUPT_SETTLE_MS);
+  const back = await takeInput(id);
+  if (!back) return;
+  const target = id === attachedId && view === "session" ? log : cardViews.get(id);
+  target?.dropRestored(back, at);
+  target?.restore(back);
 }
 
 const log = createTranscriptPanel({
@@ -214,6 +260,8 @@ const log = createTranscriptPanel({
   findFiles: (query) => (attachedId ? invoke<string[]>("find_files", { id: attachedId, query }) : Promise.resolve([])),
   sendKeys: (data) => attachedId && writeKeys(attachedId, data),
   copy: copyText,
+  attach: () => attachedId && attachFiles(attachedId),
+  showDiff: (path, diff) => files.showPatch(path, diff),
   switchMode: (mode) => (attachedId ? switchMode(attachedId, mode) : Promise.resolve(false)),
   stopTask: (label) => (attachedId ? stopTask(attachedId, label) : Promise.resolve(false)),
   modelChoices: () => (attachedId ? openModelPicker(attachedId) : Promise.resolve(null)),
@@ -308,6 +356,11 @@ async function rewindAnswer(id: string, key: string) {
     await write(id, "");
     await sleep(400);
   }
+  return takeInput(id);
+}
+
+// Claude Code の入力欄に入っている文を読み取り、入力欄から消して返す（巻き戻しや中断で戻された発言を、会話の入力欄に移すため）
+async function takeInput(id: string) {
   const spans = await invoke<Span[][]>("session_tail", { id, lines: 45 });
   const lines = spans.map((l) => l.map((x) => x.t).join("").trimEnd());
   // 入力欄は、区切りの線に挟まれた「❯」の行
@@ -395,6 +448,9 @@ async function rewindCancel(id: string) {
   if ((await screenText(id)).some((l) => l.trim() === "Rewind")) await write(id, "\x1b");
 }
 
+const PROMPT_BLOCK_LINES = 30;
+const PROMPT_DETAIL_LINES = 12;
+
 // 入力待ちの画面から、確認や選択肢（「❯ 1. Yes」「  2. No」のような番号付きの行）を読み取る。
 // エージェントの画面の形に頼るので、読み取れなければ null（呼び出し側はターミナルに切り替えて答えてもらう）
 function parsePrompt(lines: string[]): PromptChoice | null {
@@ -418,10 +474,34 @@ function parsePrompt(lines: string[]): PromptChoice | null {
     }
   }
   if (options.length < 2 || options.some((o, i) => o.key !== String(i + 1))) return null;
+  const top = (t: string) => /^[─━\-=_]{3,}$/.test(t) || TABS_LINE.test(t);
+  // Claude Code の許可の確認は、線の下に「Bash command」・説明・コマンド・問いを空行で区切って並べる。
+  // 問いだけでは何を許すのか分からないので、近くに線があれば線の下からを出す。最後の段落が問い
+  let ruleAt = -1;
+  for (let i = first - 1; i >= Math.max(0, first - PROMPT_BLOCK_LINES); i--) {
+    if (top(clean[i].trim())) {
+      ruleAt = i;
+      break;
+    }
+  }
+  if (ruleAt >= 0) {
+    const paras: string[][] = [[]];
+    for (const l of clean.slice(ruleAt + 1, first)) {
+      const t = l.trim();
+      if (/^[╌┄┈]{3,}$/.test(t)) continue;
+      if (t) paras[paras.length - 1].push(t);
+      else if (paras[paras.length - 1].length) paras.push([]);
+    }
+    const filled = paras.filter((p) => p.length);
+    const question = filled.pop()?.join("\n") ?? "";
+    let detail = filled.flat();
+    if (detail.length > PROMPT_DETAIL_LINES) detail = [...detail.slice(0, PROMPT_DETAIL_LINES), "…"];
+    return { question, detail: detail.join("\n") || undefined, options };
+  }
   const question: string[] = [];
   for (let i = first - 1; i >= 0 && question.length < 6; i--) {
     const t = clean[i].trim();
-    if (/^[─━\-=_]{3,}$/.test(t) || TABS_LINE.test(t)) break;
+    if (top(t)) break;
     // 実行するコマンドを囲む点線（Claude Code の許可の確認）は、区切りではなく飾りなので飛ばす
     if (/^[╌┄┈]{3,}$/.test(t)) continue;
     if (t) question.unshift(t);
@@ -547,7 +627,7 @@ const slashCards = new Set<string>();
 // 許可の確認や選択肢はターミナルにしか出ないので、入力待ちになったら作業が再開するまでターミナルに戻す
 let preferLog = false;
 try {
-  preferLog = localStorage.getItem("logOpen") === "1";
+  preferLog = storage.getItem("logOpen") === "1";
 } catch {
   /* 読めなければターミナル */
 }
@@ -559,8 +639,9 @@ function applyLogView() {
   const showLog = supported && preferLog && !termUntilRunning;
   $("term-wrap").hidden = showLog;
   log.show(showLog);
-  $("log-btn").hidden = !supported;
+  $("view-switch").hidden = !supported;
   $("log-btn").setAttribute("aria-pressed", String(showLog));
+  $("term-view-btn").setAttribute("aria-pressed", String(!showLog));
   log.setStatus((attachedId && sessions.get(attachedId)?.status) || "");
   if (!showLog) fitTerm();
 }
@@ -571,7 +652,7 @@ function toggleLogView() {
   preferLog = !showingLog;
   termUntilRunning = false;
   try {
-    localStorage.setItem("logOpen", preferLog ? "1" : "0");
+    storage.setItem("logOpen", preferLog ? "1" : "0");
   } catch {
     /* 保存できなくても切り替えは効く */
   }
@@ -588,7 +669,7 @@ function focusInput() {
 // サイドバーは、たたむと番号と状態のランプだけの細い帯になる（入力待ちに気づけるように、完全には消さない）
 let sidebarCollapsed = false;
 try {
-  sidebarCollapsed = localStorage.getItem("sidebarCollapsed") === "1";
+  sidebarCollapsed = storage.getItem("sidebarCollapsed") === "1";
 } catch {
   /* 読めなければ開いた状態 */
 }
@@ -603,7 +684,7 @@ function applySidebar() {
 function toggleSidebar() {
   sidebarCollapsed = !sidebarCollapsed;
   try {
-    localStorage.setItem("sidebarCollapsed", sidebarCollapsed ? "1" : "0");
+    storage.setItem("sidebarCollapsed", sidebarCollapsed ? "1" : "0");
   } catch {
     /* 保存できなくても動作には影響しない */
   }
@@ -818,7 +899,7 @@ function saveSessions() {
       const s = sessions.get(id)!;
       return { name: s.name, cwd: s.cwd, agent: s.agent };
     });
-    localStorage.setItem("lastSessions", JSON.stringify(list));
+    storage.setItem("lastSessions", JSON.stringify(list));
   } catch {
     /* 保存できなくても動作には影響しない */
   }
@@ -826,7 +907,7 @@ function saveSessions() {
 
 function savedSessions(): SavedSession[] {
   try {
-    return JSON.parse(localStorage.getItem("lastSessions") ?? "[]");
+    return JSON.parse(storage.getItem("lastSessions") ?? "[]");
   } catch {
     return [];
   }
@@ -1446,6 +1527,7 @@ function makeCardConversation(id: string) {
     findFiles: (query) => invoke<string[]>("find_files", { id, query }),
     sendKeys: (data) => writeKeys(id, data),
     copy: copyText,
+    attach: () => attachFiles(id),
     switchMode: (mode) => switchMode(id, mode),
     stopTask: (label) => stopTask(id, label),
     modelChoices: () => openModelPicker(id),
@@ -1695,6 +1777,7 @@ async function stopTask(id: string, label: string) {
 
 // モデルを選ぶ画面（/model）を裏で開き、番号付きの選択肢を読み取る。読み取れなければ閉じて null
 async function openModelPicker(id: string): Promise<PromptChoice | null> {
+  await refuseDraft(id);
   await write(id, "/model");
   await sleep(150);
   await write(id, "\r");
@@ -1753,7 +1836,8 @@ setInterval(() => {
   invoke<Span[][]>("session_footer", { id })
     .then((lines) => {
       if (id !== attachedId) return;
-      showFooter($("log-footer"), lines);
+      // 確認の画面の間は、入力欄の下ではなく確認の中身が拾われるので出さない（中身は確認の欄に出す）
+      showFooter($("log-footer"), sessions.get(id)?.status === "waiting" ? [] : lines);
       log.setMode(sessions.get(id)?.agent === "claude" ? modeOf(lines) : null);
     })
     .catch(() => {});
@@ -1850,7 +1934,7 @@ function applyOverviewLayout(layout: string) {
 {
   let saved = "auto";
   try {
-    saved = localStorage.getItem("ovLayout") ?? "auto";
+    saved = storage.getItem("ovLayout") ?? "auto";
   } catch {
     /* 読めなければ自動 */
   }
@@ -1865,7 +1949,7 @@ function applyOverviewLayout(layout: string) {
     for (const t of following) t.scrollTop = t.scrollHeight;
     fitCards();
     try {
-      localStorage.setItem("ovLayout", layout);
+      storage.setItem("ovLayout", layout);
     } catch {
       /* 保存できなくても切り替えは効く */
     }
@@ -2035,7 +2119,7 @@ let installedAgents = new Set<Agent>(AGENT_ORDER);
 
 function savedAgent(): Agent | null {
   try {
-    const a = localStorage.getItem("lastAgent");
+    const a = storage.getItem("lastAgent");
     if (a && a in AGENT_LABEL) return a as Agent;
   } catch {
     /* 読めなければ未選択にする */
@@ -2112,10 +2196,10 @@ const sameDir = (a: string, b: string) => a.replace(/\//g, "\\").toLowerCase() =
 
 function recents(): Recent[] {
   try {
-    const v = JSON.parse(localStorage.getItem("recentProjects") ?? "null");
+    const v = JSON.parse(storage.getItem("recentProjects") ?? "null");
     if (Array.isArray(v)) return v.filter((r) => typeof r?.cwd === "string");
     // 以前は場所だけを覚えていた
-    const dirs = JSON.parse(localStorage.getItem("recentDirs") ?? "[]");
+    const dirs = JSON.parse(storage.getItem("recentDirs") ?? "[]");
     return Array.isArray(dirs) ? dirs.filter((d) => typeof d === "string").map((cwd) => ({ cwd, agent: null, at: 0 })) : [];
   } catch {
     return [];
@@ -2124,7 +2208,7 @@ function recents(): Recent[] {
 
 function saveRecents(list: Recent[]) {
   try {
-    localStorage.setItem("recentProjects", JSON.stringify(list));
+    storage.setItem("recentProjects", JSON.stringify(list));
   } catch {
     /* 保存できなくても動作には影響しない */
   }
@@ -2161,6 +2245,15 @@ function projectItem(r: Recent, onRemove: () => void) {
   text.append(el("span", "recent-name", name), el("span", "recent-path", r.cwd));
   li.append(tile, text);
   if (r.agent) li.append(el("span", "agent-tag", AGENT_LABEL[r.agent]));
+  const hist = el("button", "recent-hist", "過去の会話");
+  hist.type = "button";
+  hist.tabIndex = -1;
+  hist.title = "このプロジェクトの過去の会話の続きから開く";
+  hist.onclick = (ev) => {
+    ev.stopPropagation();
+    openHistory(r.cwd);
+  };
+  li.append(hist);
   const del = el("button", "recent-del", "×");
   del.type = "button";
   del.tabIndex = -1;
@@ -2291,10 +2384,31 @@ interface PastConversation {
 
 const histDialog = $<HTMLDialogElement>("hist-dialog");
 const histSearch = $<HTMLInputElement>("hist-search");
-const histDir = $<HTMLSelectElement>("hist-dir");
+// 出しているプロジェクトのフォルダ
+const histDir = { value: "" };
 let histAll: PastConversation[] = [];
 let histItems: PastConversation[] = [];
 let histIndex = 0;
+// 発言と返事の中身で見つかった会話（キーは「agent:id」）と、見つかった所
+let histHits = new Map<string, string>();
+let histSearchTimer = 0;
+const HIST_SEARCH_DELAY_MS = 300;
+const histKey = (p: { agent: string; id: string }) => `${p.agent}:${p.id}`;
+
+// 題名と最初の発言は手元で絞り、中身は少し待ってから探す（記録を全部読むので、打つたびには探さない）
+function searchHistory() {
+  clearTimeout(histSearchTimer);
+  histHits = new Map();
+  const cwd = histDir.value;
+  const query = histSearch.value.trim();
+  if (!query) return;
+  histSearchTimer = window.setTimeout(async () => {
+    const hits = await invoke<{ agent: string; id: string; snippet: string }[]>("search_past_conversations", { cwd, query }).catch(() => []);
+    if (cwd !== histDir.value || query !== histSearch.value.trim()) return;
+    histHits = new Map(hits.map((h) => [histKey(h), h.snippet]));
+    renderHistory();
+  }, HIST_SEARCH_DELAY_MS);
+}
 
 function ago(ms: number) {
   const m = Math.floor((Date.now() - ms) / 60_000);
@@ -2305,23 +2419,19 @@ function ago(ms: number) {
   return new Date(ms).toLocaleDateString();
 }
 
-function openHistory() {
+// 過去の会話はプロジェクト（フォルダ）ごとにあるので、開いているセッションのプロジェクトか、
+// プロジェクトの一覧で選んだプロジェクトの分を出す
+function openHistory(cwd?: string) {
   if (histDialog.open || dialog.open) return;
-  pickDialog.close();
-  const current = activeId ? sessions.get(activeId)?.cwd : undefined;
-  const dirs = [...new Set([current, ...recents().map((r) => r.cwd)].filter((d): d is string => !!d))];
-  if (!dirs.length) {
-    showError("開いたことのあるプロジェクトがありません");
+  const dir = cwd ?? (activeId ? sessions.get(activeId)?.cwd : undefined);
+  if (!dir) {
+    openProjectPicker();
     return;
   }
-  histDir.replaceChildren(
-    ...dirs.map((d) => {
-      const o = el("option", "", d);
-      o.value = d;
-      return o;
-    }),
-  );
-  histDir.value = dirs[0];
+  pickDialog.close();
+  histDir.value = dir;
+  $("hist-title").textContent = `過去の会話 — ${baseName(dir)}`;
+  $("hist-path").textContent = dir;
   histSearch.value = "";
   histDialog.showModal();
   histSearch.focus();
@@ -2346,7 +2456,7 @@ async function loadHistory() {
 
 function renderHistory(emptyText = "見つかりません") {
   const q = histSearch.value.trim().toLowerCase();
-  histItems = histAll.filter((p) => !q || `${p.title ?? ""}\n${p.prompt}`.toLowerCase().includes(q));
+  histItems = histAll.filter((p) => !q || histHits.has(histKey(p)) || `${p.title ?? ""}\n${p.prompt}`.toLowerCase().includes(q));
   histIndex = Math.max(0, Math.min(histIndex, histItems.length - 1));
   $("hist-list").replaceChildren(
     ...histItems.map((p, i) => {
@@ -2359,6 +2469,8 @@ function renderHistory(emptyText = "見つかりません") {
         el("span", "hist-meta", `${AGENT_LABEL[p.agent] ?? p.agent} · ${ago(p.modified)}`),
       );
       if (p.title) li.append(el("span", "hist-prompt", first));
+      const hit = histHits.get(histKey(p));
+      if (hit) li.append(el("span", "hist-hit", hit));
       li.title = p.prompt;
       li.onmousemove = () => {
         if (histIndex === i) return;
@@ -2391,9 +2503,9 @@ async function resumePast(p: PastConversation) {
   }
 }
 
-histDir.onchange = loadHistory;
 histSearch.oninput = () => {
   histIndex = 0;
+  searchHistory();
   renderHistory();
 };
 histSearch.onkeydown = (ev) => {
@@ -2410,7 +2522,7 @@ histSearch.onkeydown = (ev) => {
   }
 };
 $("hist-close").onclick = () => histDialog.close();
-$("pick-history").onclick = openHistory;
+$("hist-btn").onclick = () => openHistory();
 histDialog.onclick = (ev) => {
   if (ev.target !== histDialog) return;
   const r = histDialog.getBoundingClientRect();
@@ -2493,7 +2605,7 @@ $<HTMLFormElement>("new-form").onsubmit = async (ev) => {
     if (dir !== cwd) rememberRecent(dir, agent);
     const name = fName.value.trim() || dir.split(/[\\/]/).pop() || dir;
     try {
-      localStorage.setItem("lastAgent", agent);
+      storage.setItem("lastAgent", agent);
     } catch {
       /* 保存できなくても動作には影響しない */
     }
@@ -2524,7 +2636,9 @@ $("new-btn").onclick = openProjectPicker;
 $("empty-new").onclick = () => openNewDialog();
 $("empty-browse").onclick = () => browseAndOpen();
 $("files-btn").onclick = () => files.toggle();
-$("log-btn").onclick = toggleLogView;
+// ターミナルと会話は、押したほうの表示にする（今の表示を押しても何もしない）
+$("log-btn").onclick = () => $("term-wrap").hidden || toggleLogView();
+$("term-view-btn").onclick = () => !$("term-wrap").hidden || toggleLogView();
 $("head-name").ondblclick = () => activeId && openRename(activeId);
 
 function insertTemplate() {
@@ -2608,7 +2722,7 @@ const KEY_GROUPS: { title: string; keys: { k: string; d: string; first?: boolean
     title: "全体",
     keys: [
       { k: "Ctrl+Shift+N", d: "新しいセッション", first: true },
-      { k: "Ctrl+Shift+H", d: "過去の会話の続きから開く", first: true },
+      { k: "Ctrl+Shift+H", d: "このプロジェクトの過去の会話の続きから開く", first: true },
       { k: "Ctrl+0", d: "一覧 / 直前のセッションへ切り替え", first: true },
       { k: "Ctrl+1〜9", d: "サイドバーの番号のセッションへ切り替え", first: true },
       { k: "Ctrl+Shift+A", d: "次の入力待ちのセッションへ移動", first: true },
@@ -2820,11 +2934,21 @@ interface Limits {
   week: LimitWindow | null;
 }
 let limits: { claude: Limits | null; codex: Limits | null } = { claude: null, codex: null };
+// 最初に読み終えるまでは「取得中」と出す。読めなかったときも、出ていた値は消さない（消すと行が出たり消えたりする）
+let limitsLoaded = false;
 const LIMITS_POLL_MS = 60_000;
 const WEEKDAYS = "日月火水木金土";
+const LIMIT_AGENTS = [
+  ["claude", "Claude", "Tower で開いた Claude Code が最初に返事をすると届きます"],
+  ["codex", "Codex", "Codex を使うと、会話の記録から読みます"],
+] as const;
 
 async function loadLimits() {
-  limits = await invoke<typeof limits>("usage").catch(() => limits);
+  const next = await invoke<typeof limits>("usage").catch(() => null);
+  if (next) {
+    limits = { claude: next.claude ?? limits.claude, codex: next.codex ?? limits.codex };
+    limitsLoaded = true;
+  }
   renderLimits();
 }
 
@@ -2834,34 +2958,37 @@ function resetTime(at: number) {
   return d.toDateString() === new Date().toDateString() ? time : `${WEEKDAYS[d.getDay()]} ${time}`;
 }
 
+// 値がまだ無くても行は出しておき、取得中か、まだ届いていないかを出す
 function renderLimits() {
-  const box = $("limits");
   const rows: HTMLElement[] = [];
-  for (const [name, l] of [["Claude", limits.claude], ["Codex", limits.codex]] as const) {
-    if (!l) continue;
-    for (const [label, w] of [["5時間", l.five_hour], ["週", l.week]] as const) {
-      if (!w) continue;
+  for (const [key, name, hint] of LIMIT_AGENTS) {
+    const l = limits[key];
+    for (const [label, w] of [["5時間", l?.five_hour ?? null], ["週", l?.week ?? null]] as const) {
+      const row = el("div", "limit");
+      row.dataset.agent = key;
+      const bar = el("span", "limit-bar");
+      const agent = el("span", "limit-agent", label === "5時間" ? name : "");
+      const span = label === "週" ? "1 週間" : "5 時間";
+      if (!w) {
+        const loading = !limitsLoaded;
+        row.classList.add(loading ? "loading" : "empty");
+        row.append(agent, el("span", "limit-label", label), bar, el("span", "limit-pct", loading ? "…" : "—"), el("span", "limit-reset", loading ? "取得中" : "未取得"));
+        row.title = loading ? `${name} の使用制限を取得しています` : `${name} の${span}の枠はまだ分かりません。${hint}`;
+        rows.push(row);
+        continue;
+      }
       // リセットの時刻を過ぎたら、次に見るまでは使っていないのと同じ
       const reset = w.resets_at * 1000 <= Date.now();
       const used = reset ? 0 : Math.round(w.used);
-      const row = el("div", "limit");
-      const bar = el("span", "limit-bar");
       const fill = el("span", used >= 90 ? "high" : used >= 70 ? "mid" : "");
       fill.style.width = `${Math.min(100, used)}%`;
       bar.append(fill);
-      row.append(
-        el("span", "limit-agent", label === "5時間" ? name : ""),
-        el("span", "limit-label", label),
-        bar,
-        el("span", "limit-pct", `${used}%`),
-        el("span", "limit-reset", reset ? "" : resetTime(w.resets_at)),
-      );
-      row.title = `${name} の${label === "週" ? "1 週間" : "5 時間"}の枠: ${used}% 使用${reset ? "" : `（${new Date(w.resets_at * 1000).toLocaleString()} にリセット）`}`;
+      row.append(agent, el("span", "limit-label", label), bar, el("span", "limit-pct", `${used}%`), el("span", "limit-reset", reset ? "" : resetTime(w.resets_at)));
+      row.title = `${name} の${span}の枠: ${used}% 使用${reset ? "" : `（${new Date(w.resets_at * 1000).toLocaleString()} にリセット）`}`;
       rows.push(row);
     }
   }
-  box.replaceChildren(...rows);
-  box.hidden = !rows.length;
+  $("limits").replaceChildren(...rows);
 }
 
 listen("usage-changed", loadLimits);

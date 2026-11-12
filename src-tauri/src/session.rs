@@ -539,12 +539,13 @@ impl Manager {
         }
         // 確認に答えても、次の hooks のイベント（次のツールの PreToolUse か Stop）は、許可したコマンドが終わるまで届かないことがある。
         // 次のイベントまでは画面から推測する。すぐ作業中にはしない（複数の質問では、答えても次の質問が出るだけのため）
-        // Esc で取り消したときも、Stop は届かない
+        // Esc で取り消したときも、Stop は届かない。作業中に Esc で止めたときも同じなので、画面から推測して指示待ちに戻す
         let confirms = data.contains('\r') || data == "\x1b" || (data.len() == 1 && data.as_bytes()[0].is_ascii_digit());
-        if confirms
+        let status = session.state.lock().unwrap().status;
+        let stops = data == "\x1b" && status == Status::Running;
+        if ((confirms && status == Status::Waiting) || stops)
             && !session.agent.infers_status()
             && session.hooks_seen.load(Ordering::Relaxed)
-            && session.state.lock().unwrap().status == Status::Waiting
         {
             session.answered.store(true, Ordering::Relaxed);
         }

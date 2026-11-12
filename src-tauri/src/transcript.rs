@@ -16,6 +16,10 @@ const INITIAL_TAIL: u64 = 2 << 20;
 const MAX_TEXT: usize = 4000;
 const MAX_RESULT: usize = 400;
 const MAX_TOOL_INPUT: usize = 200;
+/// 会話の表示に渡す、1 回の編集の差分の行数の上限
+const MAX_DIFF_LINES: usize = 400;
+/// 前の枝を見るときに出す行の上限（古いほうを捨てる）
+const MAX_FORK_ENTRIES: usize = 3000;
 /// base64 の文字数。これより大きい画像は、表示が重くなるので出さない（スクリーンショットは数百 KB ほど）
 const MAX_IMAGE: usize = 4 << 20;
 const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
@@ -53,10 +57,9 @@ pub struct Entry {
     /// 予定のツール（TodoWrite・TaskCreate・TaskUpdate）の入力。会話の表示が予定の一覧を組み立てる
     #[serde(skip_serializing_if = "Option::is_none")]
     pub todo: Option<Value>,
-    /// この返事でプロンプトキャッシュに書いた分の有効時間（秒）。1 時間なら 3600、5 分なら 300、読んだだけなら 0。
-    /// 返事の行（Claude Code の message.usage.cache_creation）の最初の項目だけに付く
+    /// 人の発言の行の uuid。巻き戻して書き直した発言（枝分かれ）を見分けるのに使う
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_ttl: Option<u32>,
+    pub uuid: Option<String>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -64,6 +67,8 @@ pub struct Change {
     pub path: String,
     pub added: usize,
     pub removed: usize,
+    /// 統一形式（@@ の見出しと +・-・空白で始まる行）の差分。長いものは MAX_DIFF_LINES で切る
+    pub diff: String,
 }
 
 #[derive(Serialize)]
@@ -429,6 +434,51 @@ pub fn read(current: Option<PathBuf>, known: Option<String>, offset: u64, limit:
     Ok(Chunk { path: Some(path_str), offset: start + end as u64, reset, entries, start: head, more: head > 0 || dropped > 0, tip: new_tip })
 }
 
+/// 巻き戻して書き直した発言の組。同じ親から出た発言を古い順に並べ、2 つ以上あるものだけ。
+/// 巻き戻すと、次の発言は戻った先の行（書き直した発言の親）を親にして書き足される（Claude Code）
+pub fn forks(path: &Path) -> Vec<Vec<String>> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let mut groups: Vec<(Option<String>, Vec<String>)> = Vec::new();
+    for v in text.lines().filter(|l| l.contains("\"user\"")).filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
+        if !is_prompt(&v) || v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false) {
+            continue;
+        }
+        let Some(id) = uuid(&v) else { continue };
+        let p = parent(&v).map(String::from);
+        match groups.iter_mut().find(|(g, _)| *g == p) {
+            Some((_, ids)) => ids.push(id.to_string()),
+            None => groups.push((p, vec![id.to_string()])),
+        }
+    }
+    groups.into_iter().map(|(_, ids)| ids).filter(|ids| ids.len() > 1).collect()
+}
+
+/// 発言 prompt を通る枝を、その枝でいちばん新しい行まで読む。前の枝を見るためで、続きは読まない
+pub fn read_fork(path: &Path, prompt: &str) -> Result<Chunk, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("会話の記録を開けませんでした: {e}"))?;
+    let lines: Vec<Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| !v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false))
+        .collect();
+    // 記録は古い順なので、前から 1 回なめれば prompt の子孫をすべて拾える
+    let mut below = std::collections::HashSet::new();
+    let mut leaf = None;
+    for v in &lines {
+        let Some(id) = uuid(v) else { continue };
+        if id == prompt || parent(v).is_some_and(|p| below.contains(p)) {
+            below.insert(id.to_string());
+            leaf = Some(id.to_string());
+        }
+    }
+    let leaf = leaf.ok_or("その発言は記録に見つかりません")?;
+    let lines = branch_to(lines, Some(&leaf));
+    let mut entries: Vec<Entry> = lines.iter().flat_map(entries_of).collect();
+    let dropped = entries.len().saturating_sub(MAX_FORK_ENTRIES);
+    entries.drain(..dropped);
+    Ok(Chunk { path: Some(path.to_string_lossy().into_owned()), offset: text.len() as u64, reset: true, entries, start: 0, more: dropped > 0, tip: Some(leaf) })
+}
+
 /// Codex で前のメッセージを書き直すと、会話は新しい記録ファイルに分かれる。分かれた記録は分かれる前の行を持たず、
 /// 最初の session_meta に元の記録の ID と、元の記録のどの行（ordinal）の手前で分かれたかだけを持つ
 fn forked_from(first: &Value) -> Option<(&str, u64)> {
@@ -549,9 +599,15 @@ fn branched(lines: &[Value], tip: Option<&str>) -> bool {
 /// そこから発言以外の行だけでつながる行（並列に呼んだツールの結果など、たどった道から外れる行）を残す。
 /// 捨てられた枝は発言から始まるので、ここで外れる。uuid の無い行（Codex など）はそのまま残す
 fn current_branch(lines: Vec<Value>) -> Vec<Value> {
+    let leaf = lines.iter().rev().find_map(|v| uuid(v)).map(String::from);
+    branch_to(lines, leaf.as_deref())
+}
+
+/// leaf の行から親をたどった枝の行だけを残す（current_branch の、終わりの行を選べる形）
+fn branch_to(lines: Vec<Value>, leaf: Option<&str>) -> Vec<Value> {
     let by_id: std::collections::HashMap<&str, &Value> = lines.iter().filter_map(|v| Some((uuid(v)?, v))).collect();
     let mut on = std::collections::HashSet::new();
-    let mut at = lines.iter().rev().find_map(|v| uuid(v));
+    let mut at = leaf;
     while let Some(id) = at {
         if !on.insert(id.to_string()) {
             break;
@@ -605,27 +661,17 @@ pub(crate) fn entries_of(v: &Value) -> Vec<Entry> {
     let at = v.get("timestamp").and_then(Value::as_str);
     // toolUseResult は行ごとに 1 つで、その行の tool_result（1 つだけ）の詳しい結果
     let detail = v.get("toolUseResult").filter(|t| t.is_object());
+    let prompt = is_prompt(v).then(|| uuid(v)).flatten();
     for e in &mut entries {
         e.at = at.map(String::from);
+        if e.kind == Kind::User {
+            e.uuid = prompt.map(String::from);
+        }
         if let (Kind::Result, Some(d)) = (&e.kind, detail) {
             (e.outcome, e.change) = outcome_of(d);
         }
     }
-    if let (Some(first), Some(usage)) = (entries.first_mut(), v.pointer("/message/usage")) {
-        first.cache_ttl = Some(cache_ttl(usage));
-    }
     entries
-}
-
-fn cache_ttl(usage: &Value) -> u32 {
-    let tokens = |k: &str| usage.pointer(&format!("/cache_creation/{k}")).and_then(Value::as_u64).unwrap_or(0);
-    if tokens("ephemeral_1h_input_tokens") > 0 {
-        3600
-    } else if tokens("ephemeral_5m_input_tokens") > 0 {
-        300
-    } else {
-        0
-    }
 }
 
 /// Claude Code の toolUseResult から、結果の短い要約と、ファイルの変更を作る。
@@ -641,20 +687,30 @@ fn outcome_of(d: &Value) -> (Option<String>, Option<Change>) {
     }
     if let Some(path) = text("filePath") {
         let (mut added, mut removed) = (0, 0);
+        let mut diff: Vec<String> = Vec::new();
         for hunk in d.get("structuredPatch").and_then(Value::as_array).into_iter().flatten() {
+            let n = |k: &str| hunk.get(k).and_then(Value::as_u64).unwrap_or(0);
+            diff.push(format!("@@ -{},{} +{},{} @@", n("oldStart"), n("oldLines"), n("newStart"), n("newLines")));
             for l in hunk.get("lines").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
                 match l.as_bytes().first() {
                     Some(b'+') => added += 1,
                     Some(b'-') => removed += 1,
                     _ => {}
                 }
+                diff.push(l.to_string());
             }
         }
         // 新しく作ったファイルは差分が空で、中身がすべて増えた行になる
         if text("type") == Some("create") {
-            added = text("content").map_or(0, |c| c.lines().count());
+            let content = text("content").unwrap_or("");
+            added = content.lines().count();
+            diff = std::iter::once(format!("@@ -0,0 +1,{added} @@")).chain(content.lines().map(|l| format!("+{l}"))).collect();
         }
-        let change = Change { path: path.to_string(), added, removed };
+        if diff.len() > MAX_DIFF_LINES {
+            diff.truncate(MAX_DIFF_LINES);
+            diff.push(" …（長いので、ここから先は省きました）".into());
+        }
+        let change = Change { path: path.to_string(), added, removed, diff: diff.join("\n") };
         return (Some(format!("+{added} −{removed}")), Some(change));
     }
     if let Some(files) = num("numFiles") {
@@ -708,7 +764,7 @@ fn codex_entries(p: &Value) -> Vec<Entry> {
                 Ok(v @ Value::Object(_)) => tool_summary(&v),
                 _ => truncate(raw.trim(), MAX_TOOL_INPUT),
             };
-            vec![Entry { kind: Kind::Tool, text, tool: Some(name), id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None, cache_ttl: None }]
+            vec![Entry { kind: Kind::Tool, text, tool: Some(name), id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None, uuid: None }]
         }
         Some("function_call_output" | "custom_tool_call_output") => {
             let text = match p.get("output") {
@@ -720,7 +776,7 @@ fn codex_entries(p: &Value) -> Vec<Entry> {
                 Some(v) => v.get("content").and_then(Value::as_str).map(String::from).unwrap_or_else(|| v.to_string()),
                 None => String::new(),
             };
-            vec![Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None, cache_ttl: None }]
+            vec![Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id: call_id(p), error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None, uuid: None }]
         }
         _ => Vec::new(),
     }
@@ -745,7 +801,7 @@ fn typed_skill(v: &Value) -> Option<Entry> {
 }
 
 fn entry(kind: Kind, text: String) -> Entry {
-    Entry { kind, text, tool: None, id: None, error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None, cache_ttl: None }
+    Entry { kind, text, tool: None, id: None, error: false, images: Vec::new(), at: None, outcome: None, change: None, todo: None, uuid: None }
 }
 
 /// 人が打った発言。スラッシュコマンドは名前だけにし、Claude Code が差し込むタグ付きの文は出さない
@@ -818,7 +874,7 @@ fn user_block(b: &Value) -> Option<Entry> {
             };
             let error = b.get("is_error").and_then(Value::as_bool).unwrap_or(false);
             let id = b.get("tool_use_id").and_then(Value::as_str).map(String::from);
-            Some(Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id, error, images, at: None, outcome: None, change: None, todo: None, cache_ttl: None })
+            Some(Entry { kind: Kind::Result, text: truncate(text.trim(), MAX_RESULT), tool: None, id, error, images, at: None, outcome: None, change: None, todo: None, uuid: None })
         }
         _ => None,
     }
@@ -859,7 +915,7 @@ fn assistant_block(b: &Value) -> Option<Entry> {
             let text = tool_summary(b.get("input").unwrap_or(&Value::Null));
             let id = b.get("id").and_then(Value::as_str).map(String::from);
             let todo = TODO_TOOLS.contains(&name.as_str()).then(|| b.get("input").cloned()).flatten();
-            Some(Entry { kind: Kind::Tool, text, tool: Some(name), id, error: false, images: Vec::new(), at: None, outcome: None, change: None, todo, cache_ttl: None })
+            Some(Entry { kind: Kind::Tool, text, tool: Some(name), id, error: false, images: Vec::new(), at: None, outcome: None, change: None, todo, uuid: None })
         }
         _ => None,
     }
@@ -919,10 +975,11 @@ mod tests {
     fn tool_outcomes() {
         let o = |d: Value| outcome_of(&d);
         assert_eq!(o(json!({"type":"text","file":{"filePath":"a.css","numLines":42}})).0.as_deref(), Some("42 行"));
-        let edit = o(json!({"filePath":"src/a.css","structuredPatch":[{"lines":[" x","-old","+new","+more"]}]}));
-        assert_eq!(edit, (Some("+2 −1".into()), Some(Change { path: "src/a.css".into(), added: 2, removed: 1 })));
+        let edit = o(json!({"filePath":"src/a.css","structuredPatch":[{"oldStart":4,"oldLines":2,"newStart":4,"newLines":3,"lines":[" x","-old","+new","+more"]}]}));
+        let diff = "@@ -4,2 +4,3 @@\n x\n-old\n+new\n+more".to_string();
+        assert_eq!(edit, (Some("+2 −1".into()), Some(Change { path: "src/a.css".into(), added: 2, removed: 1, diff })));
         let create = o(json!({"type":"create","filePath":"b.ts","content":"1\n2\n3\n","structuredPatch":[]}));
-        assert_eq!(create.1.map(|c| (c.added, c.removed)), Some((3, 0)));
+        assert_eq!(create.1.map(|c| (c.added, c.removed, c.diff)), Some((3, 0, "@@ -0,0 +1,3 @@\n+1\n+2\n+3".to_string())));
         assert_eq!(o(json!({"mode":"files_with_matches","numFiles":3,"filenames":[]})).0.as_deref(), Some("3 件"));
         assert_eq!(o(json!({"mode":"content","numFiles":0,"numLines":7})).0.as_deref(), Some("7 件"));
         assert_eq!(o(json!({"stdout":"ok\nok\n","stderr":"","interrupted":false})).0.as_deref(), Some("出力 2 行"));
@@ -1101,16 +1158,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_ttl_from_usage() {
-        let say = |usage: Value| json!({"type":"assistant","message":{"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}],"usage":usage}});
-        let ttl = |usage: Value| entries_of(&say(usage)).iter().map(|e| e.cache_ttl).collect::<Vec<_>>();
-        assert_eq!(ttl(json!({"cache_creation":{"ephemeral_1h_input_tokens":5,"ephemeral_5m_input_tokens":0}})), vec![Some(3600), None]);
-        assert_eq!(ttl(json!({"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":5}})), vec![Some(300), None]);
-        assert_eq!(ttl(json!({"cache_read_input_tokens":9})), vec![Some(0), None]);
-        assert_eq!(entries_of(&json!({"type":"assistant","message":{"content":[{"type":"text","text":"a"}]}}))[0].cache_ttl, None);
-    }
-
-    #[test]
     fn reads_only_complete_lines_and_resumes() {
         let dir = std::env::temp_dir().join(format!("tower-transcript-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1194,6 +1241,13 @@ mod tests {
         let d = read(Some(path.clone()), c.path.clone(), c.offset, None, false, None, c.tip.clone()).unwrap();
         assert!(d.reset);
         assert!(!texts(&d).contains(&"三つ目".to_string()), "{:?}", texts(&d));
+
+        // 書き直した発言の組（u2 と u3、u4 と u5）と、前の枝の読み直し
+        assert_eq!(forks(&path), [vec!["u2".to_string(), "u3".into()], vec!["u4".into(), "u5".into()]]);
+        assert_eq!(d.entries.iter().find(|e| e.text == "二つ目（直した）").and_then(|e| e.uuid.as_deref()), Some("u3"));
+        let old = read_fork(&path, "u2").unwrap();
+        assert_eq!(texts(&old), ["一つ目", "はい1", "二つ目", "はい2"]);
+        assert_eq!(texts(&read_fork(&path, "u4").unwrap()), ["一つ目", "はい1", "二つ目（直した）", "はい3", "三つ目"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

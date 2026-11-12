@@ -1,4 +1,5 @@
 // フォルダごとの印（短い文字と色）。そのフォルダと中のフォルダで動くセッションに付けて、似たセッションを見分けやすくする
+import { storage } from "./store";
 export interface Mark {
   folder: string;
   label: string;
@@ -22,7 +23,7 @@ const norm = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCa
 
 function load(): Mark[] {
   try {
-    const v = JSON.parse(localStorage.getItem(KEY) ?? "[]");
+    const v = JSON.parse(storage.getItem(KEY) ?? "[]");
     return Array.isArray(v) ? v.filter((m) => typeof m?.folder === "string" && typeof m?.label === "string") : [];
   } catch {
     return [];
@@ -34,7 +35,7 @@ export function createMarks() {
 
   const save = () => {
     try {
-      localStorage.setItem(KEY, JSON.stringify(marks));
+      storage.setItem(KEY, JSON.stringify(marks));
     } catch {
       /* 保存できなくても動作には影響しない */
     }

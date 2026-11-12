@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import hljs from "highlight.js/lib/common";
 import { Marked } from "marked";
 import DOMPurify from "dompurify";
+import { storage } from "./store";
 
 interface Entry {
   name: string;
@@ -132,14 +133,14 @@ const isMarkdown = (path: string) => /\.(md|markdown|mdx)$/i.test(path);
 
 function load(key: string) {
   try {
-    return localStorage.getItem(key);
+    return storage.getItem(key);
   } catch {
     return null;
   }
 }
 function save(key: string, value: string) {
   try {
-    localStorage.setItem(key, value);
+    storage.setItem(key, value);
   } catch {
     /* 保存できなくても動作には影響しない */
   }
@@ -170,6 +171,8 @@ export function createFilesPanel(o: FilesPanelOptions) {
   let shownKey = "";
   let refreshing = false;
   let refreshAgain = false;
+  // 会話の表示から開いた、1 回の変更の差分。ファイルを選び直すまで、ファイルの中身の代わりに出す
+  let patch: { path: string; diff: string } | null = null;
 
   const width = Number(load("filesWidth"));
   if (width > 0) panel.style.width = `${width}px`;
@@ -407,7 +410,15 @@ export function createFilesPanel(o: FilesPanelOptions) {
   }
 
   /** reveal は、探した結果から選んだとき。検索を消したあとに一覧で見つけられるよう、入っているフォルダを開いておく */
+  /** 開いているフォルダの中なら、フォルダからの場所にする */
+  function relative(path: string) {
+    const root = o.root()?.replace(/\\/g, "/").replace(/\/$/, "");
+    const p = path.replace(/\\/g, "/");
+    return root && p.toLowerCase().startsWith(`${root.toLowerCase()}/`) ? p.slice(root.length + 1) : p;
+  }
+
   async function select(rel: string, reveal = false) {
+    patch = null;
     const v = view();
     v.selected = rel;
     v.mode = null;
@@ -435,6 +446,14 @@ export function createFilesPanel(o: FilesPanelOptions) {
     const v = view();
     const rel = v.selected;
     const modes = $("fv-modes");
+    if (patch) {
+      const p = patch;
+      $("fv-path").textContent = `${relative(p.path)}（この変更）`;
+      $("fv-insert").hidden = $("fv-copy").hidden = true;
+      modes.hidden = true;
+      show(`x:${p.path}:${p.diff}`, () => renderDiff(p.diff, langFor(p.path)));
+      return;
+    }
     $("fv-path").textContent = rel ?? "";
     $("fv-insert").hidden = $("fv-copy").hidden = !rel;
     if (!rel) {
@@ -561,6 +580,7 @@ export function createFilesPanel(o: FilesPanelOptions) {
   $("fv-modes").onclick = (ev) => {
     const mode = (ev.target as HTMLElement).closest("button")?.dataset.mode as Mode | undefined;
     if (!mode || !sessionId) return;
+    patch = null;
     view().mode = mode;
     renderViewer();
   };
@@ -755,6 +775,7 @@ export function createFilesPanel(o: FilesPanelOptions) {
         return;
       }
       sessionId = id;
+      patch = null;
       listings.clear();
       query = "";
       found = [];
@@ -773,6 +794,17 @@ export function createFilesPanel(o: FilesPanelOptions) {
     },
     forget(id: string) {
       views.delete(id);
+    },
+    /** ツールが変えたファイルの差分を、パネルを開いて出す */
+    showPatch(path: string, diff: string) {
+      patch = { path, diff };
+      shownKey = "";
+      if (!open) {
+        open = true;
+        save("filesOpen", "1");
+        apply();
+      }
+      renderViewer();
     },
   };
 }

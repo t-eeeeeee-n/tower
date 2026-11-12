@@ -34,9 +34,13 @@ fn claude_dir(root: &Path, cwd: &str) -> PathBuf {
 
 /// 新しい順。Codex の記録は日付のフォルダに全部のプロジェクトの分が混ざっているので、先頭の行の作業フォルダで選ぶ
 pub fn list(cwd: &str, claude_root: Option<&Path>, codex_root: Option<&Path>) -> Vec<Past> {
-    let mut out: Vec<Past> = Vec::new();
+    conversations(cwd, claude_root, codex_root).into_iter().map(|(p, _)| p).collect()
+}
+
+fn conversations(cwd: &str, claude_root: Option<&Path>, codex_root: Option<&Path>) -> Vec<(Past, PathBuf)> {
+    let mut out: Vec<(Past, PathBuf)> = Vec::new();
     if let Some(root) = claude_root {
-        out.extend(transcript::jsonl_in(&claude_dir(root, cwd)).filter_map(|p| claude_past(&p)));
+        out.extend(transcript::jsonl_in(&claude_dir(root, cwd)).filter_map(|p| Some((claude_past(&p)?, p))));
     }
     if let Some(root) = codex_root {
         let want = same_dir_key(cwd);
@@ -44,7 +48,7 @@ pub fn list(cwd: &str, claude_root: Option<&Path>, codex_root: Option<&Path>) ->
         for day in transcript::day_dirs(&root.join("sessions")) {
             for p in transcript::jsonl_in(&day) {
                 if let Some(x) = codex_past(&p, &want) {
-                    out.push(x);
+                    out.push((x, p));
                     found += 1;
                 }
             }
@@ -53,9 +57,54 @@ pub fn list(cwd: &str, claude_root: Option<&Path>, codex_root: Option<&Path>) ->
             }
         }
     }
-    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out.sort_by(|a, b| b.0.modified.cmp(&a.0.modified));
     out.truncate(MAX_LIST);
     out
+}
+
+#[derive(Serialize, Debug)]
+pub struct Hit {
+    pub agent: &'static str,
+    pub id: String,
+    /// 見つかった発言か返事の、見つかった言葉のまわり
+    pub snippet: String,
+}
+
+const SNIPPET_AROUND: usize = 40;
+
+/// 発言と返事の中身から query を探す（大文字と小文字は区別しない）。ツールの入出力は探さない。
+/// 会話ごとに最初に見つかった所だけを返す
+pub fn search(cwd: &str, query: &str, claude_root: Option<&Path>, codex_root: Option<&Path>) -> Vec<Hit> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    conversations(cwd, claude_root, codex_root)
+        .into_iter()
+        .filter_map(|(past, path)| {
+            let text = std::fs::read_to_string(&path).ok()?;
+            let snippet = text
+                .lines()
+                .filter(|l| l.to_lowercase().contains(&q))
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .flat_map(|v| transcript::entries_of(&v))
+                .filter(|e| matches!(e.kind, Kind::User | Kind::Assistant))
+                .find_map(|e| snippet(&e.text, &q))?;
+            Some(Hit { agent: past.agent, id: past.id, snippet })
+        })
+        .collect()
+}
+
+fn snippet(text: &str, q: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let lower: Vec<char> = text.to_lowercase().chars().collect();
+    let want: Vec<char> = q.chars().collect();
+    // 小文字にすると文字数が変わる文字（ごく一部）があると位置がずれるので、そのときは頭から出す
+    let at = if lower.len() == chars.len() { lower.windows(want.len()).position(|w| w == want.as_slice())? } else { 0 };
+    let start = at.saturating_sub(SNIPPET_AROUND);
+    let end = (at + want.len() + SNIPPET_AROUND).min(chars.len());
+    let body: String = chars[start..end].iter().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(format!("{}{body}{}", if start > 0 { "…" } else { "" }, if end < chars.len() { "…" } else { "" }))
 }
 
 /// 再開に渡す ID として使えるか。起動のコマンドに入れるので、英数字とハイフン・下線だけを受け付ける
@@ -177,6 +226,16 @@ mod tests {
         assert!(got.contains(&("claude", "aaa-111".into(), Some("付けた題名".into()), "最初の指示".into())));
         assert!(got.contains(&("codex", "ccc-333".into(), None, "codex の指示".into())));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn snippet_around_the_match() {
+        assert_eq!(snippet("ログイン画面のボタンを直して", "ボタン").as_deref(), Some("ログイン画面のボタンを直して"));
+        let long = format!("{}needle{}", "a".repeat(100), "b".repeat(100));
+        let s = snippet(&long, "needle").unwrap();
+        assert!(s.starts_with('…') && s.ends_with('…') && s.contains("needle"));
+        assert_eq!(snippet("Hello World", "world").as_deref(), Some("Hello World"));
+        assert!(snippet("abc", "x").is_none());
     }
 
     #[test]

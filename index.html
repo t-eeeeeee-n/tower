@@ -17,7 +17,7 @@
         <button id="waiting-jump" class="waiting-jump" hidden></button>
         <ol id="session-list" class="session-list"></ol>
         <footer class="sidebar-foot">
-          <div id="limits" class="limits" hidden></div>
+          <div id="limits" class="limits"></div>
           <div id="total-mem"></div>
           <div id="hooks-state"></div>
         </footer>
@@ -35,9 +35,15 @@
           </div>
           <div class="main-actions">
             <span id="head-status" class="status-text"></span>
-            <button id="tpl-btn" class="text-btn" title="テンプレートを入れる（Ctrl+Shift+T）">テンプレート</button>
-            <button id="log-btn" class="text-btn" title="ターミナルと会話の表示を切り替える（Ctrl+Shift+L）" aria-pressed="false" hidden>会話</button>
-            <button id="files-btn" class="text-btn" title="ファイル（Ctrl+Shift+E）" aria-pressed="false">ファイル</button>
+            <div class="tool-group">
+              <button id="hist-btn" class="tool-btn" title="このプロジェクトの過去の会話（Ctrl+Shift+H）" aria-label="過去の会話"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9" /><path d="M2.5 2.5v2.6h2.6" /><path d="M8 5v3l2 1.5" /></svg></button>
+              <button id="tpl-btn" class="tool-btn" title="テンプレートを入れる（Ctrl+Shift+T）" aria-label="テンプレート"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="2" width="10" height="12" rx="1.5" /><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3" /></svg></button>
+            </div>
+            <div id="view-switch" class="tool-group tool-seg" role="group" aria-label="表示の切り替え（Ctrl+Shift+L）" hidden>
+              <button id="term-view-btn" class="tool-btn" title="ターミナルで表示（Ctrl+Shift+L）" aria-label="ターミナル" aria-pressed="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.8" y="2.5" width="12.4" height="11" rx="1.5" /><path d="M4.5 6.5L6.5 8l-2 1.5M8 10h3" /></svg></button>
+              <button id="log-btn" class="tool-btn" title="会話で表示（Ctrl+Shift+L）" aria-label="会話" aria-pressed="false"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4a1.5 1.5 0 0 1 1.5-1.5h8A1.5 1.5 0 0 1 13.5 4v5.5A1.5 1.5 0 0 1 12 11H7l-3 2.5V11a1.5 1.5 0 0 1-1.5-1.5z" /></svg></button>
+            </div>
+            <button id="files-btn" class="tool-btn" title="ファイル（Ctrl+Shift+E）" aria-label="ファイル" aria-pressed="false"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.8" y="2.5" width="12.4" height="11" rx="1.5" /><path d="M10 2.5v11" /></svg></button>
           </div>
         </header>
         <div id="work" class="work" hidden>
@@ -121,7 +127,6 @@
       <div class="pick-head">
         <h2 id="pick-title">プロジェクトを開く</h2>
         <div class="pick-actions">
-          <button type="button" id="pick-history" class="text-btn" title="過去の会話の続きから開く（Ctrl+Shift+H）">過去の会話</button>
           <button type="button" id="pick-browse" class="text-btn">参照…</button>
           <button type="button" id="pick-new" class="primary-btn">新しく作る</button>
           <button type="button" id="pick-close" class="icon-btn" title="閉じる（Esc）" aria-label="閉じる">×</button>
@@ -140,8 +145,8 @@
           <button type="button" id="hist-close" class="icon-btn" title="閉じる（Esc）" aria-label="閉じる">×</button>
         </div>
       </div>
-      <select id="hist-dir" class="hist-dir" aria-label="プロジェクト"></select>
-      <input id="hist-search" class="pick-search" placeholder="題名と最初の指示で検索" autocomplete="off" aria-label="過去の会話を検索" aria-controls="hist-list" />
+      <p id="hist-path" class="hist-path"></p>
+      <input id="hist-search" class="pick-search" placeholder="題名・発言・返事で検索" autocomplete="off" aria-label="過去の会話を検索" aria-controls="hist-list" />
       <ul id="hist-list" class="pick-list" role="listbox" aria-label="過去の会話"></ul>
       <p id="hist-empty" class="pick-empty" hidden>見つかりません</p>
       <p class="pick-hint">クリックか Enter で、その会話の続きから新しいセッションで開く（Claude Code と Codex）</p>
@@ -245,8 +250,12 @@
           <span>飛行機やキャラを動かす</span>
         </label>
         <label class="check look-limits">
-          <input id="look-limits" type="checkbox" />
-          <span>サイドバーの下に使用制限を出す（Claude Code・Codex）</span>
+          <input id="look-limits-claude" type="checkbox" />
+          <span>サイドバーの下に Claude Code の使用制限を出す</span>
+        </label>
+        <label class="check look-limits">
+          <input id="look-limits-codex" type="checkbox" />
+          <span>サイドバーの下に Codex の使用制限を出す</span>
         </label>
         </div>
         <div id="look-panel-more" role="tabpanel" aria-labelledby="look-tab-more" hidden>
@@ -419,6 +428,6 @@
     </dialog>
 
     <div id="toast" class="toast" hidden></div>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/boot.ts"></script>
   </body>
 </html>

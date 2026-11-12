@@ -18,11 +18,11 @@ interface Entry {
   at?: string;
   /** ツールの結果の要約（「42 行」「3 件」など） */
   outcome?: string;
-  change?: { path: string; added: number; removed: number };
+  change?: { path: string; added: number; removed: number; diff: string };
   /** 予定のツール（TodoWrite・TaskCreate・TaskUpdate）の入力 */
   todo?: { todos?: { content?: string; status?: string }[]; subject?: string; taskId?: string | number; status?: string };
-  /** この返事でプロンプトキャッシュに書いた分の有効時間（秒）。読んだだけなら 0 */
-  cache_ttl?: number;
+  /** 人の発言の行の uuid（巻き戻して書き直した発言を見分ける） */
+  uuid?: string;
 }
 
 interface Todo {
@@ -35,6 +35,8 @@ interface Todo {
 /** 入力待ちの画面に出ている確認や選択肢（main.ts が画面から読み取る） */
 export interface PromptChoice {
   question: string;
+  /** 何を許すのか（Claude Code の許可の確認の、ツール名・説明・コマンド） */
+  detail?: string;
   options: { key: string; label: string }[];
   /** 質問が複数あるとき（Claude Code の AskUserQuestion）の、上に並ぶ質問の見出し。mark は画面の ☐（まだ）・☒（答えた）・✔（送信） */
   tabs?: { mark: string; label: string; current: boolean }[];
@@ -208,12 +210,35 @@ function imageStrip(images: string[]) {
 }
 
 // 貼り付けた画像やドロップした画像ファイルは、場所の文字としてエージェントに渡している（main.ts の insertPaths）ので、
-// 記録にも文字で残る。発言の中の画像ファイルの場所を読んで、発言の下に出す
-const IMAGE_PATH = /"([A-Za-z]:\\[^"\r\n]+?\.(?:png|jpe?g|gif|webp))"|([A-Za-z]:\\[^\s"']+?\.(?:png|jpe?g|gif|webp))(?=[\s"']|$)/gi;
-const MAX_PATH_IMAGES = 4;
+// 記録にも文字で残る。発言の中の画像ファイルの場所を読んで、発言の下に出す。
+// 返事では場所を `…` で囲んで書くことが多いので、` や日本語の句読点・括弧の手前でも場所が終わるとみなす
+const IMAGE_PATH = /"([A-Za-z]:[\\/][^"\r\n]+?\.(?:png|jpe?g|gif|webp))"|([A-Za-z]:[\\/][^\s"'`<>|*?]+?\.(?:png|jpe?g|gif|webp))(?=[\s"'`)）」』、。,]|$)/gi;
+const MAX_PATH_IMAGES = 6;
+
+const imagePaths = (text: string) => [...new Set([...text.matchAll(IMAGE_PATH)].map((m) => m[1] ?? m[2]))].slice(0, MAX_PATH_IMAGES);
+
+// 返事の中の画像ファイルの場所は、書かれた段落（箇条書きなら項目）のすぐ下に画像を出す。場所が文の中に埋もれていて
+// 見つけられなければ、返事の終わりにまとめて出す
+function showReplyImages(reply: HTMLElement, text: string, end: HTMLElement) {
+  const paths = imagePaths(text);
+  if (!paths.length) return;
+  Promise.all(paths.map((path) => invoke<string>("read_image", { path }).catch(() => null))).then((urls) => {
+    if (!reply.isConnected) return;
+    const rest: string[] = [];
+    paths.forEach((path, i) => {
+      const url = urls[i];
+      if (!url) return;
+      const code = [...reply.querySelectorAll("code")].find((c) => c.textContent?.trim() === path && !c.closest("pre"));
+      const block = code?.closest("p, li");
+      if (block) block.after(imageStrip([url]));
+      else rest.push(url);
+    });
+    if (rest.length) end.before(imageStrip(rest));
+  });
+}
 
 function showImagePaths(bubble: HTMLElement, text: string) {
-  const paths = [...new Set([...text.matchAll(IMAGE_PATH)].map((m) => m[1] ?? m[2]))].slice(0, MAX_PATH_IMAGES);
+  const paths = imagePaths(text);
   if (!paths.length) return;
   Promise.all(paths.map((path) => invoke<string>("read_image", { path }).catch(() => null))).then((urls) => {
     const found = urls.filter((u): u is string => !!u);
@@ -226,6 +251,41 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
   if (cls) e.className = cls;
   if (text !== undefined) e.textContent = text;
   return e;
+}
+
+const ICONS = {
+  retry: '<path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9M2.5 2.5v2.6h2.6" />',
+  edit: '<path d="M10.2 2.8l3 3L6 13H3v-3z" /><path d="M8.7 4.3l3 3" />',
+  copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 5.5V3.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2" />',
+  done: '<path d="M3 8.5l3.2 3L13 4.5" />',
+  prev: '<path d="M10 3.5L5.5 8l4.5 4.5" />',
+  next: '<path d="M6 3.5l4.5 4.5L6 12.5" />',
+  send: '<path d="M8 13V3.5M3.8 7.7L8 3.5l4.2 4.2" />',
+  stop: '<rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor" stroke="none" />',
+} as const;
+
+function icon(name: keyof typeof ICONS, size = 14) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+}
+
+function actionButton(cls: string, title: string, name: keyof typeof ICONS) {
+  const b = el("button", `lg-act ${cls}`);
+  b.type = "button";
+  b.title = title;
+  b.setAttribute("aria-label", title);
+  b.innerHTML = icon(name);
+  return b;
+}
+
+/** 発言の時刻。今日なら時刻だけ、ほかの日は日付も */
+function timeLabel(at: string) {
+  const d = new Date(at);
+  if (Number.isNaN(d.getTime())) return null;
+  const hm = `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const text = d.toDateString() === new Date().toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+  const n = el("span", "lg-time", text);
+  n.title = d.toLocaleString();
+  return n;
 }
 
 const PLACEHOLDER: Record<string, string> = {
@@ -298,6 +358,10 @@ export interface TranscriptViewOptions {
   modelChoices: () => Promise<PromptChoice | null>;
   modelAnswer: (key: string) => Promise<void>;
   modelCancel: () => Promise<void>;
+  /** ファイルを選ぶ画面を開き、選んだファイルの場所を入力欄に入れる（無ければ「＋」に出さない） */
+  attach?: () => void;
+  /** ツールが変えたファイルの差分を、横のパネルに出す（無ければ「差分」を出さない） */
+  showDiff?: (path: string, diff: string) => void;
 }
 
 export function createTranscriptView(o: TranscriptViewOptions) {
@@ -343,7 +407,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   turnBar.hidden = true;
   body.before(turnBar);
 
-  // 入力欄の下の行：許可のモードと、プロンプトキャッシュの残り時間（どちらも Claude Code のとき）
+  // 入力欄の下の行：モデル・effort・許可のモード（どれも Claude Code のとき）
   const metaRow = el("div", "lg-meta");
   const modeSelect = el("select", "lg-mode");
   modeSelect.title = "許可のモード（Shift+Tab でも切り替えられます）";
@@ -365,7 +429,6 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     if (!ok) o.onError(`「${MODES.find(([v]) => v === want)?.[1]}」はこのセッションでは選べません（起動の引数や設定で有効にする必要があります）`);
     renderMeta();
   };
-  const cacheChip = el("span", "lg-cache");
   const modelBtn = el("button", "lg-model", "モデル");
   modelBtn.type = "button";
   modelBtn.title = "モデルを選ぶ（/model。選んだモデルは新しいセッションの既定にもなります）";
@@ -391,9 +454,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     effort = want;
     o.send(`/effort ${want}`).catch(o.onError);
   };
-  metaRow.append(modelBtn, effortSelect, modeSelect, cacheChip);
-  /** 本体の会話で最後にプロンプトキャッシュを使った時刻と、その有効時間（秒） */
-  let cache: { at: number; ttl: number } | null = null;
+  metaRow.append(modelBtn, effortSelect, modeSelect);
 
   function renderMeta() {
     const claude = agentKind === "claude" && !agent && !shell;
@@ -404,17 +465,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     modeSelect.hidden = !claude || mode === null || status === "waiting" || status === "exited";
     if (!modeSelect.hidden && !switching && mode) modeSelect.value = mode;
     // 作業中はエージェントが使い続けているので出さない。切れたあとに送ると会話の全体を読み直すので、遅く・使用量が多くなる
-    const left = cache?.ttl ? cache.at + cache.ttl * 1000 - Date.now() : null;
-    cacheChip.hidden = !claude || left === null || status === "running";
-    if (!cacheChip.hidden && left !== null) {
-      cacheChip.classList.toggle("lg-cache-gone", left <= 0);
-      cacheChip.textContent = left <= 0 ? "キャッシュ切れ" : `キャッシュ 残り ${left >= 60_000 ? `${Math.ceil(left / 60_000)}分` : `${Math.ceil(left / 1000)}秒`}`;
-      cacheChip.title =
-        left <= 0
-          ? "プロンプトキャッシュが切れています。次に送ると会話の全体を読み直すので、返事が遅く、使用量が多くなります"
-          : `プロンプトキャッシュが切れるまで（有効時間 ${cache!.ttl >= 3600 ? "1 時間" : "5 分"}）。切れる前に送ると、会話の読み直しが速く・安く済みます`;
-    }
-    metaRow.hidden = modelBtn.hidden && effortSelect.hidden && modeSelect.hidden && cacheChip.hidden;
+    metaRow.hidden = modelBtn.hidden && effortSelect.hidden && modeSelect.hidden;
   }
   const olderBtn = el("button", "lg-older", "前の会話を読む");
   olderBtn.type = "button";
@@ -537,12 +588,31 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     turn = newTurn(null);
   }
 
+  function copyButton(text: string, title: string) {
+    const b = actionButton("lg-copy", title, "copy");
+    let timer = 0;
+    b.onclick = () => {
+      o.copy(text);
+      b.innerHTML = icon("done");
+      clearTimeout(timer);
+      timer = window.setTimeout(() => (b.innerHTML = icon("copy")), 1500);
+    };
+    return b;
+  }
+
+  // コードのかたまりの上に、言語の名前とコピーを出す（Claude の Web 版と同じ）
+  function decorateCode(pre: HTMLPreElement) {
+    const code = pre.querySelector("code");
+    const lang = /(?:^|\s)language-(\S+)/.exec(code?.className ?? "")?.[1] ?? "";
+    const box = el("div", "lg-code");
+    const head = el("div", "lg-code-head");
+    head.append(el("span", "lg-code-lang", lang || "コード"), copyButton((code ?? pre).textContent ?? "", "このコードをコピー"));
+    pre.replaceWith(box);
+    box.append(head, pre);
+  }
+
   function render(e: Entry): HTMLElement | null {
     if (e.at) turn.end = e.at;
-    // サブエージェントのキャッシュは本体とは別なので、本体の会話のときだけ数える
-    if (e.cache_ttl !== undefined && e.at && !agent && !shell) {
-      cache = { at: Date.parse(e.at), ttl: e.cache_ttl || cache?.ttl || 0 };
-    }
     // どのエージェントの返事か分かるよう、依頼ごとに最初の返事か操作の前に名前を出す
     if ((e.kind === "assistant" || e.kind === "tool") && !turn.labeled) {
       turn.labeled = true;
@@ -553,13 +623,20 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         turn = newTurn(e.at ?? null);
         const n = el("div", "lg-user");
         if (e.at) n.dataset.at = e.at;
+        if (e.uuid) n.dataset.uuid = e.uuid;
         const bubble = el("div", "lg-user-text", e.text);
         if (e.images?.length) bubble.append(imageStrip(e.images));
         else showImagePaths(bubble, e.text);
-        const edit = el("button", "lg-edit", "ここから直す");
-        edit.type = "button";
-        edit.title = "この発言の前まで戻して、発言を入力欄に入れる";
-        n.append(edit, bubble);
+        // Claude の Web 版と同じく、発言の下に時刻と操作を並べる。やり直す・直すは指示待ちのときだけ出す（data-editable）
+        const acts = el("div", "lg-actions");
+        const time = e.at ? timeLabel(e.at) : null;
+        if (time) acts.append(time);
+        acts.append(
+          actionButton("lg-retry", "この発言からやり直す（この発言の前まで戻して、同じ発言をもう一度送る）", "retry"),
+          actionButton("lg-edit", "この発言を直す（この発言の前まで戻して、発言を入力欄に入れる）", "edit"),
+          copyButton(e.text, "この発言をコピー"),
+        );
+        n.append(bubble, acts);
         return n;
       }
       case "command": {
@@ -579,11 +656,11 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         const n = el("div", "lg-assistant md-preview");
         if (e.at) n.dataset.at = e.at;
         n.innerHTML = markdownHtml(e.text);
-        const copy = el("button", "lg-copy", "コピー");
-        copy.type = "button";
-        copy.title = "この返事を Markdown のままコピー";
-        copy.onclick = () => o.copy(e.text);
-        n.append(copy);
+        for (const pre of n.querySelectorAll("pre")) decorateCode(pre);
+        const acts = el("div", "lg-actions");
+        acts.append(copyButton(e.text, "この返事を Markdown のままコピー"), actionButton("lg-retry", "この返事をやり直す（前の発言の前まで戻して、同じ発言をもう一度送る）", "retry"));
+        n.append(acts);
+        showReplyImages(n, e.text, acts);
         return n;
       }
       case "tool": {
@@ -630,6 +707,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
           if (images) step.append(images);
           const out = step.querySelector<HTMLElement>(".lg-step-out")!;
           out.textContent = e.error ? "失敗" : (e.outcome ?? "完了");
+          if (e.change?.diff && o.showDiff) out.after(diffButton(e.change.path, e.change.diff));
           step.classList.remove("lg-pending");
           step.classList.add(e.error ? "lg-error" : "lg-done");
           pending.delete(e.id!);
@@ -643,6 +721,19 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         return n;
       }
     }
+  }
+
+  function diffButton(file: string, diff: string) {
+    const b = el("button", "lg-open-agent lg-open-diff", "差分");
+    b.type = "button";
+    b.title = "この変更の差分を横のパネルに出す";
+    b.onclick = (ev) => {
+      // summary の中のボタンなので、押しても結果の開閉はさせない
+      ev.preventDefault();
+      ev.stopPropagation();
+      o.showDiff?.(file, diff);
+    };
+    return b;
   }
 
   function openAgentButton(toolUseId: string) {
@@ -968,7 +1059,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   }
 
   async function refresh() {
-    if (!visible() || loading || !supported) return;
+    if (!visible() || loading || !supported || browsing) return;
     loading = true;
     const id = sessionId;
     const shownAgent = agent;
@@ -987,6 +1078,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       const chunk = await invoke<Chunk>("read_transcript", { id, path, offset, limit: Number.isFinite(cap) ? cap : null, agent, tip });
       if (id !== sessionId || shownAgent !== agent || shell) return;
       if (chunk.reset) {
+        skipping = false;
         body.replaceChildren(...sent.map((s) => s.node));
         pending.clear();
         resetTodos();
@@ -1004,12 +1096,15 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       if (body.querySelector(":scope > .fv-empty")) body.replaceChildren();
       const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
       for (const e of chunk.entries) {
+        if (hidden(e)) continue;
         if (e.kind === "user" && (queued.length || sent.length)) delivered(e.text);
         const n = render(e);
         if (n) body.append(n);
       }
       // まだ記録に届いていない仮の発言は、いちばん下に置いておく
       for (const s of sent) body.append(s.node);
+      if (chunk.reset || chunk.entries.some((e) => e.kind === "user")) loadForks();
+      else markForks();
       foldTurns();
       while (body.childElementCount > cap) body.firstElementChild!.remove();
       renderTurn();
@@ -1044,10 +1139,13 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       head = chunk.start;
       more = chunk.more;
       tip = chunk.tip;
+      skipping = false;
       for (const e of chunk.entries) {
+        if (hidden(e)) continue;
         const n = render(e);
         if (n) body.append(n);
       }
+      markForks();
       foldTurns();
       renderTurn();
       body.scrollTop = body.scrollHeight - fromBottom;
@@ -1069,18 +1167,34 @@ export function createTranscriptView(o: TranscriptViewOptions) {
 
   // サブエージェントやシェルには直接指示を送れないので、見ている間は入力欄を使えなくする
   function applyStatus() {
-    const away = !!agent || !!shell;
+    const away = !!agent || !!shell || !!browsing;
     input.disabled = away;
     // 「ここから直す」を出せるか（style.css）。書きかけの文は戻した発言で上書きしてしまうので、空のときだけにする
     root.dataset.editable = String(!away && status === "idle" && !input.value && (agentKind === "claude" || agentKind === "codex"));
-    input.placeholder = agent
+    input.placeholder = browsing
+      ? "書き直す前の会話を表示しています（上の「最新の会話に戻る」で指示を送れます）"
+      : agent
       ? "サブエージェントの会話を表示しています（上の「メイン」に戻すと指示を送れます）"
       : shell
         ? "シェルの出力を表示しています（上の「メイン」に戻すと指示を送れます）"
         : status === "idle" && suggestion
           ? `${suggestion}（Tab で入れる）`
           : (PLACEHOLDER[status] ?? "エージェントの起動を待っています");
-    sendBtn.disabled = away || !canSend() || sending || !input.value.trim();
+    // 作業中で入力欄が空なら、送信のボタンを停止のボタンにする（Claude の Web 版と同じ）
+    const stop = !away && status === "running" && !sending && !input.value.trim();
+    sendBtn.classList.add("lg-send");
+    sendBtn.classList.toggle("lg-send-stop", stop);
+    const want = stop ? "stop" : "send";
+    if (sendBtn.dataset.icon !== want) {
+      sendBtn.dataset.icon = want;
+      sendBtn.innerHTML = icon(want, 16);
+    }
+    sendBtn.title = stop ? "作業を止める（Esc）" : "送る（Enter）";
+    sendBtn.setAttribute("aria-label", stop ? "作業を止める" : "送る");
+    sendBtn.disabled = !stop && (away || !canSend() || sending || !input.value.trim());
+    // 「＋」は入力欄と同じ欄にあり、ここより後で作るので、欄から探す
+    const plus = input.parentElement?.querySelector<HTMLButtonElement>(".lg-plus");
+    if (plus) plus.disabled = away;
   }
 
   const canSend = () => status === "idle" || status === "running";
@@ -1138,6 +1252,174 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   // 会話の記録の予定のツールを、出てきた順に当てはめて組み立てる
   const compose = input.parentElement!;
   compose.after(metaRow);
+
+  // 入力欄の左の「＋」。添付・ファイルの参照・スキルやコマンド・モデル・effort を 1 か所から選ぶ（Claude の Web 版と同じ）
+  const plusBtn = el("button", "lg-plus");
+  plusBtn.type = "button";
+  plusBtn.title = "添付やスキル、モデルを選ぶ";
+  plusBtn.setAttribute("aria-label", plusBtn.title);
+  plusBtn.setAttribute("aria-haspopup", "menu");
+  plusBtn.textContent = "＋";
+  const plusMenu = el("div", "lg-plus-menu");
+  plusMenu.hidden = true;
+  plusMenu.setAttribute("role", "menu");
+  compose.prepend(plusBtn);
+  compose.append(plusMenu);
+  function plusItem(label: string, hint: string, run: () => void) {
+    const b = el("button", "lg-plus-item");
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    b.append(el("span", "", label), el("span", "lg-plus-hint", hint));
+    b.onclick = () => {
+      closePlus();
+      run();
+    };
+    return b;
+  }
+  function openPlus() {
+    const claude = agentKind === "claude";
+    const items: HTMLElement[] = [];
+    if (o.attach) items.push(plusItem("ファイル・画像を添付", "場所を入力欄に入れます", () => o.attach!()));
+    items.push(plusItem("ファイルを参照", "@", () => startWith("@")));
+    items.push(plusItem("スキル・コマンド", "/", () => startWith("/")));
+    if (claude) {
+      items.push(plusItem("モデルを選ぶ", "/model", () => openModelPanel()));
+      for (const v of EFFORTS) items.push(plusItem(`effort: ${v}`, v === effort ? "今" : "/effort", () => setEffort(v)));
+    }
+    plusMenu.replaceChildren(...items);
+    plusMenu.hidden = false;
+    plusBtn.setAttribute("aria-expanded", "true");
+    plusMenu.querySelector<HTMLElement>("button")?.focus();
+  }
+  function closePlus() {
+    plusMenu.hidden = true;
+    plusBtn.setAttribute("aria-expanded", "false");
+  }
+  // 「@」「/」は入力欄の頭か、空白の後に入れたときに候補が出る
+  function startWith(mark: string) {
+    input.focus({ preventScroll: true });
+    const before = input.value.slice(0, input.selectionStart);
+    insertText(mark === "/" ? (input.value ? "" : "/") : `${before && !/\s$/.test(before) ? " " : ""}${mark}`);
+  }
+  function setEffort(v: string) {
+    effortSelect.value = v;
+    effortSelect.onchange?.(new Event("change"));
+  }
+  plusBtn.onclick = () => (plusMenu.hidden ? openPlus() : closePlus());
+  plusMenu.addEventListener("keydown", (ev) => {
+    const list = [...plusMenu.querySelectorAll<HTMLElement>("button")];
+    const at = list.indexOf(document.activeElement as HTMLElement);
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      ev.stopPropagation();
+      closePlus();
+      input.focus({ preventScroll: true });
+    } else if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      list[(at + (ev.key === "ArrowDown" ? 1 : list.length - 1)) % list.length]?.focus();
+    }
+  });
+  document.addEventListener("pointerdown", (ev) => {
+    if (!plusMenu.hidden && !plusMenu.contains(ev.target as Node) && ev.target !== plusBtn) closePlus();
+  });
+
+  // 巻き戻して書き直した発言に「‹ 1/2 ›」を出し、書き直す前の会話（前の枝）を見られるようにする（Claude Code）。
+  // 前の枝は見るだけで、送るのは最新の会話に戻してから
+  let forkGroups: string[][] = [];
+  /** 前の枝を見ている間、その枝で選んだ発言 */
+  let browsing: string | null = null;
+  const browseBar = el("div", "lg-browse");
+  browseBar.hidden = true;
+  const browseBack = el("button", "lg-browse-back", "最新の会話に戻る");
+  browseBack.type = "button";
+  browseBack.onclick = () => stopBrowsing();
+  browseBar.append(el("span", "", "書き直す前の会話を表示しています"), browseBack);
+  body.before(browseBar);
+
+  async function loadForks() {
+    if (agentKind !== "claude" || agent || shell) {
+      forkGroups = [];
+      return markForks();
+    }
+    const id = sessionId;
+    const groups = await invoke<string[][]>("transcript_forks", { id }).catch(() => [] as string[][]);
+    if (id !== sessionId) return;
+    forkGroups = groups;
+    markForks();
+  }
+
+  function markForks() {
+    for (const n of body.querySelectorAll<HTMLElement>(".lg-user[data-uuid]")) {
+      const group = forkGroups.find((g) => g.includes(n.dataset.uuid!));
+      const i = group ? group.indexOf(n.dataset.uuid!) : -1;
+      const old = n.querySelector(".lg-fork");
+      // 続きを読むたびに作り直すと、押そうとしているボタンが入れ替わるので、変わったときだけ作る
+      if (group && old?.querySelector(".lg-fork-pos")?.textContent === `${i + 1}/${group.length}`) continue;
+      old?.remove();
+      if (!group) continue;
+      const nav = el("span", "lg-fork");
+      const prev = actionButton("lg-fork-prev", "書き直す前の発言", "prev");
+      const next = actionButton("lg-fork-next", "書き直した後の発言", "next");
+      prev.disabled = i === 0;
+      next.disabled = i === group.length - 1;
+      prev.onclick = () => browse(group[i - 1]);
+      next.onclick = () => browse(group[i + 1]);
+      nav.append(prev, el("span", "lg-fork-pos", `${i + 1}/${group.length}`), next);
+      n.querySelector(".lg-actions")?.prepend(nav);
+    }
+  }
+
+  let liveTip: string | null = null;
+  async function browse(prompt: string) {
+    if (loading || !sessionId) return;
+    loading = true;
+    const id = sessionId;
+    try {
+      const chunk = await invoke<Chunk>("read_transcript_fork", { id, prompt });
+      if (id !== sessionId) return;
+      if (!browsing) liveTip = tip;
+      // 最新の会話の枝を選んだら、ふだんの表示に戻す
+      if (chunk.tip === liveTip) {
+        loading = false;
+        return stopBrowsing(prompt);
+      }
+      browsing = prompt;
+      showChunk(chunk, prompt);
+    } catch (e) {
+      o.onError(e);
+    } finally {
+      loading = false;
+      applyStatus();
+    }
+  }
+
+  function showChunk(chunk: Chunk, focus: string) {
+    body.replaceChildren();
+    pending.clear();
+    resetTodos();
+    turn = newTurn(null);
+    for (const e of chunk.entries) {
+      const n = render(e);
+      if (n) body.append(n);
+    }
+    markForks();
+    foldTurns();
+    renderTurn();
+    browseBar.hidden = !browsing;
+    body.querySelector<HTMLElement>(`.lg-user[data-uuid="${CSS.escape(focus)}"]`)?.scrollIntoView({ block: "start" });
+  }
+
+  async function stopBrowsing(focus?: string) {
+    browsing = null;
+    browseBar.hidden = true;
+    path = null;
+    offset = 0;
+    resetRange();
+    body.replaceChildren();
+    applyStatus();
+    await refresh();
+    if (focus) body.querySelector<HTMLElement>(`.lg-user[data-uuid="${CSS.escape(focus)}"]`)?.scrollIntoView({ block: "start" });
+  }
   const todoBox = el("div", "lg-todos");
   todoBox.hidden = true;
   compose.before(todoBox);
@@ -1260,14 +1542,23 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     input.focus({ preventScroll: true });
   }
 
-  async function pickRewind(steps: number, text: string, node: HTMLElement) {
+  // 戻したあと、戻された発言（無ければ選んだ発言）をそのまま送る
+  function resend(back: string, text: string) {
+    input.value = back || text;
+    fitInput();
+    submit();
+  }
+
+  /** retry は、戻したあとに送る発言（やり直すとき）。null なら戻した発言を入力欄に入れる（直すとき） */
+  async function pickRewind(steps: number, text: string, node: HTMLElement, retry: string | null = null) {
     if (agentKind === "codex") {
       rewindPanel("前のメッセージを直す画面を開いています…", []);
       const back = await o.rewindCodex(steps, text).catch(() => null);
       rewindBox.hidden = true;
       if (back === null) return;
       dropFrom(node);
-      restoreInput(back);
+      if (retry !== null) resend("", retry);
+      else restoreInput(back);
       return;
     }
     rewinding = true;
@@ -1279,6 +1570,16 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       rewindBox.hidden = true;
       return;
     }
+    // やり直すときは、選ぶ欄を出さずに会話だけを戻す（Claude の Web 版と同じく、コードはそのまま）
+    const conversationOnly = retry !== null ? p.options.find((x) => /restore conversation/i.test(x.label) && !/code/i.test(x.label)) : undefined;
+    if (conversationOnly) {
+      rewinding = false;
+      rewindBox.hidden = true;
+      await o.rewindAnswer(conversationOnly.key).catch(() => "");
+      dropFrom(node);
+      resend("", retry!);
+      return;
+    }
     const buttons = p.options.map((opt) => {
       const b = el("button", "lg-prompt-opt", `${opt.key}. ${opt.label}`);
       b.type = "button";
@@ -1287,12 +1588,15 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         rewindBox.hidden = true;
         const back = await o.rewindAnswer(opt.key).catch(() => "");
         // 会話を戻したら、記録が次の発言で書き換わるまでの間も、表示からその発言より後を消しておく
-        if (/conversation/i.test(opt.label) && !/never/i.test(opt.label)) dropFrom(node);
-        restoreInput(back);
+        const restored = /conversation/i.test(opt.label) && !/never/i.test(opt.label);
+        if (restored) dropFrom(node);
+        // 会話を戻さなかったときは、送り直すと同じ発言が続けて並ぶだけなので、入力欄に入れるだけにする
+        if (retry !== null && restored) resend("", retry);
+        else restoreInput(back);
       };
       return b;
     });
-    rewindPanel(p.question || "どこまで戻しますか", buttons);
+    rewindPanel(`${retry !== null ? "やり直す: " : ""}${p.question || "どこまで戻しますか"}`, buttons);
   }
 
   // モデルを選ぶ。/model の画面を裏で開き、選択肢を巻き戻しと同じ欄にボタンで出す
@@ -1301,13 +1605,14 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     picking = true;
     renderMeta();
     rewindPanel("モデルの一覧を読んでいます…", []);
-    const p = await o.modelChoices().catch(() => null);
+    let failed: unknown = null;
+    const p = await o.modelChoices().catch((e) => ((failed = e), null));
     if (!picking) return;
     if (!p) {
       picking = false;
       rewindBox.hidden = true;
       renderMeta();
-      o.onError("モデルを選ぶ画面を読み取れませんでした。ターミナルで /model を使ってください");
+      o.onError(failed ?? "モデルを選ぶ画面を読み取れませんでした。ターミナルで /model を使ってください");
       return;
     }
     const buttons = p.options.map((opt) => {
@@ -1325,15 +1630,78 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     rewindPanel("モデルを選ぶ（選んだモデルは、新しいセッションの既定にもなります）", buttons);
   }
 
-  // 発言の「ここから直す」。Esc 2 回の戻り先の一覧を飛ばし、その発言を選んだのと同じ流れに入る
+  // 発言の「直す」「やり直す」と、返事の「やり直す」。Esc 2 回の戻り先の一覧を飛ばし、その発言を選んだのと同じ流れに入る。
+  // 返事のやり直しは、その返事の前の発言からやり直す
   body.addEventListener("click", (ev) => {
-    const btn = (ev.target as Element).closest(".lg-edit");
+    const btn = (ev.target as Element).closest<HTMLElement>(".lg-edit, .lg-retry");
     if (!btn || root.dataset.editable !== "true" || rewinding || picking) return;
     const past = sentMessages();
-    const k = past.findIndex((m) => m.node === btn.closest(".lg-user"));
+    const own = btn.closest(".lg-user");
+    let k = -1;
+    past.forEach((m, i) => {
+      if (own ? m.node === own : m.node.compareDocumentPosition(btn) & Node.DOCUMENT_POSITION_FOLLOWING) k = i;
+    });
     if (k < 0) return;
-    pickRewind(past.length - k, past[k].text, past[k].node);
+    const steps = past.length - k;
+    const { text, node } = past[k];
+    if (!btn.classList.contains("lg-retry")) pickRewind(steps, text, node);
+    else if (own) editInPlace(node, text, (next) => pickRewind(steps, text, node, next));
+    else pickRewind(steps, text, node, text);
   });
+
+  // 発言のやり直し。吹き出しをその場で書き換えられるようにし、Enter で送る（Claude の Web 版と同じ）
+  function editInPlace(node: HTMLElement, text: string, send: (next: string) => void) {
+    const bubble = node.querySelector<HTMLElement>(".lg-user-text");
+    const acts = node.querySelector<HTMLElement>(".lg-actions");
+    if (!bubble || node.querySelector(".lg-user-edit")) return;
+    const box = el("textarea", "lg-user-edit");
+    box.value = text;
+    box.spellcheck = false;
+    box.setAttribute("aria-label", "やり直す発言");
+    const cancel = el("button", "lg-user-edit-cancel", "やめる");
+    cancel.type = "button";
+    const ok = el("button", "primary-btn", "送信");
+    ok.type = "button";
+    const bar = el("div", "lg-user-edit-bar");
+    bar.append(el("span", "lg-user-edit-hint", "Enter で、会話をここまで戻して送ります（コードは戻しません）"), cancel, ok);
+    const fit = () => {
+      box.style.height = "auto";
+      box.style.height = `${Math.min(box.scrollHeight, 320)}px`;
+    };
+    const close = () => {
+      box.remove();
+      bar.remove();
+      bubble.hidden = false;
+      if (acts) acts.hidden = false;
+    };
+    const go = () => {
+      const next = box.value.trim();
+      if (!next || root.dataset.editable !== "true" || rewinding || picking) return;
+      close();
+      send(next);
+    };
+    box.oninput = fit;
+    box.onkeydown = (ev) => {
+      if (ev.isComposing) return;
+      if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        go();
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        close();
+        input.focus({ preventScroll: true });
+      }
+    };
+    cancel.onclick = close;
+    ok.onclick = go;
+    bubble.hidden = true;
+    if (acts) acts.hidden = true;
+    bubble.after(box, bar);
+    fit();
+    box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
+  }
 
   // 入力待ちの画面に出ている確認や選択肢を、ボタンで答えられるようにする
   const promptBox = el("div", "lg-prompt");
@@ -1379,6 +1747,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       );
       head.push(tabs);
     }
+    if (p.detail) head.push(el("pre", "lg-prompt-detail", p.detail));
     promptBox.replaceChildren(...head, el("div", "lg-prompt-q", p.question || "確認を待っています"), opts);
     panelPick = 0;
     markPick();
@@ -1449,6 +1818,20 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       sent = [];
     }, SENT_DROP_MS);
   }
+  // 止めたときにエージェントが入力欄へ戻した発言（会話から外される）。記録には発言の行と中断の行が残り、
+  // 次の発言を送るまでは今の会話の続きとして読めてしまうので、止めた時刻より前のその発言から後を出さない。
+  // 同じ文をあとで送り直したものは、止めた時刻より後なので出す
+  let dropped: { text: string; before: number } | null = null;
+  let skipping = false;
+  const DROP_SKEW_MS = 2000;
+  function hidden(e: Entry) {
+    if (e.kind === "user") {
+      const at = Date.parse(e.at ?? "");
+      skipping = !!dropped && flat(e.text) === dropped.text && (!Number.isFinite(at) || at <= dropped.before + DROP_SKEW_MS);
+    }
+    return skipping;
+  }
+
   function unsend(text: string) {
     const at = sent.map((s) => s.text).lastIndexOf(text);
     if (at >= 0) sent.splice(at, 1)[0].node.remove();
@@ -1749,7 +2132,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     input.placeholder = "もう一度 Esc で、前のメッセージに戻る画面を開きます";
     escapeHint = window.setTimeout(applyStatus, ESCAPE_TWICE_MS);
   }
-  sendBtn.onclick = submit;
+  sendBtn.onclick = () => (sendBtn.classList.contains("lg-send-stop") ? o.interrupt() : submit());
 
   const timer = setInterval(() => {
     if (document.hidden) return;
@@ -1809,6 +2192,28 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       insertText(text);
       input.focus({ preventScroll: true });
     },
+    /** エージェントの入力欄から戻ってきた発言を入れる。書きかけの文があれば、そちらを残して何もしない */
+    restore(text: string) {
+      if (input.value.trim()) return;
+      restoreInput(text);
+    },
+    /**
+     * 止めたときにエージェントが入力欄へ戻した発言は、会話から外される（次の発言はその前につながる）ので、表示からも外す。
+     * 作業が進んでから止めたときは発言は会話に残り、戻されるのは作業中に送って待っていた指示だけなので、最後の発言と合わなければ何もしない
+     */
+    dropRestored(text: string, at: number) {
+      const users = body.querySelectorAll<HTMLElement>(":scope > .lg-user");
+      const last = users[users.length - 1];
+      const shown = flat(last?.querySelector(".lg-user-text")?.firstChild?.textContent ?? "");
+      const want = flat(text);
+      if (!shown || !want || !(want.startsWith(shown.slice(0, 20)) || shown.startsWith(want.slice(0, 20)))) return;
+      // 送ったばかりでまだ記録に届いていない発言（仮の吹き出し）のこともある
+      const s = sent.find((x) => x.node === last);
+      if (s) unsend(s.text);
+      dropped = { text: flat(last.querySelector(".lg-user-text")?.firstChild?.textContent ?? ""), before: at };
+      skipping = true;
+      dropFrom(last);
+    },
     get shown() {
       return !root.hidden;
     },
@@ -1837,6 +2242,12 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       if (id === sessionId) return void refresh();
       sessionId = id;
       agentKind = agentName;
+      browsing = null;
+      browseBar.hidden = true;
+      forkGroups = [];
+      dropped = null;
+      skipping = false;
+      closePlus();
       root.dataset.agent = agentName ?? "";
       supported = TRANSCRIPT_AGENTS.includes(agentName ?? "");
       path = null;
@@ -1852,7 +2263,6 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       dropQueue();
       dropSent();
       turn = newTurn(null);
-      cache = null;
       mode = null;
       effort = null;
       renderBar();
@@ -1873,7 +2283,7 @@ export type TranscriptView = ReturnType<typeof createTranscriptView>;
 
 /** セッション画面で、ターミナルの代わりに出す会話の表示 */
 export function createTranscriptPanel(
-  o: Pick<TranscriptViewOptions, "onError" | "send" | "interrupt" | "listCommands" | "openInTerminal" | "rewind" | "fold" | "findFiles" | "sendKeys" | "answer" | "answerInTerminal" | "rewindTo" | "rewindAnswer" | "rewindCancel" | "rewindCodex" | "copy" | "switchMode" | "stopTask" | "modelChoices" | "modelAnswer" | "modelCancel">,
+  o: Pick<TranscriptViewOptions, "onError" | "send" | "interrupt" | "listCommands" | "openInTerminal" | "rewind" | "fold" | "findFiles" | "sendKeys" | "answer" | "answerInTerminal" | "rewindTo" | "rewindAnswer" | "rewindCancel" | "rewindCodex" | "copy" | "switchMode" | "stopTask" | "modelChoices" | "modelAnswer" | "modelCancel" | "attach" | "showDiff">,
 ) {
   return createTranscriptView({
     root: $("log"),

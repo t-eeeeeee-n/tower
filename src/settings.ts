@@ -2,6 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Terminal } from "@xterm/xterm";
 import { MinttyConfig, Palette, ThemeOption, TOWER, parseMintty, themeOptions, uiTokens, xtermTheme } from "./theme";
+import { storage } from "./store";
 
 type CursorStyle = "block" | "underline" | "bar";
 /** 会話の表示で、終わった依頼をどこまで畳むか（none 畳まない / tools ツールの列 / all 最後の返答以外） */
@@ -17,7 +18,9 @@ interface Appearance {
   logSize: number;
   /** 飛行機やキャラを動かすか */
   motion: boolean;
-  limits: boolean;
+  /** サイドバーの下に使用制限を出すか */
+  limitsClaude: boolean;
+  limitsCodex: boolean;
 }
 export type RestoreMode = "ask" | "auto" | "never";
 export type OpenAs = "last" | "log" | "term";
@@ -43,7 +46,7 @@ interface History {
   overview: number;
 }
 
-const DEFAULT: Appearance = { theme: "tower", font: "Cascadia Mono", fontSize: 14, cursor: "block", blink: true, fold: "tools", logSize: 14, motion: true, limits: true };
+const DEFAULT: Appearance = { theme: "tower", font: "Cascadia Mono", fontSize: 14, cursor: "block", blink: true, fold: "tools", logSize: 14, motion: true, limitsClaude: true, limitsCodex: true };
 const LOG_SIZE_MIN = 11;
 const LOG_SIZE_MAX = 20;
 const SESSION_DEFAULT: SessionPrefs = { args: {}, restore: "ask", openAs: "last", worktreeDir: "", worktreeName: "", closeToTray: true };
@@ -99,14 +102,14 @@ function clampSize(n: number) {
 
 function loadJson<T>(key: string): Partial<T> | null {
   try {
-    return JSON.parse(localStorage.getItem(key) ?? "null");
+    return JSON.parse(storage.getItem(key) ?? "null");
   } catch {
     return null;
   }
 }
 function save(key: string, value: unknown) {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    storage.setItem(key, JSON.stringify(value));
   } catch {
     /* 保存できなくても動作には影響しない */
   }
@@ -135,7 +138,8 @@ function loadHistory(): History {
 }
 
 function loadSettings(): Appearance {
-  const v = { ...DEFAULT, ...loadJson<Appearance>("appearance") };
+  const saved = loadJson<Appearance & { limits: boolean }>("appearance");
+  const v = { ...DEFAULT, ...saved };
   return {
     theme: String(v.theme),
     font: String(v.font),
@@ -145,7 +149,9 @@ function loadSettings(): Appearance {
     fold: v.fold in { none: 1, tools: 1, all: 1 } ? v.fold : DEFAULT.fold,
     logSize: Number.isFinite(v.logSize) ? clampInt(v.logSize, LOG_SIZE_MIN, LOG_SIZE_MAX) : DEFAULT.logSize,
     motion: v.motion !== false,
-    limits: v.limits !== false,
+    // 0.14 までは 1 つの設定（limits）で両方を切り替えていた
+    limitsClaude: (saved?.limitsClaude ?? saved?.limits) !== false,
+    limitsCodex: (saved?.limitsCodex ?? saved?.limits) !== false,
   };
 }
 
@@ -178,7 +184,8 @@ export function createSettings(
   const fFold = $<HTMLSelectElement>("look-fold");
   const fLogSize = $<HTMLInputElement>("look-log-size");
   const fMotion = $<HTMLInputElement>("look-motion");
-  const fLimits = $<HTMLInputElement>("look-limits");
+  const fLimitsClaude = $<HTMLInputElement>("look-limits-claude");
+  const fLimitsCodex = $<HTMLInputElement>("look-limits-codex");
   const fArgs = Object.fromEntries(ARG_AGENTS.map((a) => [a, $<HTMLInputElement>(`look-args-${a}`)]));
   const fRestore = $<HTMLSelectElement>("look-restore");
   const fOpenAs = $<HTMLSelectElement>("look-open-as");
@@ -227,7 +234,8 @@ export function createSettings(
     term.options.cursorBlink = settings.blink;
     root.setProperty("--log-text", `${settings.logSize}px`);
     document.documentElement.classList.toggle("no-motion", !settings.motion);
-    document.documentElement.classList.toggle("no-limits", !settings.limits);
+    document.documentElement.classList.toggle("no-limits-claude", !settings.limitsClaude);
+    document.documentElement.classList.toggle("no-limits-codex", !settings.limitsCodex);
     refit();
     if (settings.fold !== appliedFold) onFold((appliedFold = settings.fold));
   }
@@ -318,7 +326,8 @@ export function createSettings(
     fFold.value = settings.fold;
     fLogSize.value = String(settings.logSize);
     fMotion.checked = settings.motion;
-    fLimits.checked = settings.limits;
+    fLimitsClaude.checked = settings.limitsClaude;
+    fLimitsCodex.checked = settings.limitsCodex;
     for (const a of ARG_AGENTS) fArgs[a].value = session.args[a] ?? "";
     fRestore.value = session.restore;
     fOpenAs.value = session.openAs;
@@ -393,7 +402,8 @@ export function createSettings(
   };
   fLogSize.onchange = () => (fLogSize.value = String(settings.logSize));
   fMotion.onchange = () => update({ motion: fMotion.checked });
-  fLimits.onchange = () => update({ limits: fLimits.checked });
+  fLimitsClaude.onchange = () => update({ limitsClaude: fLimitsClaude.checked });
+  fLimitsCodex.onchange = () => update({ limitsCodex: fLimitsCodex.checked });
   fNotifyWaiting.onchange = () => (notify = { ...notify, waiting: fNotifyWaiting.checked });
   fNotifyDone.onchange = () => (notify = { ...notify, done: fNotifyDone.checked });
   fSound.onchange = () => {
@@ -439,6 +449,14 @@ export function createSettings(
     fill();
   };
   $("look-cancel").onclick = cancel;
+  // 枠の外（背景）のクリックでも、キャンセルと同じく試していた変更を戻して閉じる。背景のクリックは dialog 自身に届く。
+  // キーボードで押したボタンのクリックは座標が 0,0 になるので、座標だけでは判断しない
+  dialog.addEventListener("click", (ev) => {
+    if (ev.target !== dialog) return;
+    const r = dialog.getBoundingClientRect();
+    const inside = ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom;
+    if (!inside) cancel();
+  });
   dialog.addEventListener("cancel", (ev) => {
     ev.preventDefault();
     cancel();

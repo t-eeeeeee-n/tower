@@ -13,6 +13,7 @@ mod theme;
 mod transcript;
 mod tray;
 mod update;
+mod store;
 mod usage;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,6 +79,12 @@ fn create_session(
 #[tauri::command(async)]
 fn past_conversations(cwd: String) -> Vec<history::Past> {
     history::list(&cwd, hooks::home_dir("CLAUDE_CONFIG_DIR", ".claude").as_deref(), hooks::home_dir("CODEX_HOME", ".codex").as_deref())
+}
+
+/// フォルダの過去の会話を、発言と返事の中身で探す
+#[tauri::command(async)]
+fn search_past_conversations(cwd: String, query: String) -> Vec<history::Hit> {
+    history::search(&cwd, &query, hooks::home_dir("CLAUDE_CONFIG_DIR", ".claude").as_deref(), hooks::home_dir("CODEX_HOME", ".codex").as_deref())
 }
 
 fn session_root(state: &App, id: &str) -> Result<std::path::PathBuf, String> {
@@ -248,6 +255,31 @@ fn read_transcript(
         (_, main) => main,
     };
     transcript::read(target, path, offset, limit, agent.is_some(), from, tip)
+}
+
+/// 画面の設定と一覧（~/.tower/settings.json）。まだ無ければ None
+#[tauri::command(async)]
+fn store_load() -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
+    store::load()
+}
+
+/// 設定の項目を書く（値が null の項目は消す）
+#[tauri::command(async)]
+fn store_set(entries: serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    store::set(entries)
+}
+
+/// 巻き戻して書き直した発言の組（Claude Code）
+#[tauri::command(async)]
+fn transcript_forks(state: State<'_, App>, id: String) -> Result<Vec<Vec<String>>, String> {
+    Ok(state.manager.transcript(&id)?.map(|p| transcript::forks(&p)).unwrap_or_default())
+}
+
+/// 発言 prompt を通る前の枝を読む
+#[tauri::command(async)]
+fn read_transcript_fork(state: State<'_, App>, id: String, prompt: String) -> Result<transcript::Chunk, String> {
+    let path = state.manager.transcript(&id)?.ok_or("会話の記録がまだありません")?;
+    transcript::read_fork(&path, &prompt)
 }
 
 /// Codex で前のメッセージを書き直したあと、分かれた新しい記録を会話の記録にする。見つかれば true
@@ -430,6 +462,7 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             log_panics(dir.clone());
             usage::init(&dir);
+            store::init(app.config().identifier.ends_with(".dev"));
             hooks::init_log(&dir);
             let settings_path = dir.join("hooks-settings.json");
             let mut hooks_error = None;
@@ -493,6 +526,11 @@ pub fn run() {
             find_files,
             reveal_path,
             git_diff,
+            search_past_conversations,
+            store_load,
+            store_set,
+            transcript_forks,
+            read_transcript_fork,
             trust_folder,
             notify,
             notify_test,
