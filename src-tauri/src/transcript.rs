@@ -141,19 +141,28 @@ pub fn subagents(main: &Path) -> Vec<Subagent> {
                 return None;
             }
             let modified = e.metadata().ok()?.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
-            let meta: Value = std::fs::read(e.path().with_extension("meta.json"))
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok())
-                .unwrap_or(Value::Null);
+            let meta_path = e.path().with_extension("meta.json");
+            let meta: Value = std::fs::read(&meta_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
             let text = |k: &str| meta.get(k).and_then(Value::as_str).map(String::from);
             let tool_use_id = text("toolUseId");
             // 終わると meta.json に finished が付く。付く前は、本体の記録で、裏で動かしたものは終わった知らせまで、
-            // そうでないものは呼び出しの結果が届くまで動いているとみなす（どれも公開された仕様ではない）
-            let finished = meta.get("finished").and_then(Value::as_bool) == Some(true);
+            // そうでないものは呼び出しの結果が届くまで動いているとみなす（どれも公開された仕様ではない）。
+            // 終わったあとに続きを頼まれると、finished が付いたまま記録が書き足されるので、記録のほうが新しければ記録の終わりで見る
+            let meta_modified = std::fs::metadata(&meta_path).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok());
+            let resumed = meta_modified.is_some_and(|m| modified > m.as_millis() as u64 + RESUME_SKEW_MS);
+            let finished = meta.get("finished").and_then(Value::as_bool) == Some(true) && !resumed;
             let running = if finished {
                 Some(false)
+            } else if resumed {
+                working(&e.path())
             } else {
-                launched.get(id).map(|s| s == "running").or_else(|| tool_use_id.as_ref().and_then(|t| calls.get(t).copied()))
+                launched
+                    .get(id)
+                    .map(|s| s == "running")
+                    .or_else(|| tool_use_id.as_ref().and_then(|t| calls.get(t).copied()))
+                    // スキルの中で動かしたものなど、本体の記録に呼び出しが無いものは、自分の記録の終わりで見る。
+                    // 途中で落ちたものは結果を待ったまま記録が終わっているので、長く書き換わっていなければ終わったとみなす
+                    .or_else(|| working(&e.path()).map(|w| w && crate::session::now_ms().saturating_sub(modified) < STALE_AGENT_MS))
             };
             Some(Subagent {
                 id: id.to_string(),
@@ -167,6 +176,31 @@ pub fn subagents(main: &Path) -> Vec<Subagent> {
         .collect();
     out.sort_by_key(|a| std::cmp::Reverse(a.modified));
     out
+}
+
+/// finished を書いたあとに記録が書き足されたとみなすまでの差（同時に書かれても、時刻は少しずれる）
+const RESUME_SKEW_MS: u64 = 3000;
+const AGENT_TAIL: u64 = 256 << 10;
+const STALE_AGENT_MS: u64 = 60 * 60 * 1000;
+
+/// サブエージェントの記録の終わりから、まだ動いているか。最後の行が返事の終わり（ツールを呼ばない返事）なら終わっている。
+/// ツールを呼んで結果を待っているか、結果や指示を受けて考えている途中なら動いている。読めなければ None
+fn working(path: &Path) -> Option<bool> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(AGENT_TAIL))).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let last = buf
+        .split(|&b| b == b'\n')
+        .rev()
+        .filter_map(|l| serde_json::from_slice::<Value>(l).ok())
+        .find(|v| matches!(v.get("type").and_then(Value::as_str), Some("assistant" | "user")))?;
+    if last.get("type").and_then(Value::as_str) == Some("user") {
+        return Some(true);
+    }
+    let calls_tool = last.pointer("/message/content").and_then(Value::as_array).is_some_and(|c| c.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use")));
+    Some(calls_tool || last.pointer("/message/stop_reason").and_then(Value::as_str) == Some("tool_use"))
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -806,6 +840,17 @@ fn entry(kind: Kind, text: String) -> Entry {
 
 /// 人が打った発言。スラッシュコマンドは名前だけにし、Claude Code が差し込むタグ付きの文は出さない
 fn user_text(s: &str) -> Option<Entry> {
+    // 「!」で始めたシェルのコマンドは、打ったものが <bash-input>、出力が <bash-stdout> と <bash-stderr> で残る（Claude Code）
+    if let Some(cmd) = between(s, "<bash-input>", "</bash-input>") {
+        return Some(entry(Kind::Command, format!("! {}", cmd.trim())));
+    }
+    if s.trim_start().starts_with("<bash-stdout>") || s.trim_start().starts_with("<bash-stderr>") {
+        let out = between(s, "<bash-stdout>", "</bash-stdout>").unwrap_or("").trim();
+        let err = between(s, "<bash-stderr>", "</bash-stderr>").unwrap_or("").trim();
+        let text = [out, err].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("
+");
+        return Some(Entry { error: out.is_empty() && !err.is_empty(), ..entry(Kind::Result, truncate(&text, MAX_RESULT)) });
+    }
     if let Some(name) = between(s, "<command-name>", "</command-name>") {
         let args = between(s, "<command-args>", "</command-args>").unwrap_or("").trim();
         let text = if args.is_empty() { name.to_string() } else { format!("{name} {args}") };
@@ -1013,6 +1058,12 @@ mod tests {
         assert_eq!(kinds(json!({"type":"user","message":{"content":cmd}})), vec![(Kind::Command, "/model opus".into())]);
         assert_eq!(kinds(json!({"type":"user","message":{"content":"直して"}})), vec![(Kind::User, "直して".into())]);
         assert!(kinds(json!({"type":"user","message":{"content":"<local-command-stdout></local-command-stdout>"}})).is_empty());
+        // 「!」で実行したシェルのコマンドと、その出力
+        assert_eq!(kinds(json!({"type":"user","message":{"content":"<bash-input> npm test</bash-input>"}})), vec![(Kind::Command, "! npm test".into())]);
+        let out = entries_of(&json!({"type":"user","message":{"content":"<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>"}}));
+        assert_eq!((&out[0].kind, out[0].text.as_str(), out[0].error), (&Kind::Result, "ok", false));
+        let err = entries_of(&json!({"type":"user","message":{"content":"<bash-stdout></bash-stdout><bash-stderr>not found</bash-stderr>"}}));
+        assert_eq!((err[0].text.as_str(), err[0].error), ("not found", true));
         let interrupted = json!({"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}});
         assert_eq!(kinds(interrupted), vec![(Kind::Command, "中断しました".into())]);
         assert!(kinds(json!({"type":"user","isMeta":true,"message":{"content":"meta"}})).is_empty());
@@ -1102,6 +1153,37 @@ mod tests {
         std::fs::OpenOptions::new().append(true).open(&main).unwrap().write_all(lines(&[done("a2")]).as_bytes()).unwrap();
         std::fs::write(sub.join("agent-a3.meta.json"), json!({"toolUseId": "t3", "finished": true}).to_string()).unwrap();
         assert_eq!(states(), [s("a1", Some(true)), s("a2", Some(false)), s("a3", Some(false)), s("a4", Some(false))]);
+
+        // スキルの中で動かしたもの（本体の記録に呼び出しが無い）は、自分の記録の終わりで見る。
+        // a5 はツールの結果を待っている、a6 は返事を書き終えた
+        let waits = json!({"type":"assistant","isSidechain":true,"message":{"content":[{"type":"tool_use","id":"x","name":"Bash","input":{}}],"stop_reason":"tool_use"}});
+        let ends = json!({"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"終わり"}],"stop_reason":"end_turn"}});
+        for (agent, last) in [("a5", &waits), ("a6", &ends)] {
+            std::fs::write(sub.join(format!("agent-{agent}.jsonl")), lines(std::slice::from_ref(last))).unwrap();
+            std::fs::write(sub.join(format!("agent-{agent}.meta.json")), json!({"description": "/code-review"}).to_string()).unwrap();
+        }
+        let v = states();
+        assert_eq!(&v[4..], [s("a5", Some(true)), s("a6", Some(false))]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn subagent_tail_tells_whether_it_still_works() {
+        let dir = std::env::temp_dir().join(format!("tower-agent-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.jsonl");
+        let check = |vs: &[Value]| {
+            std::fs::write(&f, vs.iter().map(|v| format!("{v}\n")).collect::<String>()).unwrap();
+            working(&f)
+        };
+        let say = |content: Value| json!({"type":"assistant","message":{"content":content}});
+        assert_eq!(check(&[say(json!([{"type":"text","text":"done"}]))]), Some(false));
+        assert_eq!(check(&[say(json!([{"type":"tool_use","id":"t","name":"Read","input":{}}]))]), Some(true));
+        // 結果や続きの指示を受け取って、次を考えている
+        assert_eq!(check(&[say(json!([{"type":"text","text":"done"}])), json!({"type":"user","message":{"content":"続けて"}})]), Some(true));
+        // 最後の行が会話でないもの（要約の題名など）は飛ばす
+        assert_eq!(check(&[say(json!([{"type":"text","text":"done"}])), json!({"type":"ai-title","aiTitle":"x"})]), Some(false));
+        assert_eq!(check(&[]), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 

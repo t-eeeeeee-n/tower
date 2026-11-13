@@ -368,6 +368,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   const { root, body, input, sendBtn } = o;
   let status = "";
   let sending = false;
+  /** シェルのモード（入力欄の左に「!」を出し、送るときに「!」を付ける） */
+  let bashMode = false;
   let sessionId: string | null = null;
   let supported = false;
   let path: string | null = null;
@@ -632,8 +634,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         const time = e.at ? timeLabel(e.at) : null;
         if (time) acts.append(time);
         acts.append(
-          actionButton("lg-retry", "この発言からやり直す（この発言の前まで戻して、同じ発言をもう一度送る）", "retry"),
-          actionButton("lg-edit", "この発言を直す（この発言の前まで戻して、発言を入力欄に入れる）", "edit"),
+          actionButton("lg-retry", "やり直す（会話をこの発言の前まで戻して、同じ発言をもう一度送る）", "retry"),
+          actionButton("lg-edit", "編集（この発言を書き換え、会話をこの発言の前まで戻して送る）", "edit"),
           copyButton(e.text, "この発言をコピー"),
         );
         n.append(bubble, acts);
@@ -1192,6 +1194,12 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     sendBtn.title = stop ? "作業を止める（Esc）" : "送る（Enter）";
     sendBtn.setAttribute("aria-label", stop ? "作業を止める" : "送る");
     sendBtn.disabled = !stop && (away || !canSend() || sending || !input.value.trim());
+    // シェルのモード（Claude Code と同じく、空の入力欄で「!」を打つと入る）
+    if (bashMode && (away || agentKind !== "claude")) bashMode = false;
+    input.parentElement?.classList.toggle("lg-bash", bashMode);
+    const mark = input.parentElement?.querySelector<HTMLElement>(".lg-bash-mark");
+    if (mark) mark.hidden = !bashMode;
+    if (bashMode) input.placeholder = "シェルのコマンドを入力（Enter で実行、空のまま Backspace で戻る）";
     // 「＋」は入力欄と同じ欄にあり、ここより後で作るので、欄から探す
     const plus = input.parentElement?.querySelector<HTMLButtonElement>(".lg-plus");
     if (plus) plus.disabled = away;
@@ -1211,10 +1219,12 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   }
 
   async function submit() {
-    const text = input.value.trim();
-    if (agent || shell || !canSend() || sending || !text) return;
-    const t = terminalCommand(text);
+    const typed = input.value.trim();
+    if (agent || shell || !canSend() || sending || !typed) return;
+    const text = bashMode ? `!${typed}` : typed;
+    const t = bashMode ? null : terminalCommand(text);
     if (t) return choose(t);
+    setBash(false);
     sending = true;
     applyStatus();
     if (waiter?.isConnected) moveMascot(waiter, "hop", "happy");
@@ -1229,7 +1239,10 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     } catch (e) {
       unsend(text);
       if (!input.value) {
-        input.value = text;
+        if (text.startsWith("!") && agentKind === "claude") {
+          setBash(true);
+          input.value = text.slice(1);
+        } else input.value = text;
         fitInput();
       }
       o.onError(e);
@@ -1644,12 +1657,12 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     if (k < 0) return;
     const steps = past.length - k;
     const { text, node } = past[k];
-    if (!btn.classList.contains("lg-retry")) pickRewind(steps, text, node);
-    else if (own) editInPlace(node, text, (next) => pickRewind(steps, text, node, next));
+    // Claude の Web 版と同じく、編集はその場で書き換えて保存で送り、やり直すは同じ発言をそのまま送り直す
+    if (btn.classList.contains("lg-edit") && own) editInPlace(node, text, (next) => pickRewind(steps, text, node, next));
     else pickRewind(steps, text, node, text);
   });
 
-  // 発言のやり直し。吹き出しをその場で書き換えられるようにし、Enter で送る（Claude の Web 版と同じ）
+  // 発言の編集。吹き出しをその場で入力欄にし、保存（Enter）で送る（Claude の Web 版と同じ）
   function editInPlace(node: HTMLElement, text: string, send: (next: string) => void) {
     const bubble = node.querySelector<HTMLElement>(".lg-user-text");
     const acts = node.querySelector<HTMLElement>(".lg-actions");
@@ -1657,13 +1670,13 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     const box = el("textarea", "lg-user-edit");
     box.value = text;
     box.spellcheck = false;
-    box.setAttribute("aria-label", "やり直す発言");
-    const cancel = el("button", "lg-user-edit-cancel", "やめる");
+    box.setAttribute("aria-label", "編集する発言");
+    const cancel = el("button", "lg-user-edit-cancel", "キャンセル");
     cancel.type = "button";
-    const ok = el("button", "primary-btn", "送信");
+    const ok = el("button", "primary-btn", "保存");
     ok.type = "button";
     const bar = el("div", "lg-user-edit-bar");
-    bar.append(el("span", "lg-user-edit-hint", "Enter で、会話をここまで戻して送ります（コードは戻しません）"), cancel, ok);
+    bar.append(el("span", "lg-user-edit-hint", "保存すると、会話をここまで戻して送ります（コードは戻しません）"), cancel, ok);
     const fit = () => {
       box.style.height = "auto";
       box.style.height = `${Math.min(box.scrollHeight, 320)}px`;
@@ -1908,7 +1921,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   async function updatePalette() {
     const seq = ++paletteSeq;
     clearTimeout(fileTimer);
-    if (agent || shell) return hidePalette();
+    // シェルのモードで打つ「/」や「@」は、パスやコマンドの一部なので候補を出さない
+    if (agent || shell || bashMode) return hidePalette();
     const cmd = /^\/(\S*)$/.exec(input.value);
     if (cmd) {
       // 打ちはじめに読み直し、カスタムコマンドやスキルを足したらすぐ出るようにする
@@ -2006,6 +2020,32 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     if (waiter?.isConnected) lookMascot(waiter, "down", 1500);
   });
   input.addEventListener("blur", hidePalette);
+  // シェルのモード。Claude Code と同じく、空の入力欄で「!」を打つと入り（「!」は入れずに印を出す）、
+  // 空のまま Backspace（か Esc）で戻る。送るときに「!」を付けてエージェントに渡す（main.ts の sendPrompt）
+  const bashMark = el("span", "lg-bash-mark", "!");
+  bashMark.hidden = true;
+  bashMark.title = "シェルのモード：打ったものをシェルのコマンドとして実行します";
+  input.before(bashMark);
+  function setBash(on: boolean) {
+    if (bashMode === on) return;
+    bashMode = on;
+    hidePalette();
+    applyStatus();
+  }
+  input.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === "!" && !bashMode && !input.value && agentKind === "claude" && !agent && !shell) {
+      e.preventDefault();
+      setBash(true);
+      e.stopImmediatePropagation();
+      return;
+    }
+    if (bashMode && !input.value && (e.key === "Backspace" || e.key === "Escape")) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      setBash(false);
+    }
+  });
   input.addEventListener("keydown", (e) => {
     if (e.isComposing || e.ctrlKey || e.metaKey) return;
     if (!palette.hidden) {
@@ -2184,7 +2224,8 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     typed(ch: string) {
       // サブエージェントを見ている間に打った文字は、メインへの指示として扱う
       setAgent(null);
-      insertText(ch);
+      if (ch === "!" && !input.value && agentKind === "claude") setBash(true);
+      else insertText(ch);
       input.focus({ preventScroll: true });
     },
     insert(text: string) {
@@ -2247,6 +2288,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       forkGroups = [];
       dropped = null;
       skipping = false;
+      bashMode = false;
       closePlus();
       root.dataset.agent = agentName ?? "";
       supported = TRANSCRIPT_AGENTS.includes(agentName ?? "");

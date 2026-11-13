@@ -546,6 +546,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .lg-prompt-q { margin-bottom: 8px; white-space: pre-wrap; font-size: 13px; color: var(--text); }
 /* 選択肢は上から順に 1 列に並べ、取り消しのボタンだけ最後の行の右に置く */
 .lg-prompt-opts { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+/* 高さに上限がある欄（巻き戻しの一覧）でも、項目を縮めずにスクロールさせる */
+.lg-prompt-opts > * { flex: none; }
 .lg-prompt-opt { padding: 5px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--raise); color: var(--text); font-size: 12.5px; text-align: left; }
 .lg-prompt-opt:hover { border-color: var(--st-waiting); background: var(--raise-2); }
 .lg-prompt-opt.picked { border-color: var(--st-waiting); background: var(--raise-2); box-shadow: inset 3px 0 var(--st-waiting); }
@@ -1207,3 +1209,8 @@ textarea:focus { border-color: var(--st-running); outline: none; }
 .lg-user-edit-cancel { padding: 5px 12px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--muted); }
 .lg-user-edit-cancel:hover { background: var(--raise); color: var(--text); }
 .lg-user > [hidden] { display: none; }
+/* 「!」で始めたシェルのコマンド：入力欄の枠の色を変え、会話の中では打ったコマンドを等幅で出す */
+.lg-bash textarea, .log-compose.lg-bash textarea:focus { border-color: var(--mark-pink, #e889b6); }
+.lg-bash-mark { flex: none; align-self: center; color: var(--mark-pink, #e889b6); font: 700 15px var(--mono); }
+.lg-bash-mark[hidden] { display: none; }
+.lg-command + pre.lg-result { margin: 0 12px 8px; }
