@@ -1214,3 +1214,12 @@ textarea:focus { border-color: var(--st-running); outline: none; }
 .lg-bash-mark { flex: none; align-self: center; color: var(--mark-pink, #e889b6); font: 700 15px var(--mono); }
 .lg-bash-mark[hidden] { display: none; }
 .lg-command + pre.lg-result { margin: 0 12px 8px; }
+
+/* Ctrl+Tab の切り替え（Alt+Tab のように、押している間だけ画面の中央に出す） */
+.switcher { position: fixed; top: 50%; left: 50%; z-index: 100; transform: translate(-50%, -50%); display: flex; flex-direction: column; gap: 2px; min-width: 320px; max-width: min(560px, 90vw); max-height: 70vh; overflow: hidden; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 12px 40px rgb(0 0 0 / 0.5); }
+.switcher[hidden] { display: none; }
+.switcher-item { display: flex; align-items: center; gap: 10px; padding: 7px 12px; border-radius: 6px; color: var(--muted); }
+.switcher-item[aria-selected="true"] { background: var(--raise-2); color: var(--text); box-shadow: inset 3px 0 var(--st-running); }
+.switcher-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--st); }
+.switcher-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.switcher-status { flex: none; color: var(--st); font-size: 12px; }

@@ -821,6 +821,7 @@ $("log-input").addEventListener("paste", (ev) => attachedId && pasteImage(attach
 
 async function activate(id: string) {
   if (!sessions.has(id)) return;
+  touchRecent(id);
   view = "session";
   const reattach = id !== attachedId;
   unseen.delete(id);
@@ -2724,6 +2725,7 @@ const KEY_GROUPS: { title: string; keys: { k: string; d: string; first?: boolean
       { k: "Ctrl+Shift+N", d: "新しいセッション", first: true },
       { k: "Ctrl+Shift+H", d: "このプロジェクトの過去の会話の続きから開く", first: true },
       { k: "Ctrl+0", d: "一覧 / 直前のセッションへ切り替え", first: true },
+      { k: "Ctrl+Tab / Ctrl+Shift+Tab", d: "最近使った順にセッションを切り替え（Ctrl を押したまま Tab で選び、離すと切り替わる）", first: true },
       { k: "Ctrl+1〜9", d: "サイドバーの番号のセッションへ切り替え", first: true },
       { k: "Ctrl+Shift+A", d: "次の入力待ちのセッションへ移動", first: true },
       { k: "Ctrl+Shift+W", d: "表示中のセッションを閉じる", first: true },
@@ -2752,6 +2754,7 @@ const KEY_GROUPS: { title: string; keys: { k: string; d: string; first?: boolean
       { k: "!（先頭）", d: "シェルのコマンドとして実行する（Claude Code）" },
       { k: "Shift+Enter / Alt+Enter", d: "改行" },
       { k: "Esc", d: "作業中なら中断" },
+      { k: "PageUp / PageDown", d: "入力欄にいたまま会話をスクロール（Ctrl+End でいちばん下へ）" },
       { k: "Esc を 2 回（指示待ちで入力欄が空のとき）", d: "前のメッセージに戻る（Claude Code は会話の中で選ぶ）" },
       { k: "/", d: "コマンドの候補を出す（↑↓ で選び、Enter で実行、Tab で補完）" },
     ],
@@ -2791,6 +2794,71 @@ keysDialog.onclick = (ev) => {
   if (!inside) keysDialog.close();
 };
 
+// ---------- 最近使った順の切り替え（Ctrl+Tab） ----------
+// Alt+Tab と同じく、Ctrl を押したまま Tab を押すたびに 1 つ前に使ったセッションへ選ぶ位置を動かし、Ctrl を離したら切り替える。
+// 押している間は切り替えない（切り替えると最近使った順が入れ替わり、2 つ前へさかのぼれなくなるため）
+const recentOrder: string[] = [];
+function touchRecent(id: string) {
+  const at = recentOrder.indexOf(id);
+  if (at >= 0) recentOrder.splice(at, 1);
+  recentOrder.unshift(id);
+}
+
+let switching: { list: string[]; at: number } | null = null;
+const switcher = el("div", "switcher");
+switcher.hidden = true;
+switcher.setAttribute("role", "listbox");
+switcher.setAttribute("aria-label", "最近使ったセッション");
+document.body.append(switcher);
+
+function stepSwitcher(back: boolean) {
+  if (!switching) {
+    // 一度も開いていないセッションも、サイドバーの並びで後ろに付ける
+    const list = [...recentOrder.filter((id) => sessions.has(id)), ...order.filter((id) => !recentOrder.includes(id))];
+    if (list.length === 0 || (view === "session" && list.length < 2)) return;
+    // 表示中のセッションが先頭なので、1 つ前（list[1]）から選ぶ。一覧を見ているときは、いちばん最近のものから
+    const start = view === "session" && list[0] === activeId ? 1 : 0;
+    switching = { list, at: back ? list.length - 1 : start };
+  } else {
+    const n = switching.list.length;
+    switching.at = (switching.at + (back ? n - 1 : 1)) % n;
+  }
+  renderSwitcher();
+}
+
+function renderSwitcher() {
+  if (!switching) {
+    switcher.hidden = true;
+    return;
+  }
+  const { list, at } = switching;
+  switcher.replaceChildren(
+    ...list.map((id, i) => {
+      const s = sessions.get(id)!;
+      const row = el("div", "switcher-item");
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", String(i === at));
+      row.dataset.status = s.status;
+      row.append(el("span", "switcher-dot"), el("span", "switcher-name", s.name), el("span", "switcher-status", STATUS_LABEL[s.status]), agentTag(s.agent));
+      return row;
+    }),
+  );
+  switcher.hidden = false;
+}
+
+function finishSwitcher(go: boolean) {
+  const pick = switching && go ? switching.list[switching.at] : null;
+  switching = null;
+  renderSwitcher();
+  if (pick) activate(pick);
+}
+
+window.addEventListener("keyup", (e) => {
+  if (switching && e.key === "Control") finishSwitcher(true);
+});
+// Ctrl を押したまま Alt+Tab などでほかの窓へ移ると keyup が届かないので、選んでいたものには切り替えずに閉じる
+window.addEventListener("blur", () => switching && finishSwitcher(false));
+
 // キャプチャ段階で拾うので、ターミナルにフォーカスがあっても先に処理される
 
 document.addEventListener(
@@ -2799,7 +2867,11 @@ document.addEventListener(
     if (document.querySelector("dialog[open]") || templates.isOpen()) return;
     const k = e.key.toLowerCase();
     let handled = true;
-    if (e.ctrlKey && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key)) {
+    if (switching && e.key === "Escape") {
+      finishSwitcher(false);
+    } else if (e.ctrlKey && !e.altKey && e.key === "Tab") {
+      stepSwitcher(e.shiftKey);
+    } else if (e.ctrlKey && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key)) {
       const id = order[Number(e.key) - 1];
       if (id) activate(id);
     } else if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === "0") {

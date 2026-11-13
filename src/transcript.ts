@@ -2046,6 +2046,16 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       setBash(false);
     }
   });
+  // 入力欄にいたまま会話を読み返せるよう、PageUp / PageDown で会話をスクロールし、Ctrl+End でいちばん下へ戻る
+  input.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.altKey || e.metaKey || e.shiftKey || !palette.hidden) return;
+    const page = body.clientHeight * 0.85;
+    const to = e.key === "PageUp" && !e.ctrlKey ? body.scrollTop - page : e.key === "PageDown" && !e.ctrlKey ? body.scrollTop + page : e.key === "End" && e.ctrlKey ? body.scrollHeight : null;
+    if (to === null) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    body.scrollTo({ top: to });
+  });
   input.addEventListener("keydown", (e) => {
     if (e.isComposing || e.ctrlKey || e.metaKey) return;
     if (!palette.hidden) {
