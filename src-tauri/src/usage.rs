@@ -76,12 +76,19 @@ const CODEX_FILES: usize = 12;
 const CODEX_TAIL: u64 = 512 * 1024;
 
 fn codex_limits(root: &Path) -> Option<Limits> {
-    let mut files: Vec<PathBuf> = crate::transcript::day_dirs(root).iter().take(2).flat_map(|d| crate::transcript::jsonl_in(d)).collect();
-    files.sort();
+    let mut files: Vec<PathBuf> = crate::transcript::day_dirs(root).iter().take(2).flat_map(|d| crate::transcript::rollouts_in(d)).collect();
+    // 名前は「rollout-日時-id」なので、圧縮したものと混ぜても名前の順が新しさの順になる
+    files.sort_by_key(|p| p.file_name().map(|n| n.to_os_string()));
     files.iter().rev().take(CODEX_FILES).find_map(|f| codex_file_limits(f))
 }
 
+const CODEX_ZST_MAX: u64 = 64 * 1024 * 1024;
+
 fn codex_file_limits(path: &Path) -> Option<Limits> {
+    if path.extension().is_some_and(|e| e == "zst") {
+        let text = crate::transcript::read_rollout(path, CODEX_ZST_MAX)?;
+        return text.lines().rev().filter(|l| l.contains("\"rate_limits\"")).find_map(codex_line_limits);
+    }
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     file.seek(SeekFrom::Start(len.saturating_sub(CODEX_TAIL))).ok()?;
@@ -140,6 +147,12 @@ mod tests {
         let l = codex_limits(&root).unwrap();
         assert_eq!(l.five_hour, Some(Window { used: 7.0, resets_at: 100 }));
         assert_eq!(l.week, Some(Window { used: 1.0, resets_at: 200 }));
+
+        // 閉じた記録は圧縮されている
+        let packed = ruzstd::encoding::compress_to_vec(format!("{}
+", line(9.0)).as_bytes(), ruzstd::encoding::CompressionLevel::Fastest);
+        std::fs::write(day.join("rollout-2026-11-05T12-00-00-c.jsonl.zst"), packed).unwrap();
+        assert_eq!(codex_limits(&root).unwrap().five_hour, Some(Window { used: 9.0, resets_at: 100 }));
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 }

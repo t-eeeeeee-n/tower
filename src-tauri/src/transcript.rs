@@ -574,8 +574,32 @@ fn codex_file(root: &Path, id: &str) -> Option<PathBuf> {
 pub(crate) fn first_line(path: &Path) -> Option<Value> {
     use std::io::BufRead;
     let mut line = String::new();
-    std::io::BufReader::new(std::fs::File::open(path).ok()?).read_line(&mut line).ok()?;
+    std::io::BufReader::new(open_rollout(path)?).read_line(&mut line).ok()?;
     serde_json::from_str(&line).ok()
+}
+
+/// Codex の会話の記録。Codex は閉じた会話の記録を zstd で圧縮して「.jsonl.zst」に置き換える
+pub(crate) fn rollouts_in(dir: &Path) -> impl Iterator<Item = PathBuf> {
+    std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| {
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        name.ends_with(".jsonl") || name.ends_with(".jsonl.zst")
+    })
+}
+
+/// 記録を頭から読む。圧縮したものは展開しながら読む
+pub(crate) fn open_rollout(path: &Path) -> Option<Box<dyn Read>> {
+    let file = std::fs::File::open(path).ok()?;
+    if path.extension().is_some_and(|e| e == "zst") {
+        return Some(Box::new(ruzstd::decoding::StreamingDecoder::new(file).ok()?));
+    }
+    Some(Box::new(file))
+}
+
+/// 記録をまとめて読む。壊れた圧縮のファイルで読み続けないよう、max バイトで切る
+pub(crate) fn read_rollout(path: &Path, max: u64) -> Option<String> {
+    let mut buf = Vec::new();
+    open_rollout(path)?.take(max).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Codex の会話 path から分かれた記録のうち、いちばん新しいもの。書き直したあとの会話を追うのに使う。

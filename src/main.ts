@@ -3055,7 +3055,7 @@ function renderLimits() {
       const span = label === "週" ? "1 週間" : "5 時間";
       if (!w) {
         const loading = !limitsLoaded;
-        row.classList.add(loading ? "loading" : "empty");
+        row.classList.add(loading ? "loading" : "unknown");
         row.append(agent, el("span", "limit-label", label), bar, el("span", "limit-pct", loading ? "…" : "—"), el("span", "limit-reset", loading ? "取得中" : "未取得"));
         row.title = loading ? `${name} の使用制限を取得しています` : `${name} の${span}の枠はまだ分かりません。${hint}`;
         rows.push(row);

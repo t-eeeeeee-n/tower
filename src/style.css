@@ -292,7 +292,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .limit-agent { color: var(--text); }
 .no-limits-claude .limit[data-agent="claude"], .no-limits-codex .limit[data-agent="codex"] { display: none; }
 .no-limits-claude.no-limits-codex .limits { display: none; }
-.limit.empty .limit-pct, .limit.loading .limit-pct { color: var(--faint); }
+.limit.unknown .limit-pct, .limit.loading .limit-pct { color: var(--faint); }
 /* 取得中は、棒の上を光が流れる */
 .limit.loading .limit-bar { background: linear-gradient(90deg, var(--line) 30%, var(--raise-2) 50%, var(--line) 70%) 0 0 / 300% 100%; animation: limit-loading 1.4s linear infinite; }
 @keyframes limit-loading { from { background-position: 100% 0; } to { background-position: -50% 0; } }

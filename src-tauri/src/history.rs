@@ -1,7 +1,6 @@
 //! フォルダごとの過去の会話の一覧。新しいセッションをその会話の続きから開くのに使う。
 //! どちらの記録の置き場所と形式も公開された仕様ではないので、読めないファイルは飛ばす。
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -46,7 +45,7 @@ fn conversations(cwd: &str, claude_root: Option<&Path>, codex_root: Option<&Path
         let want = same_dir_key(cwd);
         let mut found = 0;
         for day in transcript::day_dirs(&root.join("sessions")) {
-            for p in transcript::jsonl_in(&day) {
+            for p in transcript::rollouts_in(&day) {
                 if let Some(x) = codex_past(&p, &want) {
                     out.push((x, p));
                     found += 1;
@@ -71,6 +70,7 @@ pub struct Hit {
 }
 
 const SNIPPET_AROUND: usize = 40;
+const MAX_SEARCH_BYTES: u64 = 256 * 1024 * 1024;
 
 /// 発言と返事の中身から query を探す（大文字と小文字は区別しない）。ツールの入出力は探さない。
 /// 会話ごとに最初に見つかった所だけを返す
@@ -82,7 +82,7 @@ pub fn search(cwd: &str, query: &str, claude_root: Option<&Path>, codex_root: Op
     conversations(cwd, claude_root, codex_root)
         .into_iter()
         .filter_map(|(past, path)| {
-            let text = std::fs::read_to_string(&path).ok()?;
+            let text = transcript::read_rollout(&path, MAX_SEARCH_BYTES)?;
             let snippet = text
                 .lines()
                 .filter(|l| l.to_lowercase().contains(&q))
@@ -122,12 +122,7 @@ fn modified_ms(path: &Path) -> Option<u64> {
 
 /// 先頭の HEAD バイトのうち、改行で終わっている行
 fn head_lines(path: &Path) -> Vec<String> {
-    let mut buf = Vec::new();
-    let Ok(file) = std::fs::File::open(path) else { return Vec::new() };
-    if file.take(HEAD).read_to_end(&mut buf).is_err() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&buf);
+    let Some(text) = transcript::read_rollout(path, HEAD) else { return Vec::new() };
     let mut lines: Vec<String> = text.split('\n').map(String::from).collect();
     lines.pop();
     lines
@@ -220,9 +215,14 @@ mod tests {
         };
         std::fs::write(day.join("rollout-1.jsonl"), rollout("c:/work/my app/", "ccc-333")).unwrap();
         std::fs::write(day.join("rollout-2.jsonl"), rollout(r"C:\other", "ddd-444")).unwrap();
+        // 閉じた会話の記録は圧縮されている
+        let packed = ruzstd::encoding::compress_to_vec(rollout("c:/work/my app", "eee-555").as_bytes(), ruzstd::encoding::CompressionLevel::Fastest);
+        std::fs::write(day.join("rollout-3.jsonl.zst"), packed).unwrap();
 
         let got: Vec<_> = list(cwd, Some(&claude), Some(&codex)).into_iter().map(|p| (p.agent, p.id, p.title, p.prompt)).collect();
-        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert!(got.contains(&("codex", "eee-555".into(), None, "codex の指示".into())));
+        assert_eq!(search(cwd, "CODEX の", Some(&claude), Some(&codex)).iter().filter(|h| h.agent == "codex").count(), 2);
         assert!(got.contains(&("claude", "aaa-111".into(), Some("付けた題名".into()), "最初の指示".into())));
         assert!(got.contains(&("codex", "ccc-333".into(), None, "codex の指示".into())));
         std::fs::remove_dir_all(&root).ok();
