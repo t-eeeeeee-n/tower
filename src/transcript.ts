@@ -370,6 +370,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   let sending = false;
   /** シェルのモード（入力欄の左に「!」を出し、送るときに「!」を付ける） */
   let bashMode = false;
+  const drafts = new Map<string, { text: string; bash: boolean }>();
   let sessionId: string | null = null;
   let supported = false;
   let path: string | null = null;
@@ -2291,6 +2292,16 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     },
     setSession(id: string | null, agentName: string | null) {
       if (id === sessionId) return void refresh();
+      // 入力欄は全セッションで 1 つなので、書きかけの文はセッションごとに預けて、戻ってきたら出し直す
+      if (sessionId) {
+        if (input.value.trim() || bashMode) drafts.set(sessionId, { text: input.value, bash: bashMode });
+        else drafts.delete(sessionId);
+      }
+      const kept = id ? drafts.get(id) : undefined;
+      input.value = kept?.text ?? "";
+      historyAt = -1;
+      hidePalette();
+      fitInput();
       sessionId = id;
       agentKind = agentName;
       browsing = null;
@@ -2298,7 +2309,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       forkGroups = [];
       dropped = null;
       skipping = false;
-      bashMode = false;
+      bashMode = !!kept?.bash && agentName === "claude";
       closePlus();
       root.dataset.agent = agentName ?? "";
       supported = TRANSCRIPT_AGENTS.includes(agentName ?? "");

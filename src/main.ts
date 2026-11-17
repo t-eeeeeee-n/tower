@@ -199,7 +199,7 @@ async function draftIn(id: string): Promise<string> {
   const texts = spans.map((l) => l.map((x) => x.t).join("").trimEnd());
   const line = inputLine(texts, agent);
   if (!line) return "";
-  const typed = spans[texts.lastIndexOf(line)].map((s) => (faint(s) && !(s.f & CURSOR_FLAG) ? "" : s.t)).join("");
+  const typed = typedText(spans[texts.lastIndexOf(line)], "");
   return typed.replace(/^\s*[❯›]\s?/, "").trim();
 }
 
@@ -371,7 +371,7 @@ async function takeInput(id: string) {
   if (at < 0) return "";
   const end = lines.findIndex((l, i) => i > at && /^[─━]{3,}/.test(l.trim()));
   // 薄く描かれた次の指示の候補は、戻ってきた入力ではない
-  const typed = (l: Span[]) => l.map((s) => (faint(s) && !(s.f & CURSOR_FLAG) ? " ".repeat(s.t.length) : s.t)).join("");
+  const typed = (l: Span[]) => typedText(l, " ");
   const back = spans
     .slice(at, end < 0 ? at + 1 : end)
     .map((l, i) => (i === 0 ? typed(l).trim().replace(/^❯\s?/, "") : typed(l).trim()))
@@ -423,7 +423,7 @@ async function codexRewind(id: string, steps: number, text: string): Promise<str
   if (at >= 0) {
     let end = lines.findIndex((l, i) => i > at && !l.trim());
     if (end < 0) end = lines.length;
-    const typed = (l: Span[]) => l.map((s) => (faint(s) && !(s.f & CURSOR_FLAG) ? " ".repeat(s.t.length) : s.t)).join("");
+    const typed = (l: Span[]) => typedText(l, " ");
     back = after
       .slice(at, end)
       .map((l, i) => (i === 0 ? typed(l).trim().replace(/^›\s?/, "") : typed(l).trim()))
@@ -1374,6 +1374,18 @@ function faint(s: Span) {
   if (!(s.fg & RGB_FLAG)) return false;
   const [r, g, b] = [(s.fg >> 16) & 255, (s.fg >> 8) & 255, s.fg & 255];
   return Math.max(r, g, b) - Math.min(r, g, b) < 24 && Math.max(r, g, b) < 200;
+}
+
+// 入力欄の行から、薄く描かれた次の指示の候補を除いて打った文字だけを残す（除いた文字は fill に置き換える）。
+// カーソルのある 1 文字は反転で描かれて薄くならないので、すぐ後ろが薄い文字なら候補の 1 文字目とみなす
+function typedText(l: Span[], fill: string) {
+  return l
+    .map((s, i) => {
+      const next = l.slice(i + 1).find((x) => x.t.trim());
+      const hint = s.f & CURSOR_FLAG ? !!next && faint(next) : faint(s);
+      return hint ? fill.repeat(s.t.length) : s.t;
+    })
+    .join("");
 }
 
 // エージェントが入力欄に薄く出している次の指示の候補（Claude Code の返事のあと）。
