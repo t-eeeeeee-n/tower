@@ -274,6 +274,12 @@ const log = createTranscriptPanel({
     answeredAt = Date.now();
     writeKeys(attachedId, key);
   },
+  answerText: (key, text) => {
+    if (!attachedId) return;
+    promptQuietUntil = Date.now() + PROMPT_QUIET_MS;
+    answeredAt = Date.now();
+    answerWithText(attachedId, key, text).catch(showError);
+  },
   answerInTerminal: () => {
     termUntilRunning = true;
     log.showPrompt(null);
@@ -314,37 +320,125 @@ function writeKeys(id: string, data: string) {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// ターミナルで巻き戻して、戻した発言がエージェントの入力欄に残っているセッション（noticeRewind）
+const rewoundInTerminal = new Set<string>();
 const write = (id: string, data: string) => invoke("write_session", { id, data });
-async function screenText(id: string) {
-  const lines = await invoke<Span[][]>("session_tail", { id, lines: 45 });
-  return lines.map((l) => l.map((x) => x.t).join("").trimEnd());
+// 背の高いウィンドウでは巻き戻しの画面も高くなり、見出しが 45 行より上に出る
+async function screenText(id: string, lines = 45) {
+  const spans = await invoke<Span[][]>("session_tail", { id, lines });
+  return spans.map((l) => l.map((x) => x.t).join("").trimEnd());
 }
 const squash = (t: string) => t.replace(/\s+/g, "").replace(/…$/, "");
 
+async function waitFor<T>(read: () => Promise<T | null>, ms: number): Promise<T | null> {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = await read();
+    if (v !== null || Date.now() >= end) return v;
+    await sleep(100);
+  }
+}
+
+// 画面が quietMs の間変わらなくなるまで待つ（最長 ms）
+async function settle(id: string, quietMs: number, ms: number) {
+  const end = Date.now() + ms;
+  let last = "";
+  let since = Date.now();
+  for (;;) {
+    const lines = await screenText(id, 120);
+    const now = lines.join("\n");
+    if (now !== last) [last, since] = [now, Date.now()];
+    if (Date.now() - since >= quietMs || Date.now() >= end) return lines;
+    await sleep(100);
+  }
+}
+
+const REWIND_TITLE = (l: string) => l.trim() === "Rewind";
+
+function rewindPicked(lines: string[]) {
+  const from = lines.findIndex(REWIND_TITLE);
+  if (from < 0) return "";
+  const picked = lines.slice(from).find((l) => l.trim().startsWith("❯ "));
+  return squash(picked?.trim().slice(2) ?? "");
+}
+
+// 画面では長い発言は途中で切れるので、頭が合えばよい
+const sameMessage = (shown: string, want: string) => !!shown && !!want && (want.startsWith(shown) || shown.startsWith(want.slice(0, 20)));
+
 // 巻き戻し（Claude Code の /rewind）を、画面を切り替えずに裏で進める。巻き戻しの画面は古い順の一覧で、最後の「(current)」が選ばれて開く。
 // ↑ で戻り先まで動かし、選ばれている行が狙った発言かを確かめてから Enter を押し、次の確認（どこまで戻すか）を読み取る。
-// 画面の形に頼るので、どこかで食い違えば null を返し、呼び出し側がターミナルで続きをしてもらう
+// 長い会話では、一覧が開いてから発言ごとのコードの変更を読み終えるまで（10 秒を超えることもある）キーが効かず、
+// その間に押したキーは溜まることも捨てられることもある（Claude Code 2.1.328 で確認）。決まった時間で読むと選ばれている
+// 発言がずれて見えるので、読み込みが済むのを待ち、1 つ押すごとに効いたのを確かめながら進める。
+// 会話の表示と一覧で数え方が食い違う発言もありうるので、合わなければ近くを探す。
+// 画面の形に頼るので、それでも食い違えば null を返し、呼び出し側がターミナルで続きをしてもらう
 async function rewindTo(id: string, steps: number, text: string): Promise<PromptChoice | null> {
   await write(id, "/rewind");
   await sleep(150);
   await write(id, "\r");
-  await sleep(900);
-  if (!(await screenText(id)).some((l) => l.trim() === "Rewind")) return null;
-  for (let i = 0; i < steps; i++) {
-    await write(id, "\x1b[A");
-    await sleep(40);
-  }
-  await sleep(350);
-  const lines = await screenText(id);
-  const from = lines.findIndex((l) => l.trim() === "Rewind");
-  const picked = lines.slice(from).find((l) => l.trim().startsWith("❯ "));
-  const shown = squash(picked?.trim().slice(2) ?? "");
+  const opened = await waitFor(async () => ((await screenText(id, 120)).some(REWIND_TITLE) ? true : null), 5000);
+  if (!opened) return null;
   const want = squash(text.trim().split("\n")[0]);
-  // 画面では長い発言は途中で切れるので、頭が合えばよい
-  if (!shown || !want || !(want.startsWith(shown) || shown.startsWith(want.slice(0, 20)))) return null;
+  const matches = (lines: string[]) => sameMessage(rewindPicked(lines), want);
+  let at = 0;
+  const picked = async () => rewindPicked(await screenText(id, 120));
+  // 古い画面で確かめて Enter を押すと別の発言まで戻すので、選ばれている発言が変わるまで待つ（同じ文の発言が並ぶときは
+  // 待ちきって進む）。描き直しの途中は選ばれている行が読めないことがあるので、空は変わったとみなさない
+  const press = async (key: string, ms = 3000) => {
+    const before = await picked();
+    await write(id, key);
+    return waitFor(async () => {
+      const now = await picked();
+      return now && now !== before ? true : null;
+    }, ms);
+  };
+  // 効くまで ↑ を押し直す。溜まっていた分でどこまで動いたか分からないので、一番下の「(current)」まで戻してから数える
+  const CURRENT = "(current)";
+  const moved = async () => {
+    const now = await picked();
+    return now && now !== CURRENT ? true : null;
+  };
+  const loaded = await waitFor(async () => {
+    await press("\x1b[A", 1500);
+    return moved();
+  }, 30000);
+  if (!loaded) return null;
+  for (let i = 0; i < 30; i++) {
+    if (rewindPicked(await settle(id, 500, 3000)) === CURRENT) break;
+    await press("\x1b[B");
+  }
+  if ((await picked()) !== CURRENT) return null;
+  const moveTo = async (to: number) => {
+    for (; at < to; at++) await press("\x1b[A");
+    for (; at > to; at--) await press("\x1b[B");
+    return settle(id, 300, 3000);
+  };
+  let found = false;
+  for (const d of [0, 1, -1, 2, -2]) {
+    if (steps + d < 1) continue;
+    if (matches(await moveTo(steps + d))) {
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    await moveTo(steps);
+    return null;
+  }
   await write(id, "\r");
-  await sleep(900);
-  return parsePrompt(await screenText(id));
+  if (!(await waitFor(async () => parsePrompt(await screenText(id)), 5000))) return null;
+  return parsePrompt(await settle(id, 300, 2000));
+}
+
+// AskUserQuestion に自分で書いて答える。「Type something.」の番号を押すとその行が書く欄になり、続けて打った文字が入り、
+// Enter で答えになる（Claude Code 2.1.328 で確認）。欄に切り替わってから打つよう、間を置く
+async function answerWithText(id: string, key: string, text: string) {
+  await write(id, key);
+  await sleep(300);
+  await write(id, text.replace(/[\x00-\x1f\x7f]/g, " "));
+  await sleep(200);
+  await write(id, "\r");
+  pokePeeks();
 }
 
 // 巻き戻しの確認に答える。会話を戻すと、戻した発言がエージェントの入力欄に戻されるので、それを消して会話の入力欄に移す
@@ -443,9 +537,10 @@ async function codexRewind(id: string, steps: number, text: string): Promise<str
 
 async function rewindCancel(id: string) {
   // 確認の画面から一覧へ、一覧から閉じる
+  // Esc は次のキーと区別するために少し待ってから効く。閉じきる前に 2 回目を送ると、空の入力欄での Esc 2 回（巻き戻し）になりうる
   await write(id, "\x1b");
-  await sleep(250);
-  if ((await screenText(id)).some((l) => l.trim() === "Rewind")) await write(id, "\x1b");
+  const closed = await waitFor(async () => ((await screenText(id, 120)).some(REWIND_TITLE) ? null : true), 1500);
+  if (!closed) await write(id, "\x1b");
 }
 
 const PROMPT_BLOCK_LINES = 30;
@@ -454,6 +549,47 @@ const PROMPT_DETAIL_LINES = 12;
 // 入力待ちの画面から、確認や選択肢（「❯ 1. Yes」「  2. No」のような番号付きの行）を読み取る。
 // エージェントの画面の形に頼るので、読み取れなければ null（呼び出し側はターミナルに切り替えて答えてもらう）
 function parsePrompt(lines: string[]): PromptChoice | null {
+  const split = splitPreview(lines);
+  const p = parseChoices(split.lines);
+  if (p && split.preview) p.preview = split.preview;
+  return p;
+}
+
+// AskUserQuestion の選択肢に図（preview）が付いていると、選択肢の右に枠で囲んだ図が並び、同じ行に両方の文字が入る。
+// 枠の上端（┌──┐）から下端（└──┘）までの行を、枠の左の線で切り分けて、左を選択肢・枠の中を図として返す。
+// 全角の文字は 1 文字で 1 つなので、文字の位置ではそろわない。行ごとに最初の枠の線で切る。
+// 枠の下に出る「Notes: press n to add notes」は図の付いた質問だけに出る案内なので除く（Claude Code 2.1.328 で確認）
+function splitPreview(lines: string[]): { lines: string[]; preview?: string } {
+  // 図の中にも枠が描かれることがあるので、行の中で最初に出てくる枠の文字が外枠の線
+  const border = (l: string) => l.search(/[┌│└├]/);
+  const first = (l: string) => l[border(l)];
+  let bottom = -1;
+  for (let i = lines.length - 1; i >= 0 && bottom < 0; i--) if (first(lines[i]) === "└" && /└─{3,}┘/.test(lines[i])) bottom = i;
+  if (bottom < 0) return { lines };
+  let top = -1;
+  for (let i = bottom - 1; i >= 0 && top < 0; i--) {
+    const c = first(lines[i]);
+    if (c === "┌") top = i;
+    else if (c !== "│" && c !== "├") break;
+  }
+  if (top < 0) return { lines };
+  const out = [...lines];
+  const preview: string[] = [];
+  for (let i = top; i <= bottom; i++) {
+    const at = border(out[i]);
+    const right = out[i].slice(at);
+    out[i] = out[i].slice(0, at);
+    if (i === top || i === bottom) continue;
+    // 長い図は途中が「├─── ✂ ─── 2 lines hidden ───┤」の行で省かれる
+    const end = Math.max(right.lastIndexOf("│"), right.lastIndexOf("┤"));
+    preview.push(right.slice(1, end > 0 ? end : undefined).replace(/^ /, "").trimEnd());
+  }
+  while (preview.length && !preview[0].trim()) preview.shift();
+  while (preview.length && !preview[preview.length - 1].trim()) preview.pop();
+  return { lines: out.filter((l) => !/^\s*Notes: press n to add notes/.test(l)), preview: preview.join("\n") || undefined };
+}
+
+function parseChoices(lines: string[]): PromptChoice | null {
   const clean = lines.map((l) => l.replace(/[│┃╭╮╰╯]/g, " ").trimEnd());
   const option = /^\s*(?:[❯›>]\s*)?(\d)[.)]\s+(.+?)\s*$/;
   let last = -1;
@@ -461,12 +597,28 @@ function parsePrompt(lines: string[]): PromptChoice | null {
   if (last < 0) return null;
   const rule = (t?: string) => /^\s*[─━]{3,}\s*$/.test(t ?? "");
   if (clean.some((l, i) => i > last && /^\s*❯/.test(l) && rule(clean[i - 1]))) return null;
-  const options: { key: string; label: string }[] = [];
+  const options: PromptChoice["options"] = [];
   let first = last;
+  // 選択肢の下に字下げして続く行は、その選択肢の説明（Claude Code の AskUserQuestion）
+  const describe = (from: number) => {
+    const out: string[] = [];
+    for (let i = from; i < clean.length && /^\s{4,}\S/.test(clean[i]) && !option.test(clean[i]); i++) out.push(clean[i].trim());
+    return out.join(" ");
+  };
+  // AskUserQuestion で勧める選択肢には、ラベルの後ろか次の行に「(Recommended)」が付く
+  const RECOMMENDED = /\s*\(Recommended\)\s*/i;
+  let picked: string | undefined;
   for (let i = last; i >= 0; i--) {
     const m = option.exec(clean[i]);
     if (m) {
-      options.unshift({ key: m[1], label: m[2] });
+      const label = m[2].replace(RECOMMENDED, " ").trim();
+      const said = describe(i + 1);
+      const description = said.replace(RECOMMENDED, " ").trim();
+      const opt: PromptChoice["options"][number] = { key: m[1], label };
+      if (description) opt.description = description;
+      if (RECOMMENDED.test(m[2]) || RECOMMENDED.test(said)) opt.recommended = true;
+      options.unshift(opt);
+      if (/^\s*❯/.test(clean[i])) picked = m[1];
       first = i;
     } else if (clean[i].trim() && !/^\s{4,}\S/.test(clean[i]) && !/^\s*[─━-]{3,}\s*$/.test(clean[i])) {
       // 選択肢の説明（字下げした行）・区切りの線・空行は飛ばし、それ以外の行で選択肢の並びが終わる
@@ -493,10 +645,16 @@ function parsePrompt(lines: string[]): PromptChoice | null {
       else if (paras[paras.length - 1].length) paras.push([]);
     }
     const filled = paras.filter((p) => p.length);
-    const question = filled.pop()?.join("\n") ?? "";
+    const asked = filled.pop() ?? [];
+    // 質問が 1 つのときも、問いの上に「☐ 見出し」の行が出る（AskUserQuestion の header）
+    const mark = /^[☐☒✔]\s/;
+    let title: string | undefined;
+    if (mark.test(asked[0] ?? "") && asked.length > 1) title = asked.shift()!.slice(1).trim();
+    else if (filled.length && mark.test(filled[filled.length - 1][0] ?? "")) title = filled.pop()![0].slice(1).trim();
+    const question = asked.join("\n");
     let detail = filled.flat();
     if (detail.length > PROMPT_DETAIL_LINES) detail = [...detail.slice(0, PROMPT_DETAIL_LINES), "…"];
-    return { question, detail: detail.join("\n") || undefined, options };
+    return { question, title, detail: detail.join("\n") || undefined, options, picked };
   }
   const question: string[] = [];
   for (let i = first - 1; i >= 0 && question.length < 6; i--) {
@@ -507,7 +665,7 @@ function parsePrompt(lines: string[]): PromptChoice | null {
     if (t) question.unshift(t);
     else if (question.length) break;
   }
-  return { question: question.join("\n"), options };
+  return { question: question.join("\n"), options, picked };
 }
 
 // Claude Code で質問が複数あるときに上に出る「←  ☐ Color  ☐ Size  ✔ Submit  →」の行。今の質問は背景に色が付く
@@ -644,6 +802,10 @@ function applyLogView() {
   $("term-view-btn").setAttribute("aria-pressed", String(!showLog));
   log.setStatus((attachedId && sessions.get(attachedId)?.status) || "");
   if (!showLog) fitTerm();
+  if (showLog && attachedId && rewoundInTerminal.delete(attachedId)) {
+    const id = attachedId;
+    takeInput(id).then((back) => back && id === attachedId && log.restore(back), showError);
+  }
 }
 
 function toggleLogView() {
@@ -731,8 +893,33 @@ const settings = createSettings(term, fitTerm, (e) => showError(e), () => {
 });
 
 term.onData((data) => {
-  if (attachedId) invoke("write_session", { id: attachedId, data }).catch(showError);
+  if (!attachedId) return;
+  const id = attachedId;
+  // 画面を読むのはキーを書く前に頼む。どちらも同期のコマンドで順に処理されるので、キーが効く前の画面が読める
+  const before = data === "\r" || /^[1-9]$/.test(data) ? screenText(id, 120).catch(() => null) : null;
+  invoke("write_session", { id, data }).catch(showError);
+  before?.then((lines) => lines && noticeRewind(id, lines, data));
 });
+
+// ターミナルで巻き戻しても（/rewind・Esc 2 回）、Claude Code は次の発言を送るまで記録に何も書かないので、
+// 会話の表示は戻す前のままになる。確認の画面で会話を戻す選択肢を選んだのを画面から読み取り、表示からその発言より後を外す。
+// 戻した発言はエージェントの入力欄に戻され、そのままでは会話の入力欄から送れないので、会話の表示に戻ったときに移す
+// （ターミナルにいる間は、そこで直して送れるように残しておく）
+function noticeRewind(id: string, lines: string[], key: string) {
+  if (sessions.get(id)?.agent !== "claude" || !lines.some(REWIND_TITLE)) return;
+  const at = lines.findIndex((l) => /^Restore to the point before you sent this message/i.test(l.trim()));
+  if (at < 0) return;
+  const text = lines.slice(at + 1).find((l) => l.trim().startsWith("│"))?.trim().replace(/^│\s?/, "") ?? "";
+  const options = lines.slice(at + 1).flatMap((l) => {
+    const m = /^\s*(❯)?\s*(\d)\.\s+(.+?)\s*$/.exec(l);
+    return m ? [{ picked: !!m[1], key: m[2], label: m[3] }] : [];
+  });
+  const chosen = key === "\r" ? options.find((o) => o.picked) : options.find((o) => o.key === key);
+  if (!text || !chosen || !/restore/i.test(chosen.label) || !/conversation/i.test(chosen.label)) return;
+  const target = id === attachedId && view === "session" ? log : cardViews.get(id);
+  target?.dropRewound(text, Date.now());
+  rewoundInTerminal.add(id);
+}
 
 // Shift+Enter は xterm.js では Enter と同じ \r になるので、ESC+CR（Alt+Enter と同じ）を送って改行にする。
 // Claude Code・Codex・Antigravity CLI はこれを入力欄の改行として扱い、bash では何も起きない。
@@ -1014,53 +1201,95 @@ function moveSession(id: string, target: string, after: boolean) {
 // HTML のドラッグ＆ドロップ（draggable）は使わず、マウスの動きを追って並べ替える。
 // Tauri がファイルのドロップを受け取るために WebView2 のドロップの処理を差し替えるので、Windows では
 // 画面の中のドラッグ＆ドロップが効かない（tauri-utils の dragDropEnabled の説明）。ファイルのドロップは残したい。
-// grid は一覧のカード。横に並んでいるときは左右どちらの半分に、1 列のときは上下どちらの半分に落としたかで前後を決める
+//
+// つかんだものはカーソルについて動き、ほかは着地する場所を空けるようによける。並べ替えの間は要素を動かさず、
+// つかんだ時点の位置（枠）を覚えておき、新しい順番での枠まで transform でずらすだけにする。
+// カードは CSS の order で並べているので、DOM の順ではなく order の順に枠を数える。
+// grid は一覧のカード（縦横に並ぶ）。サイドバーは縦 1 列なので、上下にだけ動かす
 const DRAG_START_PX = 5;
+const SETTLE_MS = 140;
 let draggedAt = 0;
 // 離したときに続けて届くクリックで、セッションを開いてしまわないようにする
 const justDragged = () => Date.now() - draggedAt < 300;
 
-function draggable(li: HTMLElement, id: string, handle = li, grid = false) {
-  li.dataset.id = id;
+function draggable(item: HTMLElement, id: string, handle = item, grid = false) {
+  item.dataset.id = id;
   const selector = grid ? ".card" : ".session";
   handle.onpointerdown = (down) => {
-    if (down.button !== 0 || (down.target as HTMLElement).closest("button, input, textarea")) return;
+    if (dragId || down.button !== 0 || (down.target as HTMLElement).closest("button, input, textarea")) return;
     // つかんだまま動かすと文字が選ばれてしまうので、選択の始まりを止める（クリックとダブルクリックは届く）
     down.preventDefault();
-    let target: HTMLElement | null = null;
-    const clear = () => target?.classList.remove("drop-before", "drop-after", "drop-x");
+    const box = item.parentElement!;
+    let items: HTMLElement[] = [];
+    let slots: DOMRect[] = [];
+    let from = -1;
+    let to = -1;
+    const offset = (a: DOMRect, b: DOMRect) => `translate(${b.left - a.left}px, ${b.top - a.top}px)`;
+    // つかんだものを to に入れたときの並びで、ほかの要素を新しい枠へずらす
+    const shift = () => {
+      const next = items.filter((n) => n !== item);
+      next.splice(to, 0, item);
+      items.forEach((n, i) => {
+        if (n !== item) n.style.transform = offset(slots[i], slots[next.indexOf(n)]);
+      });
+    };
+    // カーソルにいちばん近い枠。サイドバーは縦の位置だけで決める
+    const nearest = (x: number, y: number) => {
+      let best = from;
+      let bestD = Infinity;
+      slots.forEach((r, i) => {
+        const dx = grid ? x - (r.left + r.width / 2) : 0;
+        const dy = y - (r.top + r.height / 2);
+        const d = dx * dx + dy * dy;
+        if (d < bestD) [best, bestD] = [i, d];
+      });
+      return best;
+    };
     const move = (ev: PointerEvent) => {
       if (!dragId) {
         if (Math.hypot(ev.clientX - down.clientX, ev.clientY - down.clientY) < DRAG_START_PX) return;
+        items = order
+          .map((x) => box.querySelector<HTMLElement>(`:scope > ${selector}[data-id="${CSS.escape(x)}"]`))
+          .filter((n): n is HTMLElement => !!n && n.offsetParent !== null);
+        from = to = items.indexOf(item);
+        if (from < 0) return;
+        slots = items.map((n) => n.getBoundingClientRect());
         dragId = id;
-        li.classList.add("dragging");
+        item.classList.add("lifted");
+        box.classList.add("reorder-live");
         document.body.classList.add("reordering");
       }
-      const over = document.elementFromPoint(ev.clientX, ev.clientY)?.closest<HTMLElement>(selector) ?? null;
-      if (over !== target) clear();
-      target = over && over.dataset.id !== id ? over : null;
-      if (!target) return;
-      const r = target.getBoundingClientRect();
-      const horizontal = grid && getComputedStyle(target.parentElement!).gridTemplateColumns.split(" ").length > 1;
-      const after = horizontal ? ev.clientX > r.left + r.width / 2 : ev.clientY > r.top + r.height / 2;
-      target.classList.toggle("drop-x", horizontal);
-      target.classList.toggle("drop-before", !after);
-      target.classList.toggle("drop-after", after);
+      const dx = grid ? ev.clientX - down.clientX : 0;
+      item.style.transform = `translate(${dx}px, ${ev.clientY - down.clientY}px)`;
+      const next = nearest(ev.clientX, ev.clientY);
+      if (next !== to) {
+        to = next;
+        shift();
+      }
     };
     const end = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", end);
       window.removeEventListener("pointercancel", end);
-      if (!dragId) return;
-      const to = ev.type === "pointerup" ? target : null;
-      const after = !!to?.classList.contains("drop-after");
-      clear();
-      dragId = null;
-      li.classList.remove("dragging");
-      document.body.classList.remove("reordering");
+      if (dragId !== id) return;
       draggedAt = Date.now();
-      if (to?.dataset.id) moveSession(id, to.dataset.id, after);
-      else render();
+      const dest = ev.type === "pointerup" ? to : from;
+      if (dest !== to) {
+        to = dest;
+        shift();
+      }
+      // 着地する枠まで滑らせてから並べ替える
+      item.classList.add("settling");
+      item.style.transform = offset(slots[from], slots[dest]);
+      window.setTimeout(() => {
+        box.classList.remove("reorder-live");
+        for (const n of items) n.style.transform = "";
+        item.classList.remove("lifted", "settling");
+        document.body.classList.remove("reordering");
+        dragId = null;
+        if (dest !== from) moveSession(id, items[dest].dataset.id!, dest > from);
+        else render();
+      }, SETTLE_MS);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", end);
@@ -1553,6 +1782,14 @@ function makeCardConversation(id: string) {
         st.answeredAt = Date.now();
       }
       writeKeys(id, key);
+    },
+    answerText: (key, text) => {
+      const st = cardPrompts.get(id);
+      if (st) {
+        st.quietUntil = Date.now() + PROMPT_QUIET_MS;
+        st.answeredAt = Date.now();
+      }
+      answerWithText(id, key, text).catch(showError);
     },
     answerInTerminal: () => {
       const st = cardPrompts.get(id);

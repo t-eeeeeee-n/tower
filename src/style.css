@@ -536,27 +536,43 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .lg-todo[data-status="in_progress"] { color: var(--st-running); font-weight: 600; }
 .c-conv .lg-todos { max-height: 72px; padding: 4px 8px; font-size: 11.5px; }
 /* 入力待ちの確認や選択肢。押すと選んだ番号をエージェントに送る */
-.lg-prompt { flex: none; padding: 10px var(--log-gutter); border-top: 1px solid var(--st-waiting); background: color-mix(in srgb, var(--st-waiting) 8%, var(--panel)); }
+.lg-prompt { flex: none; padding: 12px var(--log-gutter) 8px; border-top: 1px solid var(--line); background: var(--panel); }
 .lg-prompt[hidden] { display: none; }
-.lg-prompt-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
-.lg-prompt-tab { padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); font-size: 12px; }
+/* 誰が何を求めているか（「Claude Code からの質問」と見出し）。入力待ちの色はここだけに使う */
+.lg-prompt-kicker { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; color: var(--st-waiting); font-size: 11.5px; font-weight: 600; }
+.lg-prompt-title { color: var(--muted); font-weight: 400; }
+.lg-prompt-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 8px; }
+.lg-prompt-tab { padding: 2px 10px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); font-size: 12px; }
 .lg-prompt-tab:hover { color: var(--text); }
-.lg-prompt-tab.current { border-color: var(--st-waiting); background: var(--raise-2); color: var(--text); }
-.lg-prompt-detail { margin: 0 0 8px; padding: 6px 10px; max-height: 200px; overflow: auto; background: var(--ink); border-radius: 4px; color: var(--muted); font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.lg-prompt-q { margin-bottom: 8px; white-space: pre-wrap; font-size: 13px; color: var(--text); }
-/* 選択肢は上から順に 1 列に並べ、取り消しのボタンだけ最後の行の右に置く */
-.lg-prompt-opts { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+.lg-prompt-tab.current { border-color: var(--muted); color: var(--text); }
+.lg-prompt-detail { margin: 0 0 10px; padding: 6px 10px; max-height: 200px; overflow: auto; background: var(--ink); border-radius: 4px; color: var(--muted); font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.lg-prompt-q { margin-bottom: 10px; white-space: pre-wrap; font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--text); }
+/* 選択肢は細い線で区切った 1 つの枠に、上から順に並べる */
+.lg-prompt-opts { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--bg); }
+.lg-prompt-opts:empty { display: none; }
 /* 高さに上限がある欄（巻き戻しの一覧）でも、項目を縮めずにスクロールさせる */
 .lg-prompt-opts > * { flex: none; }
-.lg-prompt-opt { padding: 5px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--raise); color: var(--text); font-size: 12.5px; text-align: left; }
-.lg-prompt-opt:hover { border-color: var(--st-waiting); background: var(--raise-2); }
-.lg-prompt-opt.picked { border-color: var(--st-waiting); background: var(--raise-2); box-shadow: inset 3px 0 var(--st-waiting); }
-.lg-rewind .lg-prompt-opt.picked, .lg-rewind .lg-prompt-opt:hover { border-color: var(--st-running); box-shadow: inset 3px 0 var(--st-running); }
-.lg-rewind { border-top-color: var(--st-running); background: color-mix(in srgb, var(--st-running) 7%, var(--panel)); }
+.lg-prompt-opt { display: flex; align-items: baseline; gap: 10px; width: 100%; padding: 8px 12px; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--text); font-size: 13px; text-align: left; }
+.lg-prompt-opt:first-child { border-top: 0; }
+.lg-prompt-opt:hover, .lg-prompt-opt.picked { background: var(--raise); }
+.lg-opt-key { flex: none; min-width: 18px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font: 11px/16px var(--mono); text-align: center; }
+.lg-prompt-opt.picked .lg-opt-key { border-color: var(--muted); color: var(--text); }
+.lg-opt-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.lg-opt-label { overflow-wrap: anywhere; }
+.lg-opt-desc { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.lg-opt-tag { margin-left: 8px; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 11px; vertical-align: 1px; }
+/* 図の付いた質問は、選択肢の右に選んでいる選択肢の図を出す（狭ければ下に回る） */
+.lg-prompt-body { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px; }
+.lg-prompt-body > .lg-prompt-opts { flex: 1 1 240px; min-width: 0; }
+.lg-prompt-preview { flex: 1.4 1 320px; min-width: 0; max-height: 260px; margin: 0; padding: 10px 12px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--ink); color: var(--text); font: 12px/1.5 var(--mono); white-space: pre; }
+.lg-wide { display: inline-block; width: 2ch; text-align: center; }
 .lg-rewind .lg-prompt-opts { max-height: 180px; overflow: auto; }
-.lg-rewind-msg { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lg-prompt-term { align-self: flex-end; padding: 5px 10px; border: 0; background: transparent; color: var(--muted); font-size: 12px; }
-.lg-prompt-term:hover { color: var(--text); text-decoration: underline; }
+.lg-rewind-msg { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 選択肢の下の行：自分で書いて答えるときの案内と、答え方を変える操作 */
+.lg-prompt-foot { display: flex; align-items: center; gap: 2px; min-height: 26px; margin-top: 4px; }
+.lg-prompt-hint { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; }
+.lg-prompt-term { padding: 3px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: 12px; }
+.lg-prompt-term:hover { background: var(--raise); color: var(--text); }
 /* 「/」で始めたときのコマンドの候補。入力欄の上に重ねて出す */
 .lg-cmds { position: absolute; left: var(--log-gutter); right: var(--log-gutter); bottom: calc(100% + 4px); z-index: 10; max-height: 280px; overflow: auto; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); box-shadow: 0 6px 18px rgb(0 0 0 / 0.35); }
 .lg-cmds[hidden] { display: none; }
@@ -586,6 +602,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .lg-sent .lg-user-text { opacity: 0.7; }
 .lg-user-text { padding: 9px 14px; border-radius: 16px; background: var(--raise-2); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--log-text, 14px); line-height: 1.7; }
 .lg-command { margin: 8px 12px; color: var(--muted); font: 12px var(--mono); }
+.lg-sent-run { margin-left: 10px; color: var(--st-running); animation: c-pulse 1.2s ease-in-out infinite; }
 .lg-assistant.md-preview { padding: 4px 14px; max-width: none; font-size: var(--log-text, 14px); line-height: 1.8; }
 .lg-assistant > .lg-actions { margin: 2px 0 0 -6px; }
 /* 入力欄の下の行：モデル・effort・許可のモード */
@@ -754,11 +771,6 @@ pre.lg-result.lg-error { color: var(--danger); }
 .card[data-status="waiting"] { border-color: var(--st-waiting); }
 .card[data-status="exited"] { opacity: 0.55; }
 .c-head { display: flex; align-items: baseline; gap: 8px; padding: 8px 10px 6px; min-width: 0; cursor: grab; }
-.card.dragging { opacity: 0.45; }
-.card.drop-before { box-shadow: 0 -3px 0 var(--st-running); }
-.card.drop-before.drop-x { box-shadow: -3px 0 0 var(--st-running); }
-.card.drop-after { box-shadow: 0 3px 0 var(--st-running); }
-.card.drop-after.drop-x { box-shadow: 3px 0 0 var(--st-running); }
 .c-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .c-status { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; color: var(--st); white-space: nowrap; }
 .c-status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--st); }
@@ -985,11 +997,16 @@ input:not([type]):focus, input[type="number"]:focus { border-color: var(--st-run
 .look-reset { margin-right: auto; }
 .look-dialog .dialog-actions { flex: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 
-/* 並べ替え */
-.session.dragging { opacity: 0.45; }
+/* 並べ替え：つかんだものは持ち上がってカーソルについて動き、ほかは着地する場所を空けるようによける */
 body.reordering, body.reordering * { cursor: grabbing !important; user-select: none; }
-.session.drop-before { box-shadow: inset 0 2px 0 var(--st-running); }
-.session.drop-after { box-shadow: inset 0 -2px 0 var(--st-running); }
+.reorder-live > .session, .reorder-live > .card { transition: transform 160ms cubic-bezier(0.2, 0, 0, 1); }
+.reorder-live > .lifted { z-index: 5; transition: none; }
+.reorder-live > .lifted.settling { transition: transform 140ms cubic-bezier(0.2, 0, 0, 1); }
+.session.lifted { background: var(--raise-2); box-shadow: 0 6px 16px rgb(0 0 0 / 0.35); }
+.card.lifted { box-shadow: 0 10px 28px rgb(0 0 0 / 0.4); }
+@media (prefers-reduced-motion: reduce) {
+  .reorder-live > .session, .reorder-live > .card, .reorder-live > .lifted.settling { transition: none; }
+}
 
 /* テンプレート */
 .tpl-menu {

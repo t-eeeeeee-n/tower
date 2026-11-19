@@ -35,9 +35,15 @@ interface Todo {
 /** 入力待ちの画面に出ている確認や選択肢（main.ts が画面から読み取る） */
 export interface PromptChoice {
   question: string;
+  /** 質問の見出し（Claude Code の AskUserQuestion の header） */
+  title?: string;
   /** 何を許すのか（Claude Code の許可の確認の、ツール名・説明・コマンド） */
   detail?: string;
-  options: { key: string; label: string }[];
+  options: { key: string; label: string; description?: string; recommended?: boolean }[];
+  /** エージェントの画面で今選ばれている選択肢のキー */
+  picked?: string;
+  /** 選ばれている選択肢に付いた図（AskUserQuestion の preview）。図は選ばれている選択肢の分だけが画面に出る */
+  preview?: string;
   /** 質問が複数あるとき（Claude Code の AskUserQuestion）の、上に並ぶ質問の見出し。mark は画面の ☐（まだ）・☒（答えた）・✔（送信） */
   tabs?: { mark: string; label: string; current: boolean }[];
 }
@@ -319,6 +325,8 @@ export interface TranscriptViewOptions {
   sendKeys: (data: string) => void;
   /** 確認や選択肢に答える（選んだ番号のキーを送る） */
   answer: (key: string) => void;
+  /** 質問に自分で書いて答える（key は書いて答える選択肢の番号） */
+  answerText: (key: string, text: string) => void;
   /** 確認や選択肢に、ターミナルで答える */
   answerInTerminal: () => void;
   /** 終わった依頼をどこまで畳むか（設定） */
@@ -383,6 +391,10 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   let cap = o.maxNodes;
   // 表示しているサブエージェント（null ならメインの会話）
   let agent: string | null = null;
+  // 出ている質問に自分で書いて答えられるときの、その選択肢のキー（showPrompt）
+  let freeKey: string | null = null;
+  // 出ている質問の選択肢に図が付いているか（showPrompt）
+  let previewing = false;
   let agents: Subagent[] = [];
   // 出力を表示している、裏で動くシェル（agent と同時には選ばない）
   let shell: string | null = null;
@@ -1101,6 +1113,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       for (const e of chunk.entries) {
         if (hidden(e)) continue;
         if (e.kind === "user" && (queued.length || sent.length)) delivered(e.text);
+        else if (e.kind === "command" && e.text.startsWith("! ") && sent.length) delivered(`!${e.text.slice(2)}`);
         const n = render(e);
         if (n) body.append(n);
       }
@@ -1182,7 +1195,9 @@ export function createTranscriptView(o: TranscriptViewOptions) {
         ? "シェルの出力を表示しています（上の「メイン」に戻すと指示を送れます）"
         : status === "idle" && suggestion
           ? `${suggestion}（Tab で入れる）`
-          : (PLACEHOLDER[status] ?? "エージェントの起動を待っています");
+          : freeKey
+            ? "選択肢にない答えを入力して Enter（空のまま ↑↓ と Enter で、上の選択肢から選ぶ）"
+            : (PLACEHOLDER[status] ?? "エージェントの起動を待っています");
     // 作業中で入力欄が空なら、送信のボタンを停止のボタンにする（Claude の Web 版と同じ）
     const stop = !away && status === "running" && !sending && !input.value.trim();
     sendBtn.classList.add("lg-send");
@@ -1194,7 +1209,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     }
     sendBtn.title = stop ? "作業を止める（Esc）" : "送る（Enter）";
     sendBtn.setAttribute("aria-label", stop ? "作業を止める" : "送る");
-    sendBtn.disabled = !stop && (away || !canSend() || sending || !input.value.trim());
+    sendBtn.disabled = !stop && (away || !(canSend() || freeKey) || sending || !input.value.trim());
     // シェルのモード（Claude Code と同じく、空の入力欄で「!」を打つと入る）
     if (bashMode && (away || agentKind !== "claude")) bashMode = false;
     input.parentElement?.classList.toggle("lg-bash", bashMode);
@@ -1221,6 +1236,17 @@ export function createTranscriptView(o: TranscriptViewOptions) {
 
   async function submit() {
     const typed = input.value.trim();
+    // 質問に自分で書いて答える。エージェントの欄は 1 行なので、改行は空白にする
+    if (freeKey && !promptBox.hidden && typed && !agent && !shell) {
+      const key = freeKey;
+      promptBox.hidden = true;
+      freeKey = null;
+      input.value = "";
+      fitInput();
+      applyStatus();
+      o.answerText(key, typed.replace(/\s*\n\s*/g, " "));
+      return;
+    }
     if (agent || shell || !canSend() || sending || !typed) return;
     const text = bashMode ? `!${typed}` : typed;
     const t = bashMode ? null : terminalCommand(text);
@@ -1503,8 +1529,10 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     cancel.type = "button";
     cancel.onclick = () => closeRewind(true);
     const opts = el("div", "lg-prompt-opts");
-    opts.append(...buttons, cancel);
-    rewindBox.replaceChildren(el("div", "lg-prompt-q", title), opts);
+    opts.append(...buttons);
+    const foot = el("div", "lg-prompt-foot");
+    foot.append(el("span", "lg-prompt-hint"), cancel);
+    rewindBox.replaceChildren(el("div", "lg-prompt-q", title), opts, foot);
     rewindBox.hidden = false;
     panelPick = 0;
     markPick();
@@ -1595,8 +1623,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       return;
     }
     const buttons = p.options.map((opt) => {
-      const b = el("button", "lg-prompt-opt", `${opt.key}. ${opt.label}`);
-      b.type = "button";
+      const b = optionButton(opt);
       b.onclick = async () => {
         rewinding = false;
         rewindBox.hidden = true;
@@ -1630,8 +1657,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       return;
     }
     const buttons = p.options.map((opt) => {
-      const b = el("button", "lg-prompt-opt", `${opt.key}. ${opt.label}`);
-      b.type = "button";
+      const b = optionButton(opt);
       b.onclick = async () => {
         picking = false;
         rewindBox.hidden = true;
@@ -1722,31 +1748,94 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   promptBox.hidden = true;
   compose.before(promptBox);
 
+  // AskUserQuestion の終わりの 2 つは、自分で書いて答える欄と、答えずに質問について話す操作（Claude Code の文言で見分ける）。
+  // 書いて答えるのは会話の入力欄からにする
+  const FREE_OPTION = /^Type something\.?$/i;
+  const CHAT_OPTION = /^Chat about this$/i;
+  // 図は罫線で桁をそろえて描かれていて、ターミナルでは全角の文字がちょうど 2 桁を占める。
+  // 画面のフォントでは全角の幅が 2 桁にならず罫線がずれるので、全角の文字を 2 桁の幅の箱に入れる
+  const WIDE_CHAR = /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/;
+  function previewBlock(text: string) {
+    const pre = el("pre", "lg-prompt-preview");
+    let run = "";
+    for (const ch of text) {
+      if (!WIDE_CHAR.test(ch)) {
+        run += ch;
+        continue;
+      }
+      if (run) pre.append(run);
+      run = "";
+      pre.append(el("span", "lg-wide", ch));
+    }
+    if (run) pre.append(run);
+    return pre;
+  }
+  function optionButton(opt: PromptChoice["options"][number]) {
+    const b = el("button", "lg-prompt-opt");
+    b.type = "button";
+    const text = el("span", "lg-opt-text");
+    const label = el("span", "lg-opt-label", opt.label);
+    if (opt.recommended) label.append(el("span", "lg-opt-tag", "おすすめ"));
+    text.append(label);
+    if (opt.description) text.append(el("span", "lg-opt-desc", opt.description));
+    b.append(el("kbd", "lg-opt-key", opt.key), text);
+    return b;
+  }
   function showPrompt(p: PromptChoice | null) {
     if (!p) {
       promptBox.hidden = true;
       delete promptBox.dataset.sig;
+      if (freeKey) {
+        freeKey = null;
+        applyStatus();
+      }
       return;
     }
     const sig = JSON.stringify(p);
     if (!promptBox.hidden && promptBox.dataset.sig === sig) return;
     promptBox.dataset.sig = sig;
     promptBox.hidden = false;
-    const buttons = p.options.map((opt) => {
-      const b = el("button", "lg-prompt-opt", `${opt.key}. ${opt.label}`);
-      b.type = "button";
-      b.onclick = () => {
-        promptBox.hidden = true;
-        o.answer(opt.key);
-      };
+    const free = p.options.find((x) => FREE_OPTION.test(x.label));
+    const chat = p.options.find((x) => CHAT_OPTION.test(x.label));
+    freeKey = free?.key ?? null;
+    const answer = (key: string) => {
+      promptBox.hidden = true;
+      freeKey = null;
+      applyStatus();
+      o.answer(key);
+    };
+    const shown = p.options.filter((x) => x !== free && x !== chat);
+    previewing = !!p.preview;
+    const buttons = shown.map((opt, i) => {
+      const b = optionButton(opt);
+      b.onclick = () => answer(opt.key);
+      // 図はエージェントの画面で選ばれている選択肢の分だけ出るので、指した選択肢をエージェントの側でも選ぶ
+      if (previewing) b.onmouseenter = () => pickOnAgent(i);
       return b;
     });
     const opts = el("div", "lg-prompt-opts");
+    opts.append(...buttons);
+    let main: HTMLElement = opts;
+    if (p.preview) {
+      main = el("div", "lg-prompt-body");
+      main.append(opts, previewBlock(p.preview));
+    }
+    const foot = el("div", "lg-prompt-foot");
+    foot.append(el("span", "lg-prompt-hint", free ? "選択肢にない答えは、下の欄に入力して Enter" : ""));
+    if (chat) {
+      const talk = el("button", "lg-prompt-term", "この質問について話す");
+      talk.type = "button";
+      talk.onclick = () => answer(chat.key);
+      foot.append(talk);
+    }
     const term = el("button", "lg-prompt-term", "ターミナルで答える");
     term.type = "button";
     term.onclick = () => o.answerInTerminal();
-    opts.append(...buttons, term);
-    const head: HTMLElement[] = [];
+    foot.append(term);
+    const who = AGENT_NAME[agentKind ?? ""] ?? "エージェント";
+    const kicker = el("div", "lg-prompt-kicker", `${who} からの${free || chat || p.tabs || p.title || p.preview ? "質問" : "確認"}`);
+    if (p.title && !p.tabs) kicker.append(el("span", "lg-prompt-title", p.title));
+    const head: HTMLElement[] = [kicker];
     const at = p.tabs?.findIndex((t) => t.current) ?? -1;
     if (p.tabs && at >= 0) {
       const tabs = el("div", "lg-prompt-tabs");
@@ -1762,9 +1851,19 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       head.push(tabs);
     }
     if (p.detail) head.push(el("pre", "lg-prompt-detail", p.detail));
-    promptBox.replaceChildren(...head, el("div", "lg-prompt-q", p.question || "確認を待っています"), opts);
-    panelPick = 0;
+    promptBox.replaceChildren(...head, el("div", "lg-prompt-q", p.question || "確認を待っています"), main, foot);
+    panelPick = Math.max(0, shown.findIndex((x) => x.key === p.picked));
     markPick();
+    applyStatus();
+  }
+
+  // 図の付いた質問で、i 番目の選択肢をエージェントの画面でも選ぶ（↑↓ を送る）。選び直した画面を読むと図が替わる
+  function pickOnAgent(i: number) {
+    const step = i - panelPick;
+    if (!step) return;
+    panelPick = i;
+    markPick();
+    o.sendKeys((step > 0 ? "\x1b[B" : "\x1b[A").repeat(Math.abs(step)));
   }
 
   // 質問が複数あるときは、エージェントの画面と同じく ←→ で質問を切り替える
@@ -1812,36 +1911,61 @@ export function createTranscriptView(o: TranscriptViewOptions) {
 
   // 待っているときに送った指示は、エージェントが記録に書くまで数秒かかる（UserPromptSubmit の hook などのあと）ので、
   // 送った時点で仮の発言として出しておき、記録に届いたら本物と入れ替える。
-  // コマンド（/…）とシェル（!…）は記録で別の形になるので出さない
+  // コマンド（/…）は記録で別の形になるので出さない。シェル（!…）は記録に残るのが終わってからなので、記録と同じ形で
+  // 「実行中」として出しておく
   let sent: { text: string; node: HTMLElement }[] = [];
   let sentTimer = 0;
-  // 送れていなければ作業中にならないまま。そのときは仮の発言を消す
+  // 送れていなければ作業中にならないまま。そのときは仮の発言を消す。
+  // シェルのコマンドは動いている間も作業中にならないので、記録に届くまで残す
   const SENT_DROP_MS = 30000;
+  const isShellLine = (text: string) => text.trim().startsWith("!");
   function showSent(text: string) {
-    if (/^[/!]/.test(text.trim())) return;
+    if (text.trim().startsWith("/")) return;
     body.querySelector(":scope > .fv-empty")?.remove();
-    const node = el("div", "lg-user lg-sent");
-    node.append(el("div", "lg-user-text", text));
+    let node: HTMLElement;
+    if (isShellLine(text)) {
+      node = el("div", "lg-command lg-sent");
+      node.append(el("span", "", `! ${text.trim().slice(1).trim()}`), el("span", "lg-sent-run", "実行中…"));
+    } else {
+      node = el("div", "lg-user lg-sent");
+      node.append(el("div", "lg-user-text", text));
+    }
     body.append(node);
     body.scrollTop = body.scrollHeight;
     sent.push({ text, node });
     clearTimeout(sentTimer);
     sentTimer = window.setTimeout(() => {
       if (status !== "idle") return;
-      for (const s of sent) s.node.remove();
-      sent = [];
+      sent = sent.filter((s) => isShellLine(s.text) || (s.node.remove(), false));
     }, SENT_DROP_MS);
   }
   // 止めたときにエージェントが入力欄へ戻した発言（会話から外される）。記録には発言の行と中断の行が残り、
   // 次の発言を送るまでは今の会話の続きとして読めてしまうので、止めた時刻より前のその発言から後を出さない。
   // 同じ文をあとで送り直したものは、止めた時刻より後なので出す
-  let dropped: { text: string; before: number } | null = null;
+  // 巻き戻したときは、戻した発言より後の発言も同じく出さない（uuid があればそれで見分ける）
+  let dropped: { text: string; uuid?: string; before: number } | null = null;
   let skipping = false;
   const DROP_SKEW_MS = 2000;
+  // 同じ文の発言がいくつかあれば、新しいほうを選ぶ
+  let rewound: { text: string; at: number } | null = null;
+  function dropRewound(text: string, at: number) {
+    const want = flat(text).replace(/…$/, "");
+    if (!want) return;
+    const head = (n: HTMLElement) => flat((n.querySelector(".lg-user-text")?.firstChild?.textContent ?? "").split("\n")[0]);
+    const target = [...body.querySelectorAll<HTMLElement>(":scope > .lg-user")].reverse().find((n) => head(n).startsWith(want));
+    if (!target) return;
+    for (const s of sent.filter((x) => x.node === target || target.compareDocumentPosition(x.node) & Node.DOCUMENT_POSITION_FOLLOWING)) unsend(s.text);
+    dropped = { text: flat(target.querySelector(".lg-user-text")?.firstChild?.textContent ?? ""), uuid: target.dataset.uuid, before: at };
+    skipping = true;
+    dropFrom(target);
+  }
+
   function hidden(e: Entry) {
+    if (!dropped) return false;
     if (e.kind === "user") {
       const at = Date.parse(e.at ?? "");
-      skipping = !!dropped && flat(e.text) === dropped.text && (!Number.isFinite(at) || at <= dropped.before + DROP_SKEW_MS);
+      const old = !Number.isFinite(at) || at <= dropped.before + DROP_SKEW_MS;
+      skipping = old && (skipping || (dropped.uuid ? e.uuid === dropped.uuid : flat(e.text) === dropped.text));
     }
     return skipping;
   }
@@ -2129,7 +2253,10 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   function choiceKey(key: string) {
     const choices = input.value ? [] : panelChoices();
     if (!choices.length) return false;
-    if (key === "ArrowUp" || key === "ArrowDown") {
+    if ((key === "ArrowUp" || key === "ArrowDown") && previewing && !promptBox.hidden && rewindBox.hidden) {
+      // エージェントの側の選択と合わせるので、端で折り返さない
+      pickOnAgent(Math.min(choices.length - 1, Math.max(0, panelPick + (key === "ArrowDown" ? 1 : -1))));
+    } else if (key === "ArrowUp" || key === "ArrowDown") {
       panelPick = (panelPick + (key === "ArrowDown" ? 1 : -1) + choices.length) % choices.length;
       markPick();
     } else if (key === "Enter") {
@@ -2266,6 +2393,15 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       skipping = true;
       dropFrom(last);
     },
+    /**
+     * ターミナルで巻き戻して会話を戻したとき、その発言から後を表示から外す。text は巻き戻しの画面に出ていた発言の頭。
+     * 同じ文の発言がいくつかあれば、新しいほうを選ぶ
+     */
+    dropRewound(text: string, at: number) {
+      // 隠れている間は表示を読み直さないので、ターミナルで送った発言が表示に無い。戻ってきて読み直してから外す
+      if (root.hidden) rewound = { text, at };
+      else dropRewound(text, at);
+    },
     get shown() {
       return !root.hidden;
     },
@@ -2287,7 +2423,16 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       root.hidden = !on;
       if (on) {
         fitInput();
-        refresh();
+        // 定期の読み直しと重なると refresh はすぐ戻るので、読み終わるまで待つ
+        (async () => {
+          await refresh();
+          while (loading) await new Promise((r) => setTimeout(r, 100));
+        })().then(() => {
+          if (!rewound) return;
+          const r = rewound;
+          rewound = null;
+          dropRewound(r.text, r.at);
+        });
       }
     },
     setSession(id: string | null, agentName: string | null) {
@@ -2308,6 +2453,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       browseBar.hidden = true;
       forkGroups = [];
       dropped = null;
+      rewound = null;
       skipping = false;
       bashMode = !!kept?.bash && agentName === "claude";
       closePlus();
@@ -2346,7 +2492,7 @@ export type TranscriptView = ReturnType<typeof createTranscriptView>;
 
 /** セッション画面で、ターミナルの代わりに出す会話の表示 */
 export function createTranscriptPanel(
-  o: Pick<TranscriptViewOptions, "onError" | "send" | "interrupt" | "listCommands" | "openInTerminal" | "rewind" | "fold" | "findFiles" | "sendKeys" | "answer" | "answerInTerminal" | "rewindTo" | "rewindAnswer" | "rewindCancel" | "rewindCodex" | "copy" | "switchMode" | "stopTask" | "modelChoices" | "modelAnswer" | "modelCancel" | "attach" | "showDiff">,
+  o: Pick<TranscriptViewOptions, "onError" | "send" | "interrupt" | "listCommands" | "openInTerminal" | "rewind" | "fold" | "findFiles" | "sendKeys" | "answer" | "answerText" | "answerInTerminal" | "rewindTo" | "rewindAnswer" | "rewindCancel" | "rewindCodex" | "copy" | "switchMode" | "stopTask" | "modelChoices" | "modelAnswer" | "modelCancel" | "attach" | "showDiff">,
 ) {
   return createTranscriptView({
     root: $("log"),
