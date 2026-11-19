@@ -327,6 +327,8 @@ export interface TranscriptViewOptions {
   answer: (key: string) => void;
   /** 質問に自分で書いて答える（key は書いて答える選択肢の番号） */
   answerText: (key: string, text: string) => void;
+  /** 裏で動いているサブエージェントとシェルの数が変わった */
+  onBackground?: (count: number) => void;
   /** 確認や選択肢に、ターミナルで答える */
   answerInTerminal: () => void;
   /** 終わった依頼をどこまで畳むか（設定） */
@@ -395,6 +397,13 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   let freeKey: string | null = null;
   // 出ている質問の選択肢に図が付いているか（showPrompt）
   let previewing = false;
+  // 入力欄の上に出す、裏で動いているものの欄（renderBg）
+  const bgBox = el("div", "lg-bg");
+  bgBox.hidden = true;
+  let bgCount = 0;
+  let bgDoneTimer = 0;
+  const BG_DONE_MS = 5000;
+  const BG_ROWS = 3;
   let agents: Subagent[] = [];
   // 出力を表示している、裏で動くシェル（agent と同時には選ばない）
   let shell: string | null = null;
@@ -858,6 +867,50 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       renderMenu();
     }
     for (const t of menu.querySelectorAll<HTMLElement & { tick?: () => string }>(".lg-item-time")) t.textContent = t.tick?.() ?? "";
+    renderBg();
+  }
+
+  // 裏で動いているサブエージェントとシェル。終わったかどうかは入力欄のあたりを見て確かめるので、
+  // 上の切り替えの列とは別に、入力欄のすぐ上にも出す。すべて終わったら、終わったことを少しの間だけ出す
+  function renderBg() {
+    const live = (["agent", "shell"] as Group[]).flatMap((g) => items(g).filter((i) => i.state === "running").map((i) => ({ g, i })));
+    if (live.length !== bgCount) {
+      const was = bgCount;
+      bgCount = live.length;
+      o.onBackground?.(bgCount);
+      clearTimeout(bgDoneTimer);
+      if (!bgCount && was) {
+        bgBox.dataset.key = "";
+        bgBox.classList.add("done");
+        bgBox.replaceChildren(el("span", "lg-bg-mark"), el("span", "lg-bg-head", "裏の作業が終わりました"));
+        bgDoneTimer = window.setTimeout(() => (bgBox.hidden = true), BG_DONE_MS);
+        return;
+      }
+    }
+    if (!live.length) {
+      if (!bgBox.classList.contains("done")) bgBox.hidden = true;
+      return;
+    }
+    bgBox.hidden = false;
+    bgBox.classList.remove("done");
+    const key = JSON.stringify(live.map(({ i }) => i.id));
+    if (bgBox.dataset.key !== key) {
+      bgBox.dataset.key = key;
+      const rows = live.slice(0, BG_ROWS).map(({ g, i }) => {
+        const b = el("button", "lg-bg-row");
+        b.type = "button";
+        b.title = `${i.title}（押すと出力を表示）`;
+        const time = Object.assign(el("span", "lg-bg-time", i.time()), { tick: i.time });
+        b.append(el("span", "lg-bg-kind", GROUP_LABEL[g]), el("span", "lg-bg-label", i.label), time);
+        b.onclick = i.pick;
+        return b;
+      });
+      const head = el("div", "lg-bg-headline");
+      head.append(el("span", "lg-bg-mark"), el("span", "lg-bg-head", `裏で動いている ${live.length} 件`));
+      if (live.length > BG_ROWS) head.append(el("span", "lg-bg-more", `ほか ${live.length - BG_ROWS} 件は上の一覧から`));
+      bgBox.replaceChildren(head, ...rows);
+    }
+    for (const t of bgBox.querySelectorAll<HTMLElement & { tick?: () => string }>(".lg-bg-time")) t.textContent = t.tick?.() ?? "";
   }
 
   // 見ているサブエージェントやコマンドを止める。Claude Code の /tasks の画面を裏で操作する（main.ts の stopTask）
@@ -1798,14 +1851,17 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     const free = p.options.find((x) => FREE_OPTION.test(x.label));
     const chat = p.options.find((x) => CHAT_OPTION.test(x.label));
     freeKey = free?.key ?? null;
+    const shown = p.options.filter((x) => x !== free && x !== chat);
+    previewing = !!p.preview;
+    // 図の付いた質問では番号のキーが効かない（Claude Code 2.1.328 で確認）。選ばれている選択肢から ↑↓ で動かして Enter を押す
     const answer = (key: string) => {
       promptBox.hidden = true;
       freeKey = null;
       applyStatus();
-      o.answer(key);
+      if (!previewing) return o.answer(key);
+      const step = shown.findIndex((x) => x.key === key) - panelPick;
+      o.answer(`${(step > 0 ? "\x1b[B" : "\x1b[A").repeat(Math.abs(step))}\r`);
     };
-    const shown = p.options.filter((x) => x !== free && x !== chat);
-    previewing = !!p.preview;
     const buttons = shown.map((opt, i) => {
       const b = optionButton(opt);
       b.onclick = () => answer(opt.key);
@@ -1877,6 +1933,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   const queueBox = el("div", "lg-queue");
   queueBox.hidden = true;
   compose.before(queueBox);
+  compose.before(bgBox);
   let queued: string[] = [];
   let queueTimer = 0;
   // 返事が終わると、Claude Code は待っていた指示をすぐ次の依頼として送る。少し待っても届かなければ、取り消されたとみなす
@@ -2454,6 +2511,12 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       forkGroups = [];
       dropped = null;
       rewound = null;
+      clearTimeout(bgDoneTimer);
+      bgCount = 0;
+      bgBox.hidden = true;
+      bgBox.dataset.key = "";
+      bgBox.classList.remove("done");
+      o.onBackground?.(0);
       skipping = false;
       bashMode = !!kept?.bash && agentName === "claude";
       closePlus();
@@ -2492,7 +2555,7 @@ export type TranscriptView = ReturnType<typeof createTranscriptView>;
 
 /** セッション画面で、ターミナルの代わりに出す会話の表示 */
 export function createTranscriptPanel(
-  o: Pick<TranscriptViewOptions, "onError" | "send" | "interrupt" | "listCommands" | "openInTerminal" | "rewind" | "fold" | "findFiles" | "sendKeys" | "answer" | "answerText" | "answerInTerminal" | "rewindTo" | "rewindAnswer" | "rewindCancel" | "rewindCodex" | "copy" | "switchMode" | "stopTask" | "modelChoices" | "modelAnswer" | "modelCancel" | "attach" | "showDiff">,
+  o: Pick<TranscriptViewOptions, "onError" | "send" | "interrupt" | "listCommands" | "openInTerminal" | "rewind" | "fold" | "findFiles" | "sendKeys" | "answer" | "answerText" | "answerInTerminal" | "onBackground" | "rewindTo" | "rewindAnswer" | "rewindCancel" | "rewindCodex" | "copy" | "switchMode" | "stopTask" | "modelChoices" | "modelAnswer" | "modelCancel" | "attach" | "showDiff">,
 ) {
   return createTranscriptView({
     root: $("log"),

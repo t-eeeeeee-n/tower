@@ -113,8 +113,11 @@ pub fn infer_status(screen: &str, quiet_ms: u64) -> Status {
             || l.contains("enter confirm")
             || l.contains("press enter to continue")
             || l.contains("confirm with number keys")
-            // Claude Code の複数の質問の最後の確認（案内の行が無い）
+            // Claude Code の複数の質問の最後の確認（案内の行が無い）。
+            // 「Ready to submit your answers?」の行が無いこともある（2.1.328 で、図の付いた質問のあとに見た）
             || l.contains("ready to submit your answers")
+            || l.starts_with("review your answers")
+            || l.starts_with("1. submit answers")
     });
     if asking {
         Status::Waiting
@@ -178,6 +181,8 @@ mod tests {
         assert_eq!(infer_status(question, 60_000), Status::Waiting);
         let review = "Review your answers\n\n ● 好きな色は？\n   → red\n\nReady to submit your answers?\n\n❯ 1. Submit answers\n  2. Cancel\n";
         assert_eq!(infer_status(review, 60_000), Status::Waiting);
+        let review_bare = "Review your answers\n ● 動きは？\n   → フェードイン\n❯ 1. Submit answers\n  2. Cancel\n";
+        assert_eq!(infer_status(review_bare, 60_000), Status::Waiting);
         // 入力欄だけの待機画面は完了
         let agy_idle = "  OK\n────────\n>\n────────\n? for shortcuts      Gemini 3.8 Flash · high\n";
         assert_eq!(infer_status(agy_idle, 10_000), Status::Idle);

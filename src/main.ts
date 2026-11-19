@@ -274,6 +274,11 @@ const log = createTranscriptPanel({
     answeredAt = Date.now();
     writeKeys(attachedId, key);
   },
+  onBackground: (count) => {
+    if (headBackground === count) return;
+    headBackground = count;
+    render();
+  },
   answerText: (key, text) => {
     if (!attachedId) return;
     promptQuietUntil = Date.now() + PROMPT_QUIET_MS;
@@ -322,6 +327,8 @@ function writeKeys(id: string, data: string) {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // ターミナルで巻き戻して、戻した発言がエージェントの入力欄に残っているセッション（noticeRewind）
 const rewoundInTerminal = new Set<string>();
+// 表示中のセッションで、裏で動いているサブエージェントとシェルの数（見出しの状態に添える）
+let headBackground = 0;
 const write = (id: string, data: string) => invoke("write_session", { id, data });
 // 背の高いウィンドウでは巻き戻しの画面も高くなり、見出しが 45 行より上に出る
 async function screenText(id: string, lines = 45) {
@@ -690,6 +697,15 @@ function parseTabs(spans: Span[][]): PromptChoice["tabs"] {
   return undefined;
 }
 
+// 確認や選択肢を探す範囲。会話が短いうちは、Claude Code は画面の上から描いて下を空けたままにするので、
+// 末尾の空行を除いてから数える。図の付いた質問は図の高さだけ縦に長くなる（背の高い端末では 40 行を超える）
+const PROMPT_AREA_LINES = 80;
+function promptArea(lines: Span[][]) {
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1].some((s) => s.t.trim())) end--;
+  return lines.slice(Math.max(0, end - PROMPT_AREA_LINES), end);
+}
+
 // 入力待ちの間、画面から確認や選択肢を読み取って会話の表示にボタンで出す。
 // 画面は hook の知らせより遅れて描かれることがあるので、少しの間読み直し、それでも読み取れなければターミナルに切り替える
 let promptTimer = 0;
@@ -709,7 +725,7 @@ function watchPrompt(id: string) {
       log.showPrompt(null);
       return;
     }
-    const lines = await invoke<Span[][]>("session_tail", { id, lines: 40 }).catch(() => [] as Span[][]);
+    const lines = promptArea(await invoke<Span[][]>("session_tail", { id, lines: 160 }).catch(() => [] as Span[][]));
     if (attachedId !== id || sessions.get(id)?.status !== "waiting" || Date.now() < promptQuietUntil || termUntilRunning) return;
     const p = parsePrompt(lines.map((l) => l.map((x) => x.t).join("")));
     if (p) p.tabs = parseTabs(lines);
@@ -743,7 +759,7 @@ function cardPromptShown(id: string, conv: TranscriptView, lines: Span[][]): boo
   if (st.term) return false;
   const now = Date.now();
   if (now < st.quietUntil) return true;
-  const recent = lines.slice(-40);
+  const recent = promptArea(lines);
   const p = parsePrompt(recent.map((l) => l.map((x) => x.t).join("")));
   if (p) {
     p.tabs = parseTabs(recent);
@@ -1495,7 +1511,7 @@ function render() {
     $("head-cwd").textContent = active.cwd;
     const st = $("head-status");
     st.dataset.status = active.status;
-    st.textContent = statusLabel(active);
+    st.textContent = statusLabel(active) + (headBackground && active.status !== "exited" ? `・裏で ${headBackground} 件` : "");
   }
 }
 
