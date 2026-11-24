@@ -3154,6 +3154,7 @@ function renderSwitcher() {
       row.append(el("span", "switcher-dot"), el("span", "switcher-name", s.name), el("span", "switcher-status", STATUS_LABEL[s.status]), agentTag(s.agent));
       return row;
     }),
+    el("div", "switcher-hint", "Ctrl を離すと切り替え・Esc でやめる"),
   );
   switcher.hidden = false;
 }
