@@ -398,7 +398,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   // 出ている質問の選択肢に図が付いているか（showPrompt）
   let previewing = false;
   // 入力欄の上に出す、裏で動いているものの欄（renderBg）
-  const bgBox = el("div", "lg-bg");
+  const bgBox = el("div", "lg-bgjobs");
   bgBox.hidden = true;
   let bgCount = 0;
   let bgDoneTimer = 0;
@@ -882,7 +882,7 @@ export function createTranscriptView(o: TranscriptViewOptions) {
       if (!bgCount && was) {
         bgBox.dataset.key = "";
         bgBox.classList.add("done");
-        bgBox.replaceChildren(el("span", "lg-bg-mark"), el("span", "lg-bg-head", "裏の作業が終わりました"));
+        bgBox.replaceChildren(el("span", "lg-bgjobs-mark"), el("span", "lg-bgjobs-head", "裏の作業が終わりました"));
         bgDoneTimer = window.setTimeout(() => (bgBox.hidden = true), BG_DONE_MS);
         return;
       }
@@ -897,20 +897,20 @@ export function createTranscriptView(o: TranscriptViewOptions) {
     if (bgBox.dataset.key !== key) {
       bgBox.dataset.key = key;
       const rows = live.slice(0, BG_ROWS).map(({ g, i }) => {
-        const b = el("button", "lg-bg-row");
+        const b = el("button", "lg-bgjobs-row");
         b.type = "button";
         b.title = `${i.title}（押すと出力を表示）`;
-        const time = Object.assign(el("span", "lg-bg-time", i.time()), { tick: i.time });
-        b.append(el("span", "lg-bg-kind", GROUP_LABEL[g]), el("span", "lg-bg-label", i.label), time);
+        const time = Object.assign(el("span", "lg-bgjobs-time", i.time()), { tick: i.time });
+        b.append(el("span", "lg-bgjobs-kind", GROUP_LABEL[g]), el("span", "lg-bgjobs-label", i.label), time);
         b.onclick = i.pick;
         return b;
       });
-      const head = el("div", "lg-bg-headline");
-      head.append(el("span", "lg-bg-mark"), el("span", "lg-bg-head", `裏で動いている ${live.length} 件`));
-      if (live.length > BG_ROWS) head.append(el("span", "lg-bg-more", `ほか ${live.length - BG_ROWS} 件は上の一覧から`));
+      const head = el("div", "lg-bgjobs-headline");
+      head.append(el("span", "lg-bgjobs-mark"), el("span", "lg-bgjobs-head", `裏で動いている ${live.length} 件`));
+      if (live.length > BG_ROWS) head.append(el("span", "lg-bgjobs-more", `ほか ${live.length - BG_ROWS} 件は上の一覧から`));
       bgBox.replaceChildren(head, ...rows);
     }
-    for (const t of bgBox.querySelectorAll<HTMLElement & { tick?: () => string }>(".lg-bg-time")) t.textContent = t.tick?.() ?? "";
+    for (const t of bgBox.querySelectorAll<HTMLElement & { tick?: () => string }>(".lg-bgjobs-time")) t.textContent = t.tick?.() ?? "";
   }
 
   // 見ているサブエージェントやコマンドを止める。Claude Code の /tasks の画面を裏で操作する（main.ts の stopTask）

@@ -2945,6 +2945,53 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// ホイールがときどき効かなくなり、再起動するまで戻らない（会話の表示でもターミナルでも。クリックとキーは効く）。
+// 原因が分からないので、起きたときに Ctrl+Shift+F9 で状態を書き出してもらう。
+// ホイールの操作がページまで届いているか、届いているならどの要素が受け取り、止められていないかを見る
+const wheelDiag = { count: 0, at: 0, dy: 0, ctrl: false, target: "", prevented: false, moveAt: 0, x: 0, y: 0 };
+const elPath = (n: Element | null) => {
+  const parts: string[] = [];
+  for (let e = n; e && e !== document.body && parts.length < 6; e = e.parentElement) {
+    parts.unshift(e.tagName.toLowerCase() + (e.id ? `#${e.id}` : "") + [...e.classList].slice(0, 2).map((c) => `.${c}`).join(""));
+  }
+  return parts.join(" > ");
+};
+window.addEventListener("wheel", (e) => {
+  Object.assign(wheelDiag, { count: wheelDiag.count + 1, at: Date.now(), dy: e.deltaY, ctrl: e.ctrlKey, target: elPath(e.target as Element), prevented: false });
+}, { capture: true, passive: true });
+window.addEventListener("wheel", (e) => (wheelDiag.prevented = e.defaultPrevented), { passive: true });
+window.addEventListener("pointermove", (e) => Object.assign(wheelDiag, { moveAt: Date.now(), x: e.clientX, y: e.clientY }), { capture: true, passive: true });
+// ターミナルにフォーカスがあると xterm.js がキーを受け取って止めるので、先に拾う
+window.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey && e.shiftKey && e.key === "F9")) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const ago = (t: number) => (t ? `${((Date.now() - t) / 1000).toFixed(1)} 秒前` : "なし");
+  const under = document.elementFromPoint(wheelDiag.x, wheelDiag.y);
+  const scrollers: string[] = [];
+  for (let n = under; n; n = n.parentElement) {
+    const cs = getComputedStyle(n);
+    if (/(auto|scroll)/.test(cs.overflowY) || n.scrollHeight > n.clientHeight + 1) {
+      scrollers.push(`${elPath(n)} overflow-y=${cs.overflowY} scroll=${n.scrollTop}/${n.scrollHeight - n.clientHeight}`);
+    }
+  }
+  const report = [
+    `Tower ${navigator.userAgent}`,
+    `表示: ${view} / ターミナル${$("term-wrap").hidden ? "を隠している" : "を出している"} / フォーカス ${document.hasFocus()}`,
+    `ホイール: ${wheelDiag.count} 回、最後 ${ago(wheelDiag.at)}（deltaY=${wheelDiag.dy} ctrl=${wheelDiag.ctrl} 止められた=${wheelDiag.prevented}）`,
+    `ホイールの対象: ${wheelDiag.target}`,
+    `マウスの移動: 最後 ${ago(wheelDiag.moveAt)}（${wheelDiag.x}, ${wheelDiag.y}）`,
+    `マウスの下: ${elPath(under)}`,
+    `スクロールできる祖先:`,
+    ...scrollers.map((s) => `  ${s}`),
+    `フォーカス: ${elPath(document.activeElement)}`,
+    `開いているダイアログ: ${[...document.querySelectorAll("dialog[open]")].map(elPath).join(", ") || "なし"}`,
+    `body のクラス: ${document.body.className || "なし"}`,
+    `ターミナルのマウスの扱い: ${term.modes.mouseTrackingMode}`,
+  ].join("\n");
+  writeText(report).then(() => showToast("ホイールの診断をコピーしました", 3000), showError);
+}, true);
+
 // 選んでいる文字があれば、右クリックでコピーする（Windows Terminal と同じ）。
 // ターミナルでは Claude Code などがマウス操作を受け取るので、右クリックがエージェントに渡って選択が消え、
 // メニューの「コピー」では何も写せない。押した時点の選択を拾うので、あとで表示が書き換わっても写せる
