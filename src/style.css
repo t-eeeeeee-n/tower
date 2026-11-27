@@ -1213,15 +1213,17 @@ textarea:focus { border-color: var(--st-running); outline: none; }
 .c-compose .primary-btn.lg-send { width: 28px; height: 28px; }
 .log-compose .primary-btn.lg-send-stop { background: var(--danger); color: #fff; }
 /* 入力欄の左の「＋」と、そのメニュー */
-.lg-plus { flex: none; align-self: flex-end; width: 32px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--muted); font-size: 16px; line-height: 1; }
-.lg-plus:hover:not(:disabled) { background: var(--raise); color: var(--text); }
+/* 全角の「＋」はフォントによって中心がずれるので、線 2 本で描く */
+.lg-plus { --plus: 12px; flex: none; align-self: flex-end; width: 32px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--panel) no-repeat center / var(--plus) 2px linear-gradient(currentColor, currentColor); color: var(--muted); }
+.lg-plus::after { content: ""; display: block; width: 2px; height: var(--plus); margin: auto; background: currentColor; }
+.lg-plus:hover:not(:disabled) { background-color: var(--raise); color: var(--text); }
 .lg-plus:disabled { opacity: 0.45; }
 .lg-plus-menu { position: absolute; left: var(--log-gutter); bottom: calc(100% - 4px); z-index: 20; display: flex; flex-direction: column; min-width: 240px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 8px 24px rgb(0 0 0 / 0.35); }
 .lg-plus-menu[hidden] { display: none; }
 .lg-plus-item { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 6px 10px; border: 0; border-radius: 5px; background: transparent; color: var(--text); font-size: 13px; text-align: left; }
 .lg-plus-item:is(:hover, :focus-visible) { background: var(--raise-2); outline: none; }
 .lg-plus-hint { color: var(--faint); font: 11px var(--mono); }
-.c-compose .lg-plus { width: 28px; height: 28px; font-size: 14px; }
+.c-compose .lg-plus { --plus: 10px; width: 28px; height: 28px; }
 .c-compose .lg-plus-menu { left: 6px; min-width: 200px; }
 /* 書き直した発言の「‹ 1/2 ›」と、前の枝を見ている間の帯 */
 .lg-fork { display: inline-flex; align-items: center; margin-right: 4px; }

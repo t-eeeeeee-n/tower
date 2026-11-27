@@ -1352,7 +1352,6 @@ export function createTranscriptView(o: TranscriptViewOptions) {
   plusBtn.title = "添付やスキル、モデルを選ぶ";
   plusBtn.setAttribute("aria-label", plusBtn.title);
   plusBtn.setAttribute("aria-haspopup", "menu");
-  plusBtn.textContent = "＋";
   const plusMenu = el("div", "lg-plus-menu");
   plusMenu.hidden = true;
   plusMenu.setAttribute("role", "menu");
