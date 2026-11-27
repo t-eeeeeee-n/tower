@@ -1,6 +1,6 @@
 [package]
 name = "tower-app"
-version = "0.19.2"
+version = "0.19.3"
 description = "Coding agent sessions dashboard"
 edition = "2021"
 
